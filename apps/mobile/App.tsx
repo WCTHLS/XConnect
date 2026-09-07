@@ -287,7 +287,7 @@ export default function App() {
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="dark" />
       <ScrollView contentContainerStyle={styles.container}>
-        <Text style={styles.title}>ConfPresence ZERO</Text>
+        <Text style={styles.title}>XConnect</Text>
         <Text style={styles.subtitle}>Zero-hardware BLE mesh POC</Text>
 
         <Text style={styles.label}>Role</Text>
@@ -354,7 +354,7 @@ export default function App() {
                         style={styles.roomDeleteIcon}
                         onPress={() => handleRemoveRoom(r)}
                       >
-                        <Text style={[styles.roomDeleteText, isSelected && styles.roomDeleteTextSelected]}>âœ•</Text>
+                        <Text style={[styles.roomDeleteText, isSelected && styles.roomDeleteTextSelected]}>{"\u2715"}</Text>
                       </TouchableOpacity>
                     )}
                   </TouchableOpacity>

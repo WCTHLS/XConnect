@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "ConfPresence ZERO",
-    "slug": "confpresence-zero-poc",
+    "name": "XConnect",
+    "slug": "xconnect-poc",
     "version": "0.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",

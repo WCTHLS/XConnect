@@ -47,8 +47,8 @@ export function LogsModal({ visible, onClose }: LogsModalProps) {
 
     try {
       await Share.share({
-        title: "ConfPresence ZERO Diagnostics Log",
-        message: `--- ConfPresence ZERO Diagnostics Log ---\n${formatted}`
+        title: "XConnect Diagnostics Log",
+        message: `--- XConnect Diagnostics Log ---\n${formatted}`
       });
       setCopiedStatus(true);
       setTimeout(() => setCopiedStatus(false), 2500);
