@@ -1,4 +1,4 @@
-import type { LiveRoomState, PresenceBatch, RoomMemberInfo, WifiApObservation } from "@confpresence/shared";
+import { getAcousticTokenForRoom, type LiveRoomState, type PresenceBatch, type RoomMemberInfo, type UltrasonicObservation, type WifiApObservation } from "@confpresence/shared";
 
 const WINDOW_MS = 30_000; // 30 seconds sliding active window
 const MIN_RSSI = -85;     // 20+ meters coverage in open line-of-sight halls
@@ -22,8 +22,61 @@ type DeviceRecord = {
   wifiHistory?: Map<string, { ap: WifiApObservation; lastSeen: number }>;
   /** Most recent motion windows (true = still), newest last, capped at MOTION_SLIDING_WINDOW_SIZE. */
   motionWindowHistory?: boolean[];
+  /** Ultrasonic acoustic observation (if heard) */
+  ultrasonicObservation?: UltrasonicObservation;
+  ultrasonicObservedAt?: number;
+  /** Active ultrasonic token emitted (if presenter) */
+  ultrasonicEmittedToken?: string;
   updatedAt: number;
 };
+
+/**
+ * Checks whether an acoustic token heard by an attendee matches an expected presenter/room token.
+ * Normalizes case, removes hyphens/underscores/spaces, and resolves common room aliases (e.g., 'ROOM-A' == 'RM-A').
+ */
+export function isUltrasonicTokenMatch(heard?: string, expected?: string): boolean {
+  if (!heard || !expected) return false;
+
+  const normalize = (tok: string): string =>
+    tok
+      .trim()
+      .toUpperCase()
+      .replace(/[\s\-_]+/g, "");
+
+  const hNorm = normalize(heard);
+  const eNorm = normalize(expected);
+
+  if (hNorm === eNorm) return true;
+  if (hNorm.length >= 2 && (eNorm.includes(hNorm) || hNorm.includes(eNorm))) return true;
+
+  // Compare using standardized room tokenizer tokens
+  const hTokenNorm = normalize(getAcousticTokenForRoom(heard));
+  const eTokenNorm = normalize(getAcousticTokenForRoom(expected));
+  if (hTokenNorm === eTokenNorm) return true;
+  if (hTokenNorm === eNorm || eTokenNorm === hNorm) return true;
+
+  // Resolve standard room aliases (ROOM <-> RM, HALL <-> HL, WORKSHOP <-> WK, STAGE <-> ST)
+  const toAlias = (n: string): string =>
+    n
+      .replace(/^ROOM/g, "RM")
+      .replace(/^HALL/g, "HL")
+      .replace(/^WORKSHOP/g, "WK")
+      .replace(/^STAGE/g, "ST")
+      .replace(/^AUDITORIUM/g, "AUD");
+
+  const hAlias = toAlias(hNorm);
+  const eAlias = toAlias(eNorm);
+
+  if (hAlias === eAlias) return true;
+  if (hAlias.length >= 2 && (eAlias.includes(hAlias) || hAlias.includes(eAlias))) return true;
+
+  // Suffix code match (e.g., '1' for 'WK-1' or 'WORKSHOP-1')
+  const hSuffix = hAlias.replace(/^(RM|HL|WK|ST)/, "");
+  const eSuffix = eAlias.replace(/^(RM|HL|WK|ST)/, "");
+  if (hSuffix && eSuffix && hSuffix === eSuffix) return true;
+
+  return false;
+}
 
 export class PocInferenceEngine {
   private readonly devices = new Map<string, DeviceRecord>();
@@ -41,6 +94,9 @@ export class PocInferenceEngine {
       uwbTokenUpdatedAt: current?.uwbTokenUpdatedAt,
       wifiHistory: current?.wifiHistory ?? new Map(),
       motionWindowHistory: current?.motionWindowHistory,
+      ultrasonicObservation: current?.ultrasonicObservation,
+      ultrasonicObservedAt: current?.ultrasonicObservedAt,
+      ultrasonicEmittedToken: current?.ultrasonicEmittedToken,
       updatedAt: Date.now()
     });
   }
@@ -67,6 +123,9 @@ export class PocInferenceEngine {
       uwbTokenUpdatedAt: Date.now(),
       wifiHistory: current?.wifiHistory ?? new Map(),
       motionWindowHistory: current?.motionWindowHistory,
+      ultrasonicObservation: current?.ultrasonicObservation,
+      ultrasonicObservedAt: current?.ultrasonicObservedAt,
+      ultrasonicEmittedToken: current?.ultrasonicEmittedToken,
       updatedAt: Date.now()
     });
   }
@@ -104,6 +163,11 @@ export class PocInferenceEngine {
     // 3. Compile consolidated active Wi-Fi fingerprint
     const consolidatedWifi: WifiApObservation[] = [...wifiHistory.values()].map(e => e.ap);
 
+    // 4. Ingest Ultrasonic observations
+    const ultrasonicObservation = batch.ultrasonicObservation || current?.ultrasonicObservation;
+    const ultrasonicObservedAt = batch.ultrasonicObservation ? now : current?.ultrasonicObservedAt;
+    const ultrasonicEmittedToken = batch.ultrasonicEmittedToken || current?.ultrasonicEmittedToken;
+
     this.devices.set(batch.deviceId, {
       deviceId: batch.deviceId,
       displayName: batch.displayName || current?.displayName,
@@ -115,6 +179,9 @@ export class PocInferenceEngine {
       uwbTokenUpdatedAt: current?.uwbTokenUpdatedAt,
       wifiHistory,
       motionWindowHistory,
+      ultrasonicObservation,
+      ultrasonicObservedAt,
+      ultrasonicEmittedToken,
       updatedAt: now
     });
     this.batches.push(batch);
@@ -149,6 +216,9 @@ export class PocInferenceEngine {
       return b.updatedAt - a.updatedAt;
     })[0];
 
+    // Presenter active acoustic token for this room (e.g. 'RMA' or custom emitted token)
+    const expectedUltrasonicToken = (presenter.ultrasonicEmittedToken || presenter.roomId || roomId).trim().toUpperCase();
+
     // 3. Get all connected members in this presenter's physical graph cluster
     const clusterMembers = this.componentFrom(presenter.deviceId, graph);
 
@@ -156,7 +226,7 @@ export class PocInferenceEngine {
     const otherPresenters = [...this.devices.values()]
       .filter((d) => d.role === "presenter" && d.deviceId !== presenter.deviceId && d.roomId && now - d.updatedAt < WINDOW_MS * 2);
 
-    // 5. Build members list with Strongest-Link & Wi-Fi Affinity Room Assignment
+    // 5. Build members list with Strongest-Link, Wi-Fi Affinity & Ultrasonic Hard Gate
     const membersInfo: RoomMemberInfo[] = [];
     const estimatedMemberDeviceIds: string[] = [];
 
@@ -170,6 +240,16 @@ export class PocInferenceEngine {
           : undefined;
       const motionAnomalyFlag = this.computeMotionAnomalyFlag(rec);
 
+      // Layer 3: Ultrasonic Gate Check
+      // If attendee heard the room token within the last 45s
+      const heardToken = rec?.ultrasonicObservation?.token?.trim().toUpperCase();
+      const isAcousticMatch = Boolean(
+        heardToken &&
+        rec?.ultrasonicObservedAt &&
+        now - rec.ultrasonicObservedAt < 45_000 &&
+        isUltrasonicTokenMatch(heardToken, expectedUltrasonicToken)
+      );
+
       if (isPresenter) {
         estimatedMemberDeviceIds.push(memberId);
         membersInfo.push({
@@ -179,14 +259,15 @@ export class PocInferenceEngine {
           confidence: 1.0,
           wifiSimilarity: undefined,
           uwbDiscoveryToken,
-          motionAnomalyFlag
+          motionAnomalyFlag,
+          ultrasonicVerified: true
         });
         continue;
       }
 
       // Check Multi-Room Affinity: Is this attendee physically closer to another presenter?
       let assignedToThisRoom = true;
-      if (otherPresenters.length > 0) {
+      if (!isAcousticMatch && otherPresenters.length > 0) {
         const thisHop = this.shortestPathDistance(memberId, presenter.deviceId, graph);
         const thisWifi = (presenter.wifiFingerprint && rec?.wifiFingerprint)
           ? (this.computeWifiCosineSimilarity(rec.wifiFingerprint, presenter.wifiFingerprint) ?? 0.5)
@@ -210,13 +291,15 @@ export class PocInferenceEngine {
       if (!assignedToThisRoom) continue;
 
       let wifiSimilarity: number | undefined;
-      let confidence = 0.85;
+      let confidence = isAcousticMatch ? 0.98 : 0.85;
 
       if (presenter.wifiFingerprint?.length && rec?.wifiFingerprint?.length) {
         const sim = this.computeWifiCosineSimilarity(rec.wifiFingerprint, presenter.wifiFingerprint);
         if (sim !== undefined) {
           wifiSimilarity = Number(sim.toFixed(2));
-          if (sim >= 0.70) {
+          if (isAcousticMatch) {
+            confidence = 0.99; // Ultra-high audit grade proof
+          } else if (sim >= 0.70) {
             confidence = Number(Math.min(0.98, 0.85 + (sim - 0.70) * 0.43).toFixed(2));
           } else {
             confidence = Number(Math.max(0.70, 0.85 - (0.70 - sim) * 0.30).toFixed(2));
@@ -232,7 +315,8 @@ export class PocInferenceEngine {
         confidence,
         wifiSimilarity,
         uwbDiscoveryToken,
-        motionAnomalyFlag
+        motionAnomalyFlag,
+        ultrasonicVerified: isAcousticMatch
       });
     }
 
@@ -264,18 +348,32 @@ export class PocInferenceEngine {
     let bestRoomId: string | undefined;
     let highestAffinity = -1;
 
-    for (const presenter of activePresenters) {
-      const cluster = this.componentFrom(presenter.deviceId, graph);
-      if (cluster.has(deviceId)) {
-        const hop = this.shortestPathDistance(deviceId, presenter.deviceId, graph);
-        const wifi = (presenter.wifiFingerprint && currentDevice?.wifiFingerprint)
-          ? (this.computeWifiCosineSimilarity(currentDevice.wifiFingerprint, presenter.wifiFingerprint) ?? 0.5)
-          : 0.5;
-        const affinity = (1 / Math.max(1, hop)) * 0.5 + wifi * 0.5;
-
-        if (affinity > highestAffinity) {
-          highestAffinity = affinity;
+    // Check Acoustic Gate first: If attendee physically heard an active presenter's ultrasonic token
+    const heardToken = currentDevice?.ultrasonicObservation?.token?.trim().toUpperCase();
+    if (heardToken && currentDevice?.ultrasonicObservedAt && now - currentDevice.ultrasonicObservedAt < 45_000) {
+      for (const presenter of activePresenters) {
+        const expectedToken = (presenter.ultrasonicEmittedToken || presenter.roomId || "").trim().toUpperCase();
+        if (expectedToken && isUltrasonicTokenMatch(heardToken, expectedToken)) {
           bestRoomId = presenter.roomId;
+          break;
+        }
+      }
+    }
+
+    if (!bestRoomId) {
+      for (const presenter of activePresenters) {
+        const cluster = this.componentFrom(presenter.deviceId, graph);
+        if (cluster.has(deviceId)) {
+          const hop = this.shortestPathDistance(deviceId, presenter.deviceId, graph);
+          const wifi = (presenter.wifiFingerprint && currentDevice?.wifiFingerprint)
+            ? (this.computeWifiCosineSimilarity(currentDevice.wifiFingerprint, presenter.wifiFingerprint) ?? 0.5)
+            : 0.5;
+          const affinity = (1 / Math.max(1, hop)) * 0.5 + wifi * 0.5;
+
+          if (affinity > highestAffinity) {
+            highestAffinity = affinity;
+            bestRoomId = presenter.roomId;
+          }
         }
       }
     }

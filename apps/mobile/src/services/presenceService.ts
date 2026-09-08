@@ -1,9 +1,10 @@
 import { PermissionsAndroid, Platform } from "react-native";
 import { DeviceMotion, type DeviceMotionMeasurement } from "expo-sensors";
-import type { ParticipantRole, WifiApObservation } from "@confpresence/shared";
+import { getAcousticTokenForRoom, type ParticipantRole, type UltrasonicObservation, type WifiApObservation } from "@confpresence/shared";
 import { createRotatingId } from "./deviceIdentity";
 import { requireBleModule, subscribeToPeers, type NativePeer } from "../native/confPresenceBle";
 import { getWifiFingerprint } from "../native/confPresenceWifi";
+import { isUltrasonicAvailable, requireUltrasonicModule, subscribeToUltrasonicTokens } from "../native/confPresenceUltrasonic";
 import { AppLogger } from "./appLogger";
 
 const MOTION_SAMPLE_INTERVAL_MS = 200; // ~5Hz, coarse activity level, not gesture recognition
@@ -48,11 +49,31 @@ async function requestBlePermissions(): Promise<boolean> {
   }
 }
 
+async function requestAudioPermissions(): Promise<boolean> {
+  if (Platform.OS !== "android") return true;
+  try {
+    const granted = await PermissionsAndroid.request(
+      PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+      {
+        title: "Microphone Permission for Ultrasonic Gate",
+        message: "XConnect uses inaudible ultrasonic acoustic signals (18-20 kHz) to verify physical room presence.",
+        buttonPositive: "OK"
+      }
+    );
+    return granted === PermissionsAndroid.RESULTS.GRANTED;
+  } catch (err: any) {
+    AppLogger.log("WARN", `Audio permission check skipped: ${err?.message || err}`, "warn");
+    return false;
+  }
+}
+
 export type PresenceStatus = {
   state: "idle" | "starting" | "running" | "error";
   peerCount: number;
   wifiApCount?: number;
   rotatingId?: string;
+  ultrasonicState?: "broadcasting" | "listening" | "verified" | "idle";
+  ultrasonicToken?: string;
   error?: string;
 };
 
@@ -77,17 +98,40 @@ export class PresenceService {
   private lastKnownWifiFingerprint: WifiApObservation[] = [];
   private motionSamples: number[] = [];
   private motionSubscription?: { remove: () => void };
+  private latestUltrasonicObservation?: UltrasonicObservation;
+  private ultrasonicSubscription?: { remove: () => void };
+  private emittedUltrasonicToken?: string;
+  private currentUltrasonicState: "broadcasting" | "listening" | "verified" | "idle" = "idle";
+  private currentUltrasonicToken?: string;
+  private isRunning = false;
 
   constructor(private readonly onStatus: (status: PresenceStatus) => void) {}
 
+  private emitStatus(stateOverride?: "idle" | "starting" | "running" | "error", error?: string) {
+    this.onStatus({
+      state: stateOverride ?? (this.isRunning ? "running" : "idle"),
+      peerCount: this.activePeerCache.size,
+      wifiApCount: this.lastWifiApCount,
+      rotatingId: this.rotatingId,
+      ultrasonicState: this.currentUltrasonicState,
+      ultrasonicToken: this.currentUltrasonicToken,
+      error
+    });
+  }
+
   async start(config: StartConfig) {
     this.config = config;
+    this.isRunning = true;
     this.lastWifiApCount = 0;
     this.lastKnownWifiFingerprint = [];
     this.peers.clear();
     this.activePeerCache.clear();
     this.isAdvertising = false;
-    this.onStatus({ state: "starting", peerCount: 0, wifiApCount: 0 });
+    this.latestUltrasonicObservation = undefined;
+    this.emittedUltrasonicToken = undefined;
+    this.currentUltrasonicState = config.role === "presenter" ? "broadcasting" : "listening";
+    this.currentUltrasonicToken = undefined;
+    this.emitStatus("starting");
     AppLogger.log("INFO", `Starting presence service as ${config.role.toUpperCase()} (Device: ${config.deviceId.slice(-8)})`);
 
     const granted = await requestBlePermissions();
@@ -109,12 +153,45 @@ export class PresenceService {
 
     this.startMotionSensing();
 
+    // Start Ultrasonic Acoustic Gate subsystem
+    if (isUltrasonicAvailable()) {
+      if (config.role === "presenter") {
+        try {
+          const ultrasonic = requireUltrasonicModule();
+          this.emittedUltrasonicToken = getAcousticTokenForRoom(config.roomId);
+          this.currentUltrasonicToken = this.emittedUltrasonicToken;
+          this.currentUltrasonicState = "broadcasting";
+          await ultrasonic.startBroadcasting(this.emittedUltrasonicToken);
+          AppLogger.log("ULTRASONIC", `Broadcasting acoustic room token: '${this.emittedUltrasonicToken}' (18.5-19.5 kHz)`);
+        } catch (err: any) {
+          AppLogger.log("WARN", `Ultrasonic broadcaster init: ${err?.message || err}`, "warn");
+        }
+      } else {
+        try {
+          void requestAudioPermissions();
+          const ultrasonic = requireUltrasonicModule();
+          this.ultrasonicSubscription = subscribeToUltrasonicTokens((obs) => {
+            this.latestUltrasonicObservation = obs;
+            this.currentUltrasonicState = "verified";
+            this.currentUltrasonicToken = obs.token;
+            AppLogger.log("ULTRASONIC", `Heard acoustic token '${obs.token}' (${Math.round(obs.confidence * 100)}% conf) -> Hard Gate Verified!`);
+            this.emitStatus();
+          });
+          await ultrasonic.startListening();
+          AppLogger.log("ULTRASONIC", "Acoustic listener started (Goertzel 18.5-19.5 kHz)");
+        } catch (err: any) {
+          AppLogger.log("WARN", `Ultrasonic listener init: ${err?.message || err}`, "warn");
+        }
+      }
+    }
+
     this.timer = setInterval(() => void this.flushAndRotate(), BATCH_INTERVAL_MS);
-    this.onStatus({ state: "running", peerCount: 0, wifiApCount: 0, rotatingId: this.rotatingId });
+    this.emitStatus("running");
   }
 
   async stop() {
     AppLogger.log("INFO", "Stopping presence service...");
+    this.isRunning = false;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.subscription?.remove();
@@ -125,6 +202,24 @@ export class PresenceService {
     this.lastWifiApCount = 0;
     this.lastKnownWifiFingerprint = [];
     this.stopMotionSensing();
+
+    // Stop ultrasonic subsystem
+    this.ultrasonicSubscription?.remove();
+    this.ultrasonicSubscription = undefined;
+    this.latestUltrasonicObservation = undefined;
+    this.emittedUltrasonicToken = undefined;
+    this.currentUltrasonicState = "idle";
+    this.currentUltrasonicToken = undefined;
+
+    if (isUltrasonicAvailable()) {
+      try {
+        const ultrasonic = requireUltrasonicModule();
+        await Promise.all([ultrasonic.stopBroadcasting(), ultrasonic.stopListening()]);
+        AppLogger.log("ULTRASONIC", "Ultrasonic hardware stopped");
+      } catch {
+        // Ignore
+      }
+    }
 
     if (this.config) {
       this.leaveSession(this.config).catch(() => {});
@@ -137,7 +232,7 @@ export class PresenceService {
     } catch {
       // The app may be stopping before the native module is available.
     }
-    this.onStatus({ state: "idle", peerCount: 0, wifiApCount: 0 });
+    this.emitStatus("idle");
   }
 
   private cleanExpiredPeers(now: number = Date.now()) {
@@ -169,12 +264,7 @@ export class PresenceService {
       AppLogger.log("BLE", `Heard Peer: ${peerPrefix} (RSSI: ${peer.rssi} dBm)`);
     }
 
-    this.onStatus({
-      state: "running",
-      peerCount: this.activePeerCache.size,
-      wifiApCount: this.lastWifiApCount,
-      rotatingId: this.rotatingId
-    });
+    this.emitStatus();
   }
 
   private async rotateAndAdvertise(force = false) {
@@ -272,6 +362,8 @@ export class PresenceService {
       rotatingId: this.rotatingId,
       capturedAt: new Date().toISOString(),
       motionVariance,
+      ultrasonicObservation: this.latestUltrasonicObservation,
+      ultrasonicEmittedToken: this.emittedUltrasonicToken,
       peers: [...this.peers.values()],
       wifiFingerprint: wifiFingerprint.length > 0 ? wifiFingerprint : undefined
     };
@@ -298,12 +390,7 @@ export class PresenceService {
     // Only restart hardware transmitter if 60s token epoch has actually changed
     await this.rotateAndAdvertise(false);
 
-    this.onStatus({
-      state: "running",
-      peerCount: this.activePeerCache.size,
-      wifiApCount: this.lastWifiApCount,
-      rotatingId: this.rotatingId
-    });
+    this.emitStatus();
   }
 
   private async joinSession(config: StartConfig) {

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
+  Platform,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -288,7 +289,7 @@ export default function App() {
       <StatusBar style="dark" />
       <ScrollView contentContainerStyle={styles.container}>
         <Text style={styles.title}>XConnect</Text>
-        <Text style={styles.subtitle}>Zero-hardware BLE mesh POC</Text>
+        <Text style={styles.subtitle}>Zero-Hardware Quad-Sensor Presence Engine</Text>
 
         <Text style={styles.label}>Role</Text>
         <View style={styles.roleRow}>
@@ -413,25 +414,41 @@ export default function App() {
           </View>
           <View style={styles.statsGrid}>
             <View style={styles.statBox}>
-              <Text style={styles.statNumber}>
+              <Text style={styles.statNumber} numberOfLines={1}>
                 {running && roomMembers.length > 0
                   ? Math.max(0, roomMembers.length - 1)
                   : 0}
               </Text>
-              <Text style={styles.statLabel}>BLE Peers</Text>
+              <Text style={styles.statLabel} numberOfLines={1}>BLE Peers</Text>
             </View>
             <View style={styles.statBox}>
-              <Text style={styles.statNumber}>{status.wifiApCount ?? 0}</Text>
-              <Text style={styles.statLabel}>Wi-Fi APs</Text>
+              <Text style={styles.statNumber} numberOfLines={1}>{status.wifiApCount ?? 0}</Text>
+              <Text style={styles.statLabel} numberOfLines={1}>Wi-Fi APs</Text>
             </View>
             <View style={styles.statBox}>
-              <Text style={styles.statNumber}>{roomMembers.length}</Text>
-              <Text style={styles.statLabel}>
+              <Text
+                style={[styles.statNumber, { fontSize: 11 }]}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+              >
                 {role === "presenter"
-                  ? `In Room (${roomId})`
+                  ? (running ? "🔊 Pulse" : "🔊 Off")
+                  : status.ultrasonicState === "verified"
+                  ? "🔊 Gate OK"
+                  : running
+                  ? "🔊 Scan"
+                  : "🔊 Off"}
+              </Text>
+              <Text style={styles.statLabel} numberOfLines={1}>Ultrasonic</Text>
+            </View>
+            <View style={styles.statBox}>
+              <Text style={styles.statNumber} numberOfLines={1}>{roomMembers.length}</Text>
+              <Text style={styles.statLabel} numberOfLines={2}>
+                {role === "presenter"
+                  ? `Room (${roomId})`
                   : detectedRoom
-                  ? `In Room (${detectedRoom})`
-                  : "In Room (Searching...)"}
+                  ? `Room (${detectedRoom})`
+                  : "Room (...)"}
               </Text>
             </View>
           </View>
@@ -473,18 +490,20 @@ export default function App() {
                       </View>
                     </View>
 
-                    {/* Sensor Metrics Row: Confidence & Wi-Fi Match */}
+                    {/* Sensor Metrics Row: Coexistence badges for Confidence, BLE, Wi-Fi, Ultrasonic, & Motion */}
                     <View style={styles.tableRowMetrics}>
                       <Text style={styles.confText}>{"\u{1F3AF} " + confPct + "% Conf"}</Text>
+                      <Text style={styles.bleMeshText}>{"\u{1F4E1} BLE Active"}</Text>
                       {isHost ? (
                         <Text style={styles.wifiMatchText}>{"\u{1F4F6} Wi-Fi Anchor"}</Text>
                       ) : wifiPct != null ? (
                         <Text style={styles.wifiMatchText}>{"\u{1F4F6} Wi-Fi: " + wifiPct + "% match"}</Text>
-                      ) : (
-                        <Text style={styles.bleMeshText}>{"\u{1F4E1} BLE Proximity"}</Text>
+                      ) : null}
+                      {member.ultrasonicVerified && (
+                        <Text style={styles.ultrasonicMatchText}>{"\u{1F50A} Hard Gate Verified"}</Text>
                       )}
                       {member.motionAnomalyFlag && (
-                        <Text style={styles.anomalyText}>{"⚠️ Inactivity flag"}</Text>
+                        <Text style={styles.anomalyText}>{"\u26A0\uFE0F Inactivity flag"}</Text>
                       )}
                     </View>
                   </View>
@@ -507,6 +526,16 @@ export default function App() {
             </Text>
           )}
           <Text style={styles.cardText}>Current rotating token: {status.rotatingId ?? "Not active"}</Text>
+          {role === "presenter" && (
+            <Text style={styles.cardText}>
+              Ultrasonic Gate: {running ? `Broadcasting ('${roomId}')` : "Idle"}
+            </Text>
+          )}
+          {role === "attendee" && (
+            <Text style={styles.cardText}>
+              Ultrasonic Gate: {status.ultrasonicState === "verified" ? `Verified ('${status.ultrasonicToken}') ✅` : running ? "Listening (18.5-19.5 kHz)" : "Idle"}
+            </Text>
+          )}
           {status.error && <Text style={styles.error}>{status.error}</Text>}
         </View>
 
@@ -622,7 +651,7 @@ export default function App() {
         </View>
 
         <Text style={styles.note}>
-          Dual-sensor POC: the app uses low-latency BLE mesh peer discovery and ambient Wi-Fi access point fingerprinting for zero-hardware in-room presence estimation.
+          Quad-sensor presence: XConnect fuses low-latency BLE mesh peer discovery, ambient Wi-Fi access point fingerprinting, IMU motion dynamics, and ultrasonic acoustic boundary gates for zero-hardware in-room presence verification.
         </Text>
       </ScrollView>
 
@@ -643,10 +672,14 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: "#F7FAFB" },
-  container: { padding: 24, gap: 12 },
+  safeArea: {
+    flex: 1,
+    backgroundColor: "#F7FAFB",
+    paddingTop: Platform.OS === "android" ? 10 : 0
+  },
+  container: { padding: 20, gap: 12 },
   title: { fontSize: 28, fontWeight: "700", color: "#173A63" },
-  subtitle: { fontSize: 16, color: "#5D6873", marginBottom: 8 },
+  subtitle: { fontSize: 15, color: "#5D6873", marginBottom: 6, fontWeight: "600" },
   label: { color: "#173A63", fontWeight: "700", marginTop: 4 },
   input: {
     borderColor: "#C8D3DA",
@@ -698,7 +731,7 @@ const styles = StyleSheet.create({
   statsCard: {
     backgroundColor: "#E6F4F1",
     borderRadius: 10,
-    padding: 16,
+    padding: 14,
     borderWidth: 1,
     borderColor: "#B2DFDB",
     marginTop: 4
@@ -709,24 +742,34 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 10
   },
-  statsHeader: { fontSize: 16, fontWeight: "700", color: "#00695C" },
+  statsHeader: { fontSize: 15, fontWeight: "700", color: "#00695C" },
   refreshButton: {
     backgroundColor: "#FFFFFF",
-    paddingVertical: 5,
+    paddingVertical: 4,
     paddingHorizontal: 10,
     borderRadius: 6,
     borderWidth: 1,
     borderColor: "#80CBC4"
   },
   refreshButtonText: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: "700",
     color: "#00695C"
   },
-  statsGrid: { flexDirection: "row", justifyContent: "space-around", gap: 12 },
-  statBox: { alignItems: "center", backgroundColor: "#FFFFFF", padding: 12, borderRadius: 8, flex: 1, borderWidth: 1, borderColor: "#CFD8DC" },
-  statNumber: { fontSize: 26, fontWeight: "800", color: "#126D7A" },
-  statLabel: { fontSize: 12, color: "#5D6873", marginTop: 4, textAlign: "center", fontWeight: "600" },
+  statsGrid: { flexDirection: "row", justifyContent: "space-between", gap: 6 },
+  statBox: {
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#FFFFFF",
+    paddingVertical: 10,
+    paddingHorizontal: 4,
+    borderRadius: 8,
+    flex: 1,
+    borderWidth: 1,
+    borderColor: "#CFD8DC"
+  },
+  statNumber: { fontSize: 18, fontWeight: "800", color: "#126D7A" },
+  statLabel: { fontSize: 10.5, color: "#5D6873", marginTop: 4, textAlign: "center", fontWeight: "600" },
   
   // Table View Styles
   tableContainer: {
@@ -771,10 +814,11 @@ const styles = StyleSheet.create({
   },
   tableRowMetrics: {
     flexDirection: "row",
+    flexWrap: "wrap",
     alignItems: "center",
-    gap: 12,
-    marginTop: 2,
-    paddingTop: 4,
+    gap: 6,
+    marginTop: 4,
+    paddingTop: 6,
     borderTopWidth: 1,
     borderTopColor: "#F0F4F8"
   },
@@ -809,24 +853,49 @@ const styles = StyleSheet.create({
     color: "#455A64"
   },
   confText: {
-    fontSize: 11,
+    fontSize: 10.5,
     fontWeight: "700",
-    color: "#00695C"
-  },
-  wifiMatchText: {
-    fontSize: 11,
-    fontWeight: "700",
-    color: "#0D47A1"
+    color: "#00695C",
+    backgroundColor: "#E0F2F1",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4
   },
   bleMeshText: {
-    fontSize: 11,
+    fontSize: 10.5,
     fontWeight: "700",
-    color: "#4A148C"
+    color: "#4A148C",
+    backgroundColor: "#F3E5F5",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4
+  },
+  wifiMatchText: {
+    fontSize: 10.5,
+    fontWeight: "700",
+    color: "#0D47A1",
+    backgroundColor: "#E3F2FD",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4
+  },
+  ultrasonicMatchText: {
+    fontSize: 10.5,
+    color: "#004D40",
+    fontWeight: "700",
+    backgroundColor: "#B2DFDB",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4
   },
   anomalyText: {
-    fontSize: 11,
+    fontSize: 10.5,
     fontWeight: "700",
-    color: "#B45309"
+    color: "#B45309",
+    backgroundColor: "#FEF3C7",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4
   },
 
   card: { backgroundColor: "#FFFFFF", borderRadius: 10, padding: 16, gap: 6, borderWidth: 1, borderColor: "#D9E3E8" },

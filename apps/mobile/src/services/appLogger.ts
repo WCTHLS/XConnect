@@ -1,4 +1,4 @@
-export type LogCategory = "BLE" | "WIFI" | "MOTION" | "API" | "ROOM" | "INFO" | "WARN" | "ERROR";
+export type LogCategory = "BLE" | "WIFI" | "MOTION" | "ULTRASONIC" | "API" | "ROOM" | "INFO" | "WARN" | "ERROR";
 
 export type LogEntry = {
   id: string;
