@@ -3,6 +3,13 @@ import type { LiveRoomState, PresenceBatch, RoomMemberInfo, WifiApObservation } 
 const WINDOW_MS = 30_000; // 30 seconds sliding active window
 const MIN_RSSI = -85;     // 20+ meters coverage in open line-of-sight halls
 
+// Motion-anomaly thresholds. Not yet calibrated against real recorded sessions,
+// tune these once real data exists rather than trusting these starting values.
+const MOTION_STILL_VARIANCE_THRESHOLD = 0.02; // below this, a ~10s window counts as "still"
+const MOTION_SLIDING_WINDOW_SIZE = Number(process.env.MOTION_SLIDING_WINDOW_SIZE) || 3;
+const MOTION_MIN_WINDOWS_FOR_FLAG = Math.min(3, MOTION_SLIDING_WINDOW_SIZE); // batches needed before a flag is meaningful
+const MOTION_STILL_FRACTION_THRESHOLD = 0.9;  // fraction of the sliding window that must be still to flag
+
 type DeviceRecord = {
   deviceId: string;
   displayName?: string;
@@ -13,6 +20,8 @@ type DeviceRecord = {
   uwbDiscoveryToken?: string;
   uwbTokenUpdatedAt?: number;
   wifiHistory?: Map<string, { ap: WifiApObservation; lastSeen: number }>;
+  /** Most recent motion windows (true = still), newest last, capped at MOTION_SLIDING_WINDOW_SIZE. */
+  motionWindowHistory?: boolean[];
   updatedAt: number;
 };
 
@@ -31,6 +40,7 @@ export class PocInferenceEngine {
       uwbDiscoveryToken: current?.uwbDiscoveryToken,
       uwbTokenUpdatedAt: current?.uwbTokenUpdatedAt,
       wifiHistory: current?.wifiHistory ?? new Map(),
+      motionWindowHistory: current?.motionWindowHistory,
       updatedAt: Date.now()
     });
   }
@@ -56,6 +66,7 @@ export class PocInferenceEngine {
       uwbDiscoveryToken: discoveryTokenBase64,
       uwbTokenUpdatedAt: Date.now(),
       wifiHistory: current?.wifiHistory ?? new Map(),
+      motionWindowHistory: current?.motionWindowHistory,
       updatedAt: Date.now()
     });
   }
@@ -64,6 +75,16 @@ export class PocInferenceEngine {
     const current = this.devices.get(batch.deviceId);
     const wifiHistory = current?.wifiHistory ?? new Map<string, { ap: WifiApObservation; lastSeen: number }>();
     const now = Date.now();
+
+    // Track this device's most recent motion windows (still vs. moving), for the anomaly
+    // flag in roomState(). Only the last MOTION_SLIDING_WINDOW_SIZE batches are kept.
+    let motionWindowHistory = current?.motionWindowHistory ?? [];
+    if (batch.motionVariance !== undefined) {
+      motionWindowHistory = [...motionWindowHistory, batch.motionVariance < MOTION_STILL_VARIANCE_THRESHOLD];
+      if (motionWindowHistory.length > MOTION_SLIDING_WINDOW_SIZE) {
+        motionWindowHistory = motionWindowHistory.slice(-MOTION_SLIDING_WINDOW_SIZE);
+      }
+    }
 
     // 1. Ingest fresh Wi-Fi APs into 30s rolling fingerprint history
     if (batch.wifiFingerprint && batch.wifiFingerprint.length > 0) {
@@ -93,6 +114,7 @@ export class PocInferenceEngine {
       uwbDiscoveryToken: current?.uwbDiscoveryToken,
       uwbTokenUpdatedAt: current?.uwbTokenUpdatedAt,
       wifiHistory,
+      motionWindowHistory,
       updatedAt: now
     });
     this.batches.push(batch);
@@ -146,6 +168,7 @@ export class PocInferenceEngine {
         rec?.uwbDiscoveryToken && rec.uwbTokenUpdatedAt !== undefined && now - rec.uwbTokenUpdatedAt < WINDOW_MS
           ? rec.uwbDiscoveryToken
           : undefined;
+      const motionAnomalyFlag = this.computeMotionAnomalyFlag(rec);
 
       if (isPresenter) {
         estimatedMemberDeviceIds.push(memberId);
@@ -155,7 +178,8 @@ export class PocInferenceEngine {
           role: "presenter",
           confidence: 1.0,
           wifiSimilarity: undefined,
-          uwbDiscoveryToken
+          uwbDiscoveryToken,
+          motionAnomalyFlag
         });
         continue;
       }
@@ -207,7 +231,8 @@ export class PocInferenceEngine {
         role: rec?.role || "attendee",
         confidence,
         wifiSimilarity,
-        uwbDiscoveryToken
+        uwbDiscoveryToken,
+        motionAnomalyFlag
       });
     }
 
@@ -335,6 +360,19 @@ export class PocInferenceEngine {
       if (d.roomId) rooms.add(d.roomId);
     }
     return [...rooms];
+  }
+
+  /**
+   * True once a device has spent an anomalously still fraction of a long-enough
+   * session. A single still window is normal (someone sitting attentively); a
+   * device that is still for nearly its whole session looks more like a phone
+   * left on a desk. This is a flag for human review, never an automatic rejection.
+   */
+  private computeMotionAnomalyFlag(rec?: DeviceRecord): boolean {
+    const history = rec?.motionWindowHistory;
+    if (!history || history.length < MOTION_MIN_WINDOWS_FOR_FLAG) return false;
+    const fractionStill = history.filter(Boolean).length / history.length;
+    return fractionStill >= MOTION_STILL_FRACTION_THRESHOLD;
   }
 
   private shortestPathDistance(start: string, target: string, graph: Map<string, Set<string>>): number {

@@ -1,9 +1,12 @@
 import { PermissionsAndroid, Platform } from "react-native";
+import { DeviceMotion, type DeviceMotionMeasurement } from "expo-sensors";
 import type { ParticipantRole, WifiApObservation } from "@confpresence/shared";
 import { createRotatingId } from "./deviceIdentity";
 import { requireBleModule, subscribeToPeers, type NativePeer } from "../native/confPresenceBle";
 import { getWifiFingerprint } from "../native/confPresenceWifi";
 import { AppLogger } from "./appLogger";
+
+const MOTION_SAMPLE_INTERVAL_MS = 200; // ~5Hz, coarse activity level, not gesture recognition
 
 const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL ?? "https://confpresence-api.onrender.com";
 const BATCH_INTERVAL_MS = 10_000;
@@ -72,6 +75,8 @@ export class PresenceService {
   private isAdvertising = false;
   private lastWifiApCount = 0;
   private lastKnownWifiFingerprint: WifiApObservation[] = [];
+  private motionSamples: number[] = [];
+  private motionSubscription?: { remove: () => void };
 
   constructor(private readonly onStatus: (status: PresenceStatus) => void) {}
 
@@ -102,6 +107,8 @@ export class PresenceService {
     await ble.startScanning();
     AppLogger.log("BLE", "Native BLE scanner started successfully in Low-Latency mode");
 
+    this.startMotionSensing();
+
     this.timer = setInterval(() => void this.flushAndRotate(), BATCH_INTERVAL_MS);
     this.onStatus({ state: "running", peerCount: 0, wifiApCount: 0, rotatingId: this.rotatingId });
   }
@@ -117,6 +124,7 @@ export class PresenceService {
     this.isAdvertising = false;
     this.lastWifiApCount = 0;
     this.lastKnownWifiFingerprint = [];
+    this.stopMotionSensing();
 
     if (this.config) {
       this.leaveSession(this.config).catch(() => {});
@@ -192,6 +200,37 @@ export class PresenceService {
     }
   }
 
+  private startMotionSensing() {
+    this.motionSamples = [];
+    DeviceMotion.setUpdateInterval(MOTION_SAMPLE_INTERVAL_MS);
+    this.motionSubscription = DeviceMotion.addListener((data) => this.onMotionSample(data));
+  }
+
+  private stopMotionSensing() {
+    this.motionSubscription?.remove();
+    this.motionSubscription = undefined;
+    this.motionSamples = [];
+  }
+
+  private onMotionSample(data: DeviceMotionMeasurement) {
+    // .acceleration is gravity-compensated (unlike .accelerationIncludingGravity),
+    // so a phone lying still and upright both read near zero, not just upright.
+    const accel = data.acceleration;
+    if (!accel) return;
+    const magnitude = Math.sqrt(accel.x * accel.x + accel.y * accel.y + accel.z * accel.z);
+    this.motionSamples.push(magnitude);
+  }
+
+  /** Variance of accelerometer magnitude since the last flush. Drains the sample buffer. */
+  private computeMotionVariance(): number | undefined {
+    const samples = this.motionSamples;
+    this.motionSamples = [];
+    if (samples.length < 2) return undefined;
+    const mean = samples.reduce((sum, v) => sum + v, 0) / samples.length;
+    const variance = samples.reduce((sum, v) => sum + (v - mean) ** 2, 0) / samples.length;
+    return variance;
+  }
+
   private async flushAndRotate() {
     if (!this.config || !this.rotatingId) return;
     const targetUrl = this.config.apiUrl || DEFAULT_API_URL;
@@ -223,11 +262,16 @@ export class PresenceService {
       }
     }
 
+    const motionVariance = this.computeMotionVariance();
+    if (motionVariance !== undefined) {
+      AppLogger.log("MOTION", `Variance: ${motionVariance.toFixed(4)} (${motionVariance < 0.02 ? "still" : "moving"})`);
+    }
+
     const body = {
       ...this.config,
       rotatingId: this.rotatingId,
       capturedAt: new Date().toISOString(),
-      motionState: "unknown",
+      motionVariance,
       peers: [...this.peers.values()],
       wifiFingerprint: wifiFingerprint.length > 0 ? wifiFingerprint : undefined
     };

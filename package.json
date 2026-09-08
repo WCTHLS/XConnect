@@ -1,7 +1,6 @@
 {
   "name": "confpresence-zero-poc",
   "private": true,
-  "main": "apps/mobile/App.tsx",
   "packageManager": "pnpm@10.14.0",
   "scripts": {
     "dev:api": "pnpm --filter @confpresence/api dev",

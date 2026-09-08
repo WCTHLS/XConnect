@@ -483,6 +483,9 @@ export default function App() {
                       ) : (
                         <Text style={styles.bleMeshText}>{"\u{1F4E1} BLE Proximity"}</Text>
                       )}
+                      {member.motionAnomalyFlag && (
+                        <Text style={styles.anomalyText}>{"⚠️ Inactivity flag"}</Text>
+                      )}
                     </View>
                   </View>
                 );
@@ -819,6 +822,11 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "700",
     color: "#4A148C"
+  },
+  anomalyText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#B45309"
   },
 
   card: { backgroundColor: "#FFFFFF", borderRadius: 10, padding: 16, gap: 6, borderWidth: 1, borderColor: "#D9E3E8" },

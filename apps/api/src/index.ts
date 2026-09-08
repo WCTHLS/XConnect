@@ -43,6 +43,7 @@ const batchSchema = z.object({
   roomId: z.string().min(1).optional(),
   capturedAt: z.string().datetime(),
   motionState: z.enum(["moving", "still", "unknown"]).optional(),
+  motionVariance: z.number().min(0).optional(),
   peers: z.array(z.object({
     rotatingId: z.string().min(8),
     rssi: z.number().min(-127).max(20),
@@ -93,11 +94,12 @@ app.post("/api/observations", (request, response) => {
   
   engine.ingest(parsed.data);
   
-  const { displayName, deviceId, role, peers, wifiFingerprint, roomId } = parsed.data;
+  const { displayName, deviceId, role, peers, wifiFingerprint, roomId, motionVariance } = parsed.data;
   const name = displayName || deviceId.slice(-8);
   const apCount = wifiFingerprint?.length ?? 0;
-  
-  console.log(`📡 [SENSOR] ${name} (${role}): ${peers.length} BLE peers heard, ${apCount} Wi-Fi APs scanned -> Room: ${roomId || "auto"}`);
+  const motionLabel = motionVariance === undefined ? "n/a" : motionVariance.toFixed(4);
+
+  console.log(`📡 [SENSOR] ${name} (${role}): ${peers.length} BLE peers heard, ${apCount} Wi-Fi APs scanned, motion variance ${motionLabel} -> Room: ${roomId || "auto"}`);
   
   return response.status(202).json({ ok: true, peerCount: peers.length });
 });

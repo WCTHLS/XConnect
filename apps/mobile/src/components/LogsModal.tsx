@@ -65,6 +65,8 @@ export function LogsModal({ visible, onClose }: LogsModalProps) {
         return "#00E5FF";
       case "WIFI":
         return "#00E676";
+      case "MOTION":
+        return "#FF80AB";
       case "API":
         return "#B388FF";
       case "ROOM":
@@ -92,7 +94,7 @@ export function LogsModal({ visible, onClose }: LogsModalProps) {
 
         {/* Filter Tabs */}
         <View style={styles.filterRow}>
-          {(["ALL", "BLE", "WIFI", "API", "ROOM", "ERROR"] as FilterCategory[]).map((cat) => {
+          {(["ALL", "BLE", "WIFI", "MOTION", "API", "ROOM", "ERROR"] as FilterCategory[]).map((cat) => {
             const isSelected = filter === cat;
             return (
               <TouchableOpacity

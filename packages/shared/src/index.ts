@@ -24,6 +24,8 @@ export interface PresenceBatch {
   peers: PeerObservation[];
   wifiFingerprint?: WifiApObservation[];
   motionState?: "moving" | "still" | "unknown";
+  /** Variance of accelerometer magnitude over this batch's window (gravity-compensated). Low and sustained across a session suggests an unattended device. */
+  motionVariance?: number;
 }
 
 export interface JoinSessionRequest {
@@ -46,6 +48,7 @@ export interface RoomMemberInfo {
   confidence?: number;
   wifiSimilarity?: number;
   uwbDiscoveryToken?: string;
+  motionAnomalyFlag?: boolean;
 }
 
 export interface LiveRoomState {
