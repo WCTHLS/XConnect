@@ -1,6 +1,6 @@
-# ConfPresence ZERO 🎯
+# XConnect 🎯
 
-> **Zero-Hardware, Privacy-First Indoor Conference Presence & Room Clustering System**
+> **Zero-Hardware, Privacy-First Indoor XConnect Presence & Room Clustering System**
 
 [![Node.js](https://img.shields.io/badge/Node.js-v20+-green.svg)](https://nodejs.org/)
 [![pnpm](https://img.shields.io/badge/pnpm-v10+-orange.svg)](https://pnpm.io/)
@@ -14,7 +14,7 @@
 
 ## 📖 Overview
 
-**ConfPresence ZERO** is an Android-first, zero-infrastructure proof-of-concept system for indoor conference and meeting presence tracking. 
+**XConnect** is an Android-first, zero-infrastructure proof-of-concept system for indoor conference and meeting presence tracking. 
 
 Traditional attendance and location-tracking systems require expensive physical hardware beacons, NFC/RFID gates, QR-code queues, or intrusive GPS (which fails indoors). ConfPresence ZERO eliminates all external hardware by using **peer-to-peer mobile BLE mesh discovery**, **ambient Wi-Fi BSSID fingerprinting**, and **graph clustering / label propagation** on the backend.
 
