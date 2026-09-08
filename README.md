@@ -14,7 +14,7 @@
 
 ## 📖 Overview
 
-**XConnect** is an Android-first, zero-infrastructure proof-of-concept system for indoor conference and meeting presence tracking. 
+**XConnect** is an Android & IOS, zero-infrastructure proof-of-concept system for indoor conference and meeting presence tracking. 
 
 Traditional attendance and location-tracking systems require expensive physical hardware beacons, NFC/RFID gates, QR-code queues, or intrusive GPS (which fails indoors). ConfPresence ZERO eliminates all external hardware by using **peer-to-peer mobile BLE mesh discovery**, **ambient Wi-Fi BSSID fingerprinting**, and **graph clustering / label propagation** on the backend.
 
