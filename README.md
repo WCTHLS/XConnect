@@ -1,6 +1,6 @@
 # XConnect 🎯
 
-> **Zero-Hardware, Privacy-First Indoor XConnect Presence & Room Clustering System**
+> **Zero-Hardware, Privacy-First Indoor Conference Presence & Room Clustering System**
 
 [![Node.js](https://img.shields.io/badge/Node.js-v20+-green.svg)](https://nodejs.org/)
 [![pnpm](https://img.shields.io/badge/pnpm-v10+-orange.svg)](https://pnpm.io/)
