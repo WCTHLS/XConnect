@@ -3,6 +3,7 @@ import {
   Modal,
   SafeAreaView,
   ScrollView,
+  StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -170,7 +171,8 @@ export function LogsModal({ visible, onClose }: LogsModalProps) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#0D1117"
+    backgroundColor: "#0D1117",
+    paddingTop: Platform.OS === "android" ? StatusBar.currentHeight ?? 0 : 0
   },
   header: {
     flexDirection: "row",

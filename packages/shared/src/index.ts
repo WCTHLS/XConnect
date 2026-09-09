@@ -62,6 +62,8 @@ export interface RoomMemberInfo {
   motionAnomalyFlag?: boolean;
   /** True if this attendee's phone physically heard and verified the presenter's ultrasonic room token. */
   ultrasonicVerified?: boolean;
+  /** Milliseconds this device has been continuously assigned to this room. Resets if the device drops out of the room's cluster for longer than the grace period. */
+  durationMs?: number;
 }
 
 export interface LiveRoomState {

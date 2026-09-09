@@ -78,9 +78,14 @@ export function isUltrasonicTokenMatch(heard?: string, expected?: string): boole
   return false;
 }
 
+/** How long a device can drop out of a room's cluster before its stay is considered over. */
+const ROOM_MEMBERSHIP_GRACE_MS = 45_000;
+
 export class PocInferenceEngine {
   private readonly devices = new Map<string, DeviceRecord>();
   private readonly batches: PresenceBatch[] = [];
+  /** First-seen/last-seen timestamps per room membership, keyed by `${roomId}::${deviceId}`. */
+  private readonly roomMembership = new Map<string, { startedAt: number; lastSeenAt: number }>();
 
   join(deviceId: string, role: "presenter" | "attendee", roomId?: string, displayName?: string) {
     const current = this.devices.get(deviceId);
@@ -260,7 +265,8 @@ export class PocInferenceEngine {
           wifiSimilarity: undefined,
           uwbDiscoveryToken,
           motionAnomalyFlag,
-          ultrasonicVerified: true
+          ultrasonicVerified: true,
+          durationMs: this.trackRoomMembership(roomId, memberId, now)
         });
         continue;
       }
@@ -316,7 +322,8 @@ export class PocInferenceEngine {
         wifiSimilarity,
         uwbDiscoveryToken,
         motionAnomalyFlag,
-        ultrasonicVerified: isAcousticMatch
+        ultrasonicVerified: isAcousticMatch,
+        durationMs: this.trackRoomMembership(roomId, memberId, now)
       });
     }
 
@@ -473,6 +480,23 @@ export class PocInferenceEngine {
     return fractionStill >= MOTION_STILL_FRACTION_THRESHOLD;
   }
 
+  /**
+   * Records that `deviceId` is present in `roomId` at `now`, and returns how long it has
+   * been continuously present. A device that drops out of the room's cluster for longer
+   * than ROOM_MEMBERSHIP_GRACE_MS has its stay considered over; trim() reaps those entries,
+   * so the next sighting starts the clock over from zero.
+   */
+  private trackRoomMembership(roomId: string, deviceId: string, now: number): number {
+    const key = `${roomId}::${deviceId}`;
+    const existing = this.roomMembership.get(key);
+    if (existing) {
+      existing.lastSeenAt = now;
+      return now - existing.startedAt;
+    }
+    this.roomMembership.set(key, { startedAt: now, lastSeenAt: now });
+    return 0;
+  }
+
   private shortestPathDistance(start: string, target: string, graph: Map<string, Set<string>>): number {
     if (start === target) return 0;
     const visited = new Set<string>([start]);
@@ -566,6 +590,13 @@ export class PocInferenceEngine {
     for (const [id, record] of this.devices.entries()) {
       if (record.updatedAt < staleDeviceCutoff) {
         this.devices.delete(id);
+      }
+    }
+
+    const staleMembershipCutoff = Date.now() - ROOM_MEMBERSHIP_GRACE_MS;
+    for (const [key, membership] of this.roomMembership.entries()) {
+      if (membership.lastSeenAt < staleMembershipCutoff) {
+        this.roomMembership.delete(key);
       }
     }
   }

@@ -140,6 +140,15 @@ app.get("/api/devices/:deviceId/live", (request, response) => {
   return response.json(engine.deviceRoomState(sessionId, request.params.deviceId));
 });
 
+app.get("/api/admin/overview", (request, response) => {
+  const sessionId = String(request.query.sessionId ?? "poc-session");
+  const rooms = engine
+    .listRooms(sessionId)
+    .map((roomId) => engine.roomState(sessionId, roomId))
+    .filter((state) => state.members && state.members.length > 0);
+  return response.json({ rooms });
+});
+
 app.listen(port, "0.0.0.0", () => {
   console.log(`🚀 ConfPresence POC API listening on http://0.0.0.0:${port}`);
   console.log(`✨ Live Streaming Logs initialized. All connected device events will appear below.`);

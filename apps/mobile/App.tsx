@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
+  KeyboardAvoidingView,
   Platform,
   SafeAreaView,
   ScrollView,
@@ -19,11 +20,12 @@ import { PresenceService, type PresenceStatus } from "./src/services/presenceSer
 import { getOrCreateDeviceId } from "./src/services/deviceIdentity";
 import { AppLogger } from "./src/services/appLogger";
 import { LogsModal } from "./src/components/LogsModal";
+import { AdminScreen } from "./src/screens/AdminScreen";
 
 const DEFAULT_SESSION = "poc-session";
 const DEFAULT_ROOMS = ["room-a", "room-b", "auditorium"];
 const CLOUD_API_URL = "https://confpresence-api.onrender.com";
-const LOCAL_API_URL = "http://192.168.0.195:3000";
+const LOCAL_API_URL = "http://192.168.0.201:3000";
 const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL ?? CLOUD_API_URL;
 
 export default function App() {
@@ -48,6 +50,7 @@ export default function App() {
   const [isAutoDetecting, setIsAutoDetecting] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [logCount, setLogCount] = useState(0);
+  const [view, setView] = useState<"main" | "admin">("main");
 
   useEffect(() => {
     return AppLogger.subscribe((logs) => {
@@ -284,10 +287,19 @@ export default function App() {
 
   const activeRoomTitle = role === "presenter" ? roomId : detectedRoom ? detectedRoom : "Searching...";
 
+  if (view === "admin") {
+    return <AdminScreen serverUrl={serverUrl} sessionId={sessionId} onBack={() => setView("main")} />;
+  }
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="dark" />
-      <ScrollView contentContainerStyle={styles.container}>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        keyboardVerticalOffset={Platform.OS === "android" ? 24 : 0}
+      >
+      <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
         <Text style={styles.title}>XConnect</Text>
         <Text style={styles.subtitle}>Zero-Hardware Quad-Sensor Presence Engine</Text>
 
@@ -654,6 +666,7 @@ export default function App() {
           Quad-sensor presence: XConnect fuses low-latency BLE mesh peer discovery, ambient Wi-Fi access point fingerprinting, IMU motion dynamics, and ultrasonic acoustic boundary gates for zero-hardware in-room presence verification.
         </Text>
       </ScrollView>
+      </KeyboardAvoidingView>
 
       {/* Floating Diagnostics Log Button */}
       <TouchableOpacity
@@ -663,6 +676,16 @@ export default function App() {
       >
         <Text style={styles.floatingLogIcon}>{"\u{1F4DC}"}</Text>
         <Text style={styles.floatingLogText}>Logs {logCount > 0 ? `(${logCount})` : ""}</Text>
+      </TouchableOpacity>
+
+      {/* Floating Admin Button */}
+      <TouchableOpacity
+        style={styles.floatingAdminBtn}
+        onPress={() => setView("admin")}
+        activeOpacity={0.8}
+      >
+        <Text style={styles.floatingAdminIcon}>{"\u{1F6E0}"}</Text>
+        <Text style={styles.floatingAdminText}>Admin</Text>
       </TouchableOpacity>
 
       {/* Diagnostics Logs Modal Popup */}
@@ -998,6 +1021,34 @@ const styles = StyleSheet.create({
   },
   floatingLogText: {
     color: "#F0F6FC",
+    fontSize: 12,
+    fontWeight: "800"
+  },
+  // Floating Admin Button
+  floatingAdminBtn: {
+    position: "absolute",
+    bottom: 78,
+    right: 18,
+    backgroundColor: "#173A63",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 24,
+    borderWidth: 1.5,
+    borderColor: "#80CBC4",
+    elevation: 8,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 5
+  },
+  floatingAdminIcon: {
+    fontSize: 14
+  },
+  floatingAdminText: {
+    color: "#FFFFFF",
     fontSize: 12,
     fontWeight: "800"
   }
