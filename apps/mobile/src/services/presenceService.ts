@@ -9,7 +9,7 @@ import { AppLogger } from "./appLogger";
 
 const MOTION_SAMPLE_INTERVAL_MS = 200; // ~5Hz, coarse activity level, not gesture recognition
 
-const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL ?? "https://confpresence-api.onrender.com";
+const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL ?? "https://xconnect-api.onrender.com";
 const BATCH_INTERVAL_MS = 10_000;
 // How long a heard ultrasonic token stays valid before we treat it as stale and stop
 // resending it. Must be well under the server's freshness window (45s) so the gate can
