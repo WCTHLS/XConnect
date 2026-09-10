@@ -9,7 +9,7 @@ import { AppLogger } from "./appLogger";
 
 const MOTION_SAMPLE_INTERVAL_MS = 200; // ~5Hz, coarse activity level, not gesture recognition
 
-const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL ?? "https://confpresence-api.onrender.com";
+const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL ?? "https://xconnect-api.onrender.com";
 const BATCH_INTERVAL_MS = 10_000;
 
 async function requestBlePermissions(): Promise<boolean> {

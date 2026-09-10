@@ -24,7 +24,7 @@ import { AdminScreen } from "./src/screens/AdminScreen";
 
 const DEFAULT_SESSION = "poc-session";
 const DEFAULT_ROOMS = ["room-a", "room-b", "auditorium"];
-const CLOUD_API_URL = "https://confpresence-api.onrender.com";
+const CLOUD_API_URL = "https://xconnect-api.onrender.com";
 const LOCAL_API_URL = "http://192.168.0.201:3000";
 const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL ?? CLOUD_API_URL;
 
@@ -305,8 +305,8 @@ export default function App() {
 
         <Text style={styles.label}>Role</Text>
         <View style={styles.roleRow}>
-          <Button title="Attendee" onPress={() => setRole("attendee")} color={role === "attendee" ? "#126D7A" : "#75808A"} />
-          <Button title="Presenter" onPress={() => setRole("presenter")} color={role === "presenter" ? "#126D7A" : "#75808A"} />
+          <Button title="Attendee" onPress={() => setRole("attendee")} color={role === "attendee" ? "#126D7A" : "#75808A"} disabled={running} />
+          <Button title="Presenter" onPress={() => setRole("presenter")} color={role === "presenter" ? "#126D7A" : "#75808A"} disabled={running} />
         </View>
 
         <Text style={styles.label}>Your name (optional)</Text>
@@ -615,7 +615,7 @@ export default function App() {
                   setServerUrl(val);
                   checkHealth(val);
                 }}
-                placeholder="https://confpresence-api.onrender.com"
+                placeholder="https://xconnect-api.onrender.com"
                 placeholderTextColor="#8C9BA5"
                 style={[styles.serverInput, serverEnv !== "custom" && { backgroundColor: "#F5F7FA" }]}
                 autoCapitalize="none"
