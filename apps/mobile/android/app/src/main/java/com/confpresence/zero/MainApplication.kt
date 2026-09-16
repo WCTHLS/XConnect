@@ -5,6 +5,7 @@ import android.content.res.Configuration
 
 import com.confpresence.zero.ble.ConfPresenceBlePackage
 import com.confpresence.zero.wifi.ConfPresenceWifiPackage
+import com.confpresence.zero.ultrasonic.ConfPresenceUltrasonicPackage
 
 import com.facebook.react.PackageList
 import com.facebook.react.ReactApplication
@@ -25,13 +26,14 @@ class MainApplication : Application(), ReactApplication {
           PackageList(this).packages.apply {
             add(ConfPresenceBlePackage())
             add(ConfPresenceWifiPackage())
+            add(ConfPresenceUltrasonicPackage())
           }
 
       override fun getJSMainModuleName(): String = "App"
 
       override fun getBundleAssetName(): String = "index.android.bundle"
 
-      override fun getUseDeveloperSupport(): Boolean = false
+      override fun getUseDeveloperSupport(): Boolean = BuildConfig.DEBUG
 
       override val isNewArchEnabled: Boolean = BuildConfig.IS_NEW_ARCHITECTURE_ENABLED
   }

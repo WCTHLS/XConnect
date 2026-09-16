@@ -3,6 +3,7 @@ import {
   Modal,
   SafeAreaView,
   ScrollView,
+  StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -65,6 +66,10 @@ export function LogsModal({ visible, onClose }: LogsModalProps) {
         return "#00E5FF";
       case "WIFI":
         return "#00E676";
+      case "ULTRASONIC":
+        return "#64FFDA";
+      case "MOTION":
+        return "#FF80AB";
       case "API":
         return "#B388FF";
       case "ROOM":
@@ -92,7 +97,7 @@ export function LogsModal({ visible, onClose }: LogsModalProps) {
 
         {/* Filter Tabs */}
         <View style={styles.filterRow}>
-          {(["ALL", "BLE", "WIFI", "API", "ROOM", "ERROR"] as FilterCategory[]).map((cat) => {
+          {(["ALL", "BLE", "WIFI", "ULTRASONIC", "MOTION", "API", "ROOM", "ERROR"] as FilterCategory[]).map((cat) => {
             const isSelected = filter === cat;
             return (
               <TouchableOpacity
@@ -166,7 +171,8 @@ export function LogsModal({ visible, onClose }: LogsModalProps) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#0D1117"
+    backgroundColor: "#0D1117",
+    paddingTop: Platform.OS === "android" ? StatusBar.currentHeight ?? 0 : 0
   },
   header: {
     flexDirection: "row",

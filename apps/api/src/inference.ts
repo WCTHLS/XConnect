@@ -1,7 +1,14 @@
-import type { LiveRoomState, PresenceBatch, RoomMemberInfo, WifiApObservation } from "@confpresence/shared";
+import { getAcousticTokenForRoom, type LiveRoomState, type PresenceBatch, type RoomMemberInfo, type UltrasonicObservation, type WifiApObservation } from "@confpresence/shared";
 
 const WINDOW_MS = 30_000; // 30 seconds sliding active window
 const MIN_RSSI = -85;     // 20+ meters coverage in open line-of-sight halls
+
+// Motion-anomaly thresholds. Not yet calibrated against real recorded sessions,
+// tune these once real data exists rather than trusting these starting values.
+const MOTION_STILL_VARIANCE_THRESHOLD = 0.02; // below this, a ~10s window counts as "still"
+const MOTION_SLIDING_WINDOW_SIZE = Number(process.env.MOTION_SLIDING_WINDOW_SIZE) || 3;
+const MOTION_MIN_WINDOWS_FOR_FLAG = Math.min(3, MOTION_SLIDING_WINDOW_SIZE); // batches needed before a flag is meaningful
+const MOTION_STILL_FRACTION_THRESHOLD = 0.9;  // fraction of the sliding window that must be still to flag
 
 type DeviceRecord = {
   deviceId: string;
@@ -13,12 +20,72 @@ type DeviceRecord = {
   uwbDiscoveryToken?: string;
   uwbTokenUpdatedAt?: number;
   wifiHistory?: Map<string, { ap: WifiApObservation; lastSeen: number }>;
+  /** Most recent motion windows (true = still), newest last, capped at MOTION_SLIDING_WINDOW_SIZE. */
+  motionWindowHistory?: boolean[];
+  /** Ultrasonic acoustic observation (if heard) */
+  ultrasonicObservation?: UltrasonicObservation;
+  ultrasonicObservedAt?: number;
+  /** Active ultrasonic token emitted (if presenter) */
+  ultrasonicEmittedToken?: string;
   updatedAt: number;
 };
+
+/**
+ * Checks whether an acoustic token heard by an attendee matches an expected presenter/room token.
+ * Normalizes case, removes hyphens/underscores/spaces, and resolves common room aliases (e.g., 'ROOM-A' == 'RM-A').
+ */
+export function isUltrasonicTokenMatch(heard?: string, expected?: string): boolean {
+  if (!heard || !expected) return false;
+
+  const normalize = (tok: string): string =>
+    tok
+      .trim()
+      .toUpperCase()
+      .replace(/[\s\-_]+/g, "");
+
+  const hNorm = normalize(heard);
+  const eNorm = normalize(expected);
+
+  if (hNorm === eNorm) return true;
+  if (hNorm.length >= 2 && (eNorm.includes(hNorm) || hNorm.includes(eNorm))) return true;
+
+  // Compare using standardized room tokenizer tokens
+  const hTokenNorm = normalize(getAcousticTokenForRoom(heard));
+  const eTokenNorm = normalize(getAcousticTokenForRoom(expected));
+  if (hTokenNorm === eTokenNorm) return true;
+  if (hTokenNorm === eNorm || eTokenNorm === hNorm) return true;
+
+  // Resolve standard room aliases (ROOM <-> RM, HALL <-> HL, WORKSHOP <-> WK, STAGE <-> ST)
+  const toAlias = (n: string): string =>
+    n
+      .replace(/^ROOM/g, "RM")
+      .replace(/^HALL/g, "HL")
+      .replace(/^WORKSHOP/g, "WK")
+      .replace(/^STAGE/g, "ST")
+      .replace(/^AUDITORIUM/g, "AUD");
+
+  const hAlias = toAlias(hNorm);
+  const eAlias = toAlias(eNorm);
+
+  if (hAlias === eAlias) return true;
+  if (hAlias.length >= 2 && (eAlias.includes(hAlias) || hAlias.includes(eAlias))) return true;
+
+  // Suffix code match (e.g., '1' for 'WK-1' or 'WORKSHOP-1')
+  const hSuffix = hAlias.replace(/^(RM|HL|WK|ST)/, "");
+  const eSuffix = eAlias.replace(/^(RM|HL|WK|ST)/, "");
+  if (hSuffix && eSuffix && hSuffix === eSuffix) return true;
+
+  return false;
+}
+
+/** How long a device can drop out of a room's cluster before its stay is considered over. */
+const ROOM_MEMBERSHIP_GRACE_MS = 45_000;
 
 export class PocInferenceEngine {
   private readonly devices = new Map<string, DeviceRecord>();
   private readonly batches: PresenceBatch[] = [];
+  /** First-seen/last-seen timestamps per room membership, keyed by `${roomId}::${deviceId}`. */
+  private readonly roomMembership = new Map<string, { startedAt: number; lastSeenAt: number }>();
 
   join(deviceId: string, role: "presenter" | "attendee", roomId?: string, displayName?: string) {
     const current = this.devices.get(deviceId);
@@ -31,6 +98,10 @@ export class PocInferenceEngine {
       uwbDiscoveryToken: current?.uwbDiscoveryToken,
       uwbTokenUpdatedAt: current?.uwbTokenUpdatedAt,
       wifiHistory: current?.wifiHistory ?? new Map(),
+      motionWindowHistory: current?.motionWindowHistory,
+      ultrasonicObservation: current?.ultrasonicObservation,
+      ultrasonicObservedAt: current?.ultrasonicObservedAt,
+      ultrasonicEmittedToken: current?.ultrasonicEmittedToken,
       updatedAt: Date.now()
     });
   }
@@ -56,6 +127,10 @@ export class PocInferenceEngine {
       uwbDiscoveryToken: discoveryTokenBase64,
       uwbTokenUpdatedAt: Date.now(),
       wifiHistory: current?.wifiHistory ?? new Map(),
+      motionWindowHistory: current?.motionWindowHistory,
+      ultrasonicObservation: current?.ultrasonicObservation,
+      ultrasonicObservedAt: current?.ultrasonicObservedAt,
+      ultrasonicEmittedToken: current?.ultrasonicEmittedToken,
       updatedAt: Date.now()
     });
   }
@@ -64,6 +139,16 @@ export class PocInferenceEngine {
     const current = this.devices.get(batch.deviceId);
     const wifiHistory = current?.wifiHistory ?? new Map<string, { ap: WifiApObservation; lastSeen: number }>();
     const now = Date.now();
+
+    // Track this device's most recent motion windows (still vs. moving), for the anomaly
+    // flag in roomState(). Only the last MOTION_SLIDING_WINDOW_SIZE batches are kept.
+    let motionWindowHistory = current?.motionWindowHistory ?? [];
+    if (batch.motionVariance !== undefined) {
+      motionWindowHistory = [...motionWindowHistory, batch.motionVariance < MOTION_STILL_VARIANCE_THRESHOLD];
+      if (motionWindowHistory.length > MOTION_SLIDING_WINDOW_SIZE) {
+        motionWindowHistory = motionWindowHistory.slice(-MOTION_SLIDING_WINDOW_SIZE);
+      }
+    }
 
     // 1. Ingest fresh Wi-Fi APs into 30s rolling fingerprint history
     if (batch.wifiFingerprint && batch.wifiFingerprint.length > 0) {
@@ -83,6 +168,11 @@ export class PocInferenceEngine {
     // 3. Compile consolidated active Wi-Fi fingerprint
     const consolidatedWifi: WifiApObservation[] = [...wifiHistory.values()].map(e => e.ap);
 
+    // 4. Ingest Ultrasonic observations
+    const ultrasonicObservation = batch.ultrasonicObservation || current?.ultrasonicObservation;
+    const ultrasonicObservedAt = batch.ultrasonicObservation ? now : current?.ultrasonicObservedAt;
+    const ultrasonicEmittedToken = batch.ultrasonicEmittedToken || current?.ultrasonicEmittedToken;
+
     this.devices.set(batch.deviceId, {
       deviceId: batch.deviceId,
       displayName: batch.displayName || current?.displayName,
@@ -93,6 +183,10 @@ export class PocInferenceEngine {
       uwbDiscoveryToken: current?.uwbDiscoveryToken,
       uwbTokenUpdatedAt: current?.uwbTokenUpdatedAt,
       wifiHistory,
+      motionWindowHistory,
+      ultrasonicObservation,
+      ultrasonicObservedAt,
+      ultrasonicEmittedToken,
       updatedAt: now
     });
     this.batches.push(batch);
@@ -127,6 +221,9 @@ export class PocInferenceEngine {
       return b.updatedAt - a.updatedAt;
     })[0];
 
+    // Presenter active acoustic token for this room (e.g. 'RMA' or custom emitted token)
+    const expectedUltrasonicToken = (presenter.ultrasonicEmittedToken || presenter.roomId || roomId).trim().toUpperCase();
+
     // 3. Get all connected members in this presenter's physical graph cluster
     const clusterMembers = this.componentFrom(presenter.deviceId, graph);
 
@@ -134,7 +231,7 @@ export class PocInferenceEngine {
     const otherPresenters = [...this.devices.values()]
       .filter((d) => d.role === "presenter" && d.deviceId !== presenter.deviceId && d.roomId && now - d.updatedAt < WINDOW_MS * 2);
 
-    // 5. Build members list with Strongest-Link & Wi-Fi Affinity Room Assignment
+    // 5. Build members list with Strongest-Link, Wi-Fi Affinity & Ultrasonic Hard Gate
     const membersInfo: RoomMemberInfo[] = [];
     const estimatedMemberDeviceIds: string[] = [];
 
@@ -146,6 +243,17 @@ export class PocInferenceEngine {
         rec?.uwbDiscoveryToken && rec.uwbTokenUpdatedAt !== undefined && now - rec.uwbTokenUpdatedAt < WINDOW_MS
           ? rec.uwbDiscoveryToken
           : undefined;
+      const motionAnomalyFlag = this.computeMotionAnomalyFlag(rec);
+
+      // Layer 3: Ultrasonic Gate Check
+      // If attendee heard the room token within the last 45s
+      const heardToken = rec?.ultrasonicObservation?.token?.trim().toUpperCase();
+      const isAcousticMatch = Boolean(
+        heardToken &&
+        rec?.ultrasonicObservedAt &&
+        now - rec.ultrasonicObservedAt < 45_000 &&
+        isUltrasonicTokenMatch(heardToken, expectedUltrasonicToken)
+      );
 
       if (isPresenter) {
         estimatedMemberDeviceIds.push(memberId);
@@ -155,14 +263,17 @@ export class PocInferenceEngine {
           role: "presenter",
           confidence: 1.0,
           wifiSimilarity: undefined,
-          uwbDiscoveryToken
+          uwbDiscoveryToken,
+          motionAnomalyFlag,
+          ultrasonicVerified: true,
+          durationMs: this.trackRoomMembership(roomId, memberId, now)
         });
         continue;
       }
 
       // Check Multi-Room Affinity: Is this attendee physically closer to another presenter?
       let assignedToThisRoom = true;
-      if (otherPresenters.length > 0) {
+      if (!isAcousticMatch && otherPresenters.length > 0) {
         const thisHop = this.shortestPathDistance(memberId, presenter.deviceId, graph);
         const thisWifi = (presenter.wifiFingerprint && rec?.wifiFingerprint)
           ? (this.computeWifiCosineSimilarity(rec.wifiFingerprint, presenter.wifiFingerprint) ?? 0.5)
@@ -186,13 +297,15 @@ export class PocInferenceEngine {
       if (!assignedToThisRoom) continue;
 
       let wifiSimilarity: number | undefined;
-      let confidence = 0.85;
+      let confidence = isAcousticMatch ? 0.98 : 0.85;
 
       if (presenter.wifiFingerprint?.length && rec?.wifiFingerprint?.length) {
         const sim = this.computeWifiCosineSimilarity(rec.wifiFingerprint, presenter.wifiFingerprint);
         if (sim !== undefined) {
           wifiSimilarity = Number(sim.toFixed(2));
-          if (sim >= 0.70) {
+          if (isAcousticMatch) {
+            confidence = 0.99; // Ultra-high audit grade proof
+          } else if (sim >= 0.70) {
             confidence = Number(Math.min(0.98, 0.85 + (sim - 0.70) * 0.43).toFixed(2));
           } else {
             confidence = Number(Math.max(0.70, 0.85 - (0.70 - sim) * 0.30).toFixed(2));
@@ -207,7 +320,10 @@ export class PocInferenceEngine {
         role: rec?.role || "attendee",
         confidence,
         wifiSimilarity,
-        uwbDiscoveryToken
+        uwbDiscoveryToken,
+        motionAnomalyFlag,
+        ultrasonicVerified: isAcousticMatch,
+        durationMs: this.trackRoomMembership(roomId, memberId, now)
       });
     }
 
@@ -239,18 +355,32 @@ export class PocInferenceEngine {
     let bestRoomId: string | undefined;
     let highestAffinity = -1;
 
-    for (const presenter of activePresenters) {
-      const cluster = this.componentFrom(presenter.deviceId, graph);
-      if (cluster.has(deviceId)) {
-        const hop = this.shortestPathDistance(deviceId, presenter.deviceId, graph);
-        const wifi = (presenter.wifiFingerprint && currentDevice?.wifiFingerprint)
-          ? (this.computeWifiCosineSimilarity(currentDevice.wifiFingerprint, presenter.wifiFingerprint) ?? 0.5)
-          : 0.5;
-        const affinity = (1 / Math.max(1, hop)) * 0.5 + wifi * 0.5;
-
-        if (affinity > highestAffinity) {
-          highestAffinity = affinity;
+    // Check Acoustic Gate first: If attendee physically heard an active presenter's ultrasonic token
+    const heardToken = currentDevice?.ultrasonicObservation?.token?.trim().toUpperCase();
+    if (heardToken && currentDevice?.ultrasonicObservedAt && now - currentDevice.ultrasonicObservedAt < 45_000) {
+      for (const presenter of activePresenters) {
+        const expectedToken = (presenter.ultrasonicEmittedToken || presenter.roomId || "").trim().toUpperCase();
+        if (expectedToken && isUltrasonicTokenMatch(heardToken, expectedToken)) {
           bestRoomId = presenter.roomId;
+          break;
+        }
+      }
+    }
+
+    if (!bestRoomId) {
+      for (const presenter of activePresenters) {
+        const cluster = this.componentFrom(presenter.deviceId, graph);
+        if (cluster.has(deviceId)) {
+          const hop = this.shortestPathDistance(deviceId, presenter.deviceId, graph);
+          const wifi = (presenter.wifiFingerprint && currentDevice?.wifiFingerprint)
+            ? (this.computeWifiCosineSimilarity(currentDevice.wifiFingerprint, presenter.wifiFingerprint) ?? 0.5)
+            : 0.5;
+          const affinity = (1 / Math.max(1, hop)) * 0.5 + wifi * 0.5;
+
+          if (affinity > highestAffinity) {
+            highestAffinity = affinity;
+            bestRoomId = presenter.roomId;
+          }
         }
       }
     }
@@ -335,6 +465,36 @@ export class PocInferenceEngine {
       if (d.roomId) rooms.add(d.roomId);
     }
     return [...rooms];
+  }
+
+  /**
+   * True once a device has spent an anomalously still fraction of a long-enough
+   * session. A single still window is normal (someone sitting attentively); a
+   * device that is still for nearly its whole session looks more like a phone
+   * left on a desk. This is a flag for human review, never an automatic rejection.
+   */
+  private computeMotionAnomalyFlag(rec?: DeviceRecord): boolean {
+    const history = rec?.motionWindowHistory;
+    if (!history || history.length < MOTION_MIN_WINDOWS_FOR_FLAG) return false;
+    const fractionStill = history.filter(Boolean).length / history.length;
+    return fractionStill >= MOTION_STILL_FRACTION_THRESHOLD;
+  }
+
+  /**
+   * Records that `deviceId` is present in `roomId` at `now`, and returns how long it has
+   * been continuously present. A device that drops out of the room's cluster for longer
+   * than ROOM_MEMBERSHIP_GRACE_MS has its stay considered over; trim() reaps those entries,
+   * so the next sighting starts the clock over from zero.
+   */
+  private trackRoomMembership(roomId: string, deviceId: string, now: number): number {
+    const key = `${roomId}::${deviceId}`;
+    const existing = this.roomMembership.get(key);
+    if (existing) {
+      existing.lastSeenAt = now;
+      return now - existing.startedAt;
+    }
+    this.roomMembership.set(key, { startedAt: now, lastSeenAt: now });
+    return 0;
   }
 
   private shortestPathDistance(start: string, target: string, graph: Map<string, Set<string>>): number {
@@ -430,6 +590,13 @@ export class PocInferenceEngine {
     for (const [id, record] of this.devices.entries()) {
       if (record.updatedAt < staleDeviceCutoff) {
         this.devices.delete(id);
+      }
+    }
+
+    const staleMembershipCutoff = Date.now() - ROOM_MEMBERSHIP_GRACE_MS;
+    for (const [key, membership] of this.roomMembership.entries()) {
+      if (membership.lastSeenAt < staleMembershipCutoff) {
+        this.roomMembership.delete(key);
       }
     }
   }

@@ -34,6 +34,13 @@ const wifiApSchema = z.object({
   frequency: z.number().optional()
 });
 
+const ultrasonicObservationSchema = z.object({
+  token: z.string().min(1),
+  confidence: z.number().min(0).max(1),
+  detectedAt: z.string().datetime(),
+  frequency: z.number().optional()
+});
+
 const batchSchema = z.object({
   sessionId: z.string().min(1),
   deviceId: z.string().min(8),
@@ -43,6 +50,9 @@ const batchSchema = z.object({
   roomId: z.string().min(1).optional(),
   capturedAt: z.string().datetime(),
   motionState: z.enum(["moving", "still", "unknown"]).optional(),
+  motionVariance: z.number().min(0).optional(),
+  ultrasonicObservation: ultrasonicObservationSchema.optional(),
+  ultrasonicEmittedToken: z.string().optional(),
   peers: z.array(z.object({
     rotatingId: z.string().min(8),
     rssi: z.number().min(-127).max(20),
@@ -93,11 +103,13 @@ app.post("/api/observations", (request, response) => {
   
   engine.ingest(parsed.data);
   
-  const { displayName, deviceId, role, peers, wifiFingerprint, roomId } = parsed.data;
+  const { displayName, deviceId, role, peers, wifiFingerprint, roomId, motionVariance, ultrasonicObservation, ultrasonicEmittedToken } = parsed.data;
   const name = displayName || deviceId.slice(-8);
   const apCount = wifiFingerprint?.length ?? 0;
-  
-  console.log(`📡 [SENSOR] ${name} (${role}): ${peers.length} BLE peers heard, ${apCount} Wi-Fi APs scanned -> Room: ${roomId || "auto"}`);
+  const motionLabel = motionVariance === undefined ? "n/a" : motionVariance.toFixed(4);
+  const acousticLabel = ultrasonicObservation ? `🔊 Ultrasonic heard: '${ultrasonicObservation.token}' (${Math.round(ultrasonicObservation.confidence * 100)}%)` : ultrasonicEmittedToken ? `🔊 Ultrasonic emitting: '${ultrasonicEmittedToken}'` : "";
+
+  console.log(`📡 [SENSOR] ${name} (${role}): ${peers.length} BLE peers heard, ${apCount} Wi-Fi APs scanned, motion variance ${motionLabel} ${acousticLabel ? `| ${acousticLabel}` : ""} -> Room: ${roomId || "auto"}`);
   
   return response.status(202).json({ ok: true, peerCount: peers.length });
 });
@@ -126,6 +138,15 @@ app.get("/api/rooms/:roomId/live", (request, response) => {
 app.get("/api/devices/:deviceId/live", (request, response) => {
   const sessionId = String(request.query.sessionId ?? "poc-session");
   return response.json(engine.deviceRoomState(sessionId, request.params.deviceId));
+});
+
+app.get("/api/admin/overview", (request, response) => {
+  const sessionId = String(request.query.sessionId ?? "poc-session");
+  const rooms = engine
+    .listRooms(sessionId)
+    .map((roomId) => engine.roomState(sessionId, roomId))
+    .filter((state) => state.members && state.members.length > 0);
+  return response.json({ rooms });
 });
 
 app.listen(port, "0.0.0.0", () => {
