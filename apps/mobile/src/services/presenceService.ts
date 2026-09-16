@@ -11,6 +11,11 @@ const MOTION_SAMPLE_INTERVAL_MS = 200; // ~5Hz, coarse activity level, not gestu
 
 const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL ?? "https://confpresence-api.onrender.com";
 const BATCH_INTERVAL_MS = 10_000;
+// How long a heard ultrasonic token stays valid before we treat it as stale and stop
+// resending it. Must be well under the server's freshness window (45s) so the gate can
+// actually expire client-side once the presenter stops broadcasting, instead of getting
+// perpetually refreshed by resending the same old observation every batch.
+const ULTRASONIC_OBSERVATION_TTL_MS = 15_000;
 
 async function requestBlePermissions(): Promise<boolean> {
   if (Platform.OS !== "android") return true;
@@ -99,6 +104,7 @@ export class PresenceService {
   private motionSamples: number[] = [];
   private motionSubscription?: { remove: () => void };
   private latestUltrasonicObservation?: UltrasonicObservation;
+  private latestUltrasonicObservedAt?: number;
   private ultrasonicSubscription?: { remove: () => void };
   private emittedUltrasonicToken?: string;
   private currentUltrasonicState: "broadcasting" | "listening" | "verified" | "idle" = "idle";
@@ -128,6 +134,7 @@ export class PresenceService {
     this.activePeerCache.clear();
     this.isAdvertising = false;
     this.latestUltrasonicObservation = undefined;
+    this.latestUltrasonicObservedAt = undefined;
     this.emittedUltrasonicToken = undefined;
     this.currentUltrasonicState = config.role === "presenter" ? "broadcasting" : "listening";
     this.currentUltrasonicToken = undefined;
@@ -172,6 +179,7 @@ export class PresenceService {
           const ultrasonic = requireUltrasonicModule();
           this.ultrasonicSubscription = subscribeToUltrasonicTokens((obs) => {
             this.latestUltrasonicObservation = obs;
+            this.latestUltrasonicObservedAt = Date.now();
             this.currentUltrasonicState = "verified";
             this.currentUltrasonicToken = obs.token;
             AppLogger.log("ULTRASONIC", `Heard acoustic token '${obs.token}' (${Math.round(obs.confidence * 100)}% conf) -> Hard Gate Verified!`);
@@ -207,6 +215,7 @@ export class PresenceService {
     this.ultrasonicSubscription?.remove();
     this.ultrasonicSubscription = undefined;
     this.latestUltrasonicObservation = undefined;
+    this.latestUltrasonicObservedAt = undefined;
     this.emittedUltrasonicToken = undefined;
     this.currentUltrasonicState = "idle";
     this.currentUltrasonicToken = undefined;
@@ -355,6 +364,23 @@ export class PresenceService {
     const motionVariance = this.computeMotionVariance();
     if (motionVariance !== undefined) {
       AppLogger.log("MOTION", `Variance: ${motionVariance.toFixed(4)} (${motionVariance < 0.02 ? "still" : "moving"})`);
+    }
+
+    // Expire a stale ultrasonic observation locally instead of resending it forever -
+    // otherwise the server's freshness window never lapses once a presenter stops
+    // broadcasting, since every batch would keep "renewing" the last-heard token.
+    if (
+      this.latestUltrasonicObservedAt !== undefined &&
+      Date.now() - this.latestUltrasonicObservedAt > ULTRASONIC_OBSERVATION_TTL_MS
+    ) {
+      this.latestUltrasonicObservation = undefined;
+      this.latestUltrasonicObservedAt = undefined;
+      if (this.currentUltrasonicState === "verified") {
+        this.currentUltrasonicState = "listening";
+        this.currentUltrasonicToken = undefined;
+        AppLogger.log("ULTRASONIC", "No fresh acoustic token heard recently -> Hard Gate expired");
+        this.emitStatus();
+      }
     }
 
     const body = {

@@ -305,8 +305,8 @@ export default function App() {
 
           <Text style={styles.label}>Role</Text>
           <View style={styles.roleRow}>
-            <Button title="Attendee" onPress={() => setRole("attendee")} color={role === "attendee" ? "#126D7A" : "#75808A"} />
-            <Button title="Presenter" onPress={() => setRole("presenter")} color={role === "presenter" ? "#126D7A" : "#75808A"} />
+            <Button title="Attendee" onPress={() => setRole("attendee")} color={role === "attendee" ? "#126D7A" : "#75808A"} disabled={running}  />
+            <Button title="Presenter" onPress={() => setRole("presenter")} color={role === "presenter" ? "#126D7A" : "#75808A"} disabled={running} />
           </View>
 
           <Text style={styles.label}>Your name (optional)</Text>
