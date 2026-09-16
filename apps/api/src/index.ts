@@ -1,11 +1,14 @@
 import cors from "cors";
 import express from "express";
 import { z } from "zod";
+import { db } from "./db/index.js";
 import { PocInferenceEngine } from "./inference.js";
 
 const app = express();
-const engine = new PocInferenceEngine();
+const engine = new PocInferenceEngine({ db });
 const port = Number(process.env.PORT ?? process.env.API_PORT ?? 3000);
+
+console.log(db ? "🗄️  Postgres persistence enabled" : "⚠️  No DATABASE_URL set — running in-memory only (POC mode)");
 
 app.use(cors());
 app.use(express.json({ limit: "256kb" }));
@@ -68,8 +71,8 @@ app.post("/api/session/join", (request, response) => {
   const parsed = joinSchema.safeParse(request.body);
   if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
   
-  const { deviceId, role, roomId, displayName } = parsed.data;
-  engine.join(deviceId, role, roomId, displayName);
+  const { sessionId, deviceId, role, roomId, displayName } = parsed.data;
+  engine.join(deviceId, role, roomId, displayName, sessionId);
   
   const roleEmoji = role === "presenter" ? "👑 [PRESENTER]" : "👤 [ATTENDEE]";
   console.log(`🟢 ${roleEmoji} ${displayName || deviceId} joined room '${roomId || "unassigned"}' (Session: ${parsed.data.sessionId})`);

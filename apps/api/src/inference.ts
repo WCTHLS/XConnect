@@ -1,4 +1,6 @@
 import { getAcousticTokenForRoom, type LiveRoomState, type PresenceBatch, type RoomMemberInfo, type UltrasonicObservation, type WifiApObservation } from "@confpresence/shared";
+import type { Db } from "./db/index.js";
+import { schema } from "./db/index.js";
 
 const WINDOW_MS = 30_000; // 30 seconds sliding active window
 const MIN_RSSI = -85;     // 20+ meters coverage in open line-of-sight halls
@@ -81,14 +83,36 @@ export function isUltrasonicTokenMatch(heard?: string, expected?: string): boole
 /** How long a device can drop out of a room's cluster before its stay is considered over. */
 const ROOM_MEMBERSHIP_GRACE_MS = 45_000;
 
+type RoomMembershipRecord = {
+  sessionId: string;
+  role: "presenter" | "attendee";
+  startedAt: number;
+  lastSeenAt: number;
+  lastConfidence?: number;
+  ultrasonicVerified?: boolean;
+  motionAnomalyFlag?: boolean;
+};
+
 export class PocInferenceEngine {
   private readonly devices = new Map<string, DeviceRecord>();
   private readonly batches: PresenceBatch[] = [];
   /** First-seen/last-seen timestamps per room membership, keyed by `${roomId}::${deviceId}`. */
-  private readonly roomMembership = new Map<string, { startedAt: number; lastSeenAt: number }>();
+  private readonly roomMembership = new Map<string, RoomMembershipRecord>();
+  /** Optional Postgres persistence. undefined = pure in-memory mode (no DATABASE_URL set). */
+  private readonly db?: Db;
 
-  join(deviceId: string, role: "presenter" | "attendee", roomId?: string, displayName?: string) {
+  constructor(options?: { db?: Db }) {
+    this.db = options?.db;
+    // trim() also runs inline on ingest()/roomState(), but presence must expire even if
+    // nobody happens to be polling (e.g. an admin screen isn't open) — otherwise a stale
+    // room_membership stays "connected" indefinitely instead of closing ~45s after the
+    // last sighting.
+    setInterval(() => this.trim(), 5_000).unref();
+  }
+
+  join(deviceId: string, role: "presenter" | "attendee", roomId?: string, displayName?: string, sessionId?: string) {
     const current = this.devices.get(deviceId);
+    const now = Date.now();
     this.devices.set(deviceId, {
       deviceId,
       displayName: displayName || current?.displayName || undefined,
@@ -102,8 +126,10 @@ export class PocInferenceEngine {
       ultrasonicObservation: current?.ultrasonicObservation,
       ultrasonicObservedAt: current?.ultrasonicObservedAt,
       ultrasonicEmittedToken: current?.ultrasonicEmittedToken,
-      updatedAt: Date.now()
+      updatedAt: now
     });
+    this.upsertDevice(deviceId, displayName || current?.displayName, now);
+    if (sessionId) this.upsertSessionAndRoom(sessionId, roomId, now);
   }
 
   leave(deviceId: string) {
@@ -189,6 +215,8 @@ export class PocInferenceEngine {
       ultrasonicEmittedToken,
       updatedAt: now
     });
+    this.upsertDevice(batch.deviceId, batch.displayName || current?.displayName, now);
+    this.upsertSessionAndRoom(batch.sessionId, batch.roomId, now);
     this.batches.push(batch);
     this.trim();
   }
@@ -266,7 +294,11 @@ export class PocInferenceEngine {
           uwbDiscoveryToken,
           motionAnomalyFlag,
           ultrasonicVerified: true,
-          durationMs: this.trackRoomMembership(roomId, memberId, now)
+          durationMs: this.trackRoomMembership(sessionId, roomId, memberId, "presenter", now, {
+            confidence: 1.0,
+            ultrasonicVerified: true,
+            motionAnomalyFlag
+          })
         });
         continue;
       }
@@ -323,7 +355,12 @@ export class PocInferenceEngine {
         uwbDiscoveryToken,
         motionAnomalyFlag,
         ultrasonicVerified: isAcousticMatch,
-        durationMs: this.trackRoomMembership(roomId, memberId, now)
+        durationMs: this.trackRoomMembership(sessionId, roomId, memberId, rec?.role || "attendee", now, {
+          confidence,
+          wifiSimilarity,
+          ultrasonicVerified: isAcousticMatch,
+          motionAnomalyFlag
+        })
       });
     }
 
@@ -486,15 +523,61 @@ export class PocInferenceEngine {
    * than ROOM_MEMBERSHIP_GRACE_MS has its stay considered over; trim() reaps those entries,
    * so the next sighting starts the clock over from zero.
    */
-  private trackRoomMembership(roomId: string, deviceId: string, now: number): number {
+  private trackRoomMembership(
+    sessionId: string,
+    roomId: string,
+    deviceId: string,
+    role: "presenter" | "attendee",
+    now: number,
+    latest: { confidence?: number; wifiSimilarity?: number; ultrasonicVerified?: boolean; motionAnomalyFlag?: boolean }
+  ): number {
     const key = `${roomId}::${deviceId}`;
     const existing = this.roomMembership.get(key);
+    let durationMs: number;
     if (existing) {
+      // Heartbeat fields (confidence, wifiSimilarity) are never persisted — only meaningful
+      // boolean transitions are, and only when the value actually changes.
+      if (latest.motionAnomalyFlag !== undefined && latest.motionAnomalyFlag !== existing.motionAnomalyFlag) {
+        this.recordStateChange(sessionId, roomId, deviceId, "motion_anomaly_flag", latest.motionAnomalyFlag, now);
+      }
+      if (latest.ultrasonicVerified !== undefined && latest.ultrasonicVerified !== existing.ultrasonicVerified) {
+        this.recordStateChange(sessionId, roomId, deviceId, "ultrasonic_verified", latest.ultrasonicVerified, now);
+      }
       existing.lastSeenAt = now;
-      return now - existing.startedAt;
+      existing.lastConfidence = latest.confidence;
+      existing.ultrasonicVerified = latest.ultrasonicVerified;
+      existing.motionAnomalyFlag = latest.motionAnomalyFlag;
+      durationMs = now - existing.startedAt;
+    } else {
+      // A brand-new membership entry is itself the "connected" transition.
+      this.recordStateChange(sessionId, roomId, deviceId, "connected", true, now);
+      this.roomMembership.set(key, {
+        sessionId,
+        role,
+        startedAt: now,
+        lastSeenAt: now,
+        lastConfidence: latest.confidence,
+        ultrasonicVerified: latest.ultrasonicVerified,
+        motionAnomalyFlag: latest.motionAnomalyFlag
+      });
+      durationMs = 0;
     }
-    this.roomMembership.set(key, { startedAt: now, lastSeenAt: now });
-    return 0;
+    return durationMs;
+  }
+
+  /**
+   * Fire-and-forget insert of a meaningful state-change event, gated on this.db. This is the
+   * "persist only meaningful changes" half of the persistence design — heartbeat-level data
+   * (confidence, wifiSimilarity, every poll's live value) stays in-memory only and is never
+   * written here; only discrete transitions (a flag flipping, a connection starting/ending) are.
+   * Never awaited by any caller.
+   */
+  private recordStateChange(sessionId: string, roomId: string, deviceId: string, field: string, value: boolean, now: number) {
+    if (!this.db) return;
+    this.db
+      .insert(schema.stateChangeEvents)
+      .values({ sessionId, roomId, deviceId, field, value, changedAt: new Date(now) })
+      .catch((err) => console.error("[db] failed to record state change:", err));
   }
 
   private shortestPathDistance(start: string, target: string, graph: Map<string, Set<string>>): number {
@@ -596,8 +679,94 @@ export class PocInferenceEngine {
     const staleMembershipCutoff = Date.now() - ROOM_MEMBERSHIP_GRACE_MS;
     for (const [key, membership] of this.roomMembership.entries()) {
       if (membership.lastSeenAt < staleMembershipCutoff) {
+        this.persistClosedMembership(key, membership);
         this.roomMembership.delete(key);
       }
     }
+  }
+
+  /**
+   * Fire-and-forget from the caller's perspective (never awaited by trim()), but internally
+   * sequenced: defensively re-upserts the session/room/device rows first, awaited, before
+   * inserting the room_membership row that references them by foreign key. This can't assume
+   * join()/ingest()'s own upserts already landed — they're independent fire-and-forget calls
+   * with no ordering guarantee across a pooled connection, and the referenced rows may simply
+   * not exist yet (e.g. right after a manual truncate, or a brief DB outage earlier in the stay).
+   */
+  private async persistClosedMembershipInternal(key: string, membership: RoomMembershipRecord) {
+    if (!this.db) return;
+    const sepIndex = key.indexOf("::");
+    const roomId = key.slice(0, sepIndex);
+    const deviceId = key.slice(sepIndex + 2);
+
+    await this.upsertSessionAndRoomInternal(membership.sessionId, roomId, membership.startedAt);
+    await this.db
+      .insert(schema.devices)
+      .values({ deviceId, firstSeenAt: new Date(membership.startedAt), lastSeenAt: new Date(membership.lastSeenAt) })
+      .onConflictDoNothing();
+
+    await this.db.insert(schema.roomMembership).values({
+      sessionId: membership.sessionId,
+      roomId,
+      deviceId,
+      role: membership.role,
+      startedAt: new Date(membership.startedAt),
+      endedAt: new Date(membership.lastSeenAt),
+      lastConfidence: membership.lastConfidence,
+      ultrasonicVerified: membership.ultrasonicVerified,
+      motionAnomalyFlag: membership.motionAnomalyFlag
+    });
+
+    // The stay just ended — this is the "connected" -> false transition.
+    await this.db.insert(schema.stateChangeEvents).values({
+      sessionId: membership.sessionId,
+      roomId,
+      deviceId,
+      field: "connected",
+      value: false,
+      changedAt: new Date(membership.lastSeenAt)
+    });
+  }
+
+  private persistClosedMembership(key: string, membership: RoomMembershipRecord) {
+    if (!this.db) return;
+    this.persistClosedMembershipInternal(key, membership).catch((err) =>
+      console.error("[db] failed to persist closed room_membership:", err)
+    );
+  }
+
+  /** Fire-and-forget upsert, gated on this.db. Never awaited by any caller. */
+  private upsertDevice(deviceId: string, displayName: string | undefined, now: number) {
+    if (!this.db) return;
+    this.db
+      .insert(schema.devices)
+      .values({ deviceId, displayName, firstSeenAt: new Date(now), lastSeenAt: new Date(now) })
+      .onConflictDoUpdate({
+        target: schema.devices.deviceId,
+        set: { displayName, lastSeenAt: new Date(now) }
+      })
+      .catch((err) => console.error("[db] failed to upsert device:", err));
+  }
+
+  /**
+   * Fire-and-forget from the caller's perspective, but internally sequenced: the session
+   * insert is awaited before the room insert is issued. With a pooled connection ({ max: 5 }),
+   * two independent un-awaited inserts can land on different physical connections and run
+   * concurrently, so there's no guarantee the session row commits before the room insert's
+   * foreign-key check runs against it — this ordering must be explicit, not assumed.
+   */
+  private async upsertSessionAndRoomInternal(sessionId: string, roomId: string | undefined, now: number) {
+    if (!this.db) return;
+    await this.db.insert(schema.sessions).values({ id: sessionId, startedAt: new Date(now) }).onConflictDoNothing();
+    if (roomId) {
+      await this.db.insert(schema.rooms).values({ id: roomId, sessionId, label: roomId }).onConflictDoNothing();
+    }
+  }
+
+  private upsertSessionAndRoom(sessionId: string, roomId: string | undefined, now: number) {
+    if (!this.db) return;
+    this.upsertSessionAndRoomInternal(sessionId, roomId, now).catch((err) =>
+      console.error("[db] failed to upsert session/room:", err)
+    );
   }
 }
