@@ -24,7 +24,7 @@ import { AdminScreen } from "./src/screens/AdminScreen";
 
 const DEFAULT_SESSION = "poc-session";
 const DEFAULT_ROOMS = ["room-a", "room-b", "auditorium"];
-const CLOUD_API_URL = "https://xconnect-api.onrender.com";
+const CLOUD_API_URL = "https://xconnect-ytoj.onrender.com";
 const LOCAL_API_URL = "http://192.168.0.201:3000";
 
 export default function App() {
