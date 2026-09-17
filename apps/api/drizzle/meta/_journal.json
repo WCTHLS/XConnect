@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1788992485761,
+      "tag": "0000_medical_miek",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789009473228,
+      "tag": "0001_faulty_slyde",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789439046567,
+      "tag": "0002_outstanding_jackpot",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1789599549052,
+      "tag": "0003_jazzy_moira_mactaggert",
+      "breakpoints": true
+    }
+  ]
+}

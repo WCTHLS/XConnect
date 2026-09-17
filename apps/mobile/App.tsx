@@ -26,13 +26,12 @@ const DEFAULT_SESSION = "poc-session";
 const DEFAULT_ROOMS = ["room-a", "room-b", "auditorium"];
 const CLOUD_API_URL = "https://xconnect-api.onrender.com";
 const LOCAL_API_URL = "http://192.168.0.201:3000";
-const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL ?? CLOUD_API_URL;
 
 export default function App() {
   const [role, setRole] = useState<ParticipantRole>("attendee");
   const [sessionId, setSessionId] = useState(DEFAULT_SESSION);
   const [serverEnv, setServerEnv] = useState<"cloud" | "local" | "custom">("cloud");
-  const [serverUrl, setServerUrl] = useState(DEFAULT_API_URL);
+  const [serverUrl, setServerUrl] = useState(CLOUD_API_URL);
   const [serverHealth, setServerHealth] = useState<"checking" | "online" | "offline">("checking");
   const [showServerConfig, setShowServerConfig] = useState(false);
   const [displayName, setDisplayName] = useState("");
@@ -82,7 +81,7 @@ export default function App() {
 
   useEffect(() => {
     getOrCreateDeviceId().then(setDeviceId);
-    checkHealth(DEFAULT_API_URL);
+    checkHealth(CLOUD_API_URL);
     return () => {
       runningRef.current = false;
       void service.stop();
@@ -220,6 +219,21 @@ export default function App() {
     }
   };
 
+  const handleToggleSwitch = (enabled: boolean) => {
+    if (!enabled && role === "presenter") {
+      Alert.alert(
+        "Stop Sharing?",
+        "You're the presenter for this room — stopping closes it for everyone currently in it. Attendees will be disconnected and their attendance will be recorded as ended now.",
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Stop & Close Room", style: "destructive", onPress: () => togglePresence(false) }
+        ]
+      );
+      return;
+    }
+    togglePresence(enabled);
+  };
+
   const autoDetectServerIP = async () => {
     setIsAutoDetecting(true);
     const candidateIPs = [
@@ -307,6 +321,7 @@ export default function App() {
           <View style={styles.roleRow}>
             <Button title="Attendee" onPress={() => setRole("attendee")} color={role === "attendee" ? "#126D7A" : "#75808A"} disabled={running}  />
             <Button title="Presenter" onPress={() => setRole("presenter")} color={role === "presenter" ? "#126D7A" : "#75808A"} disabled={running} />
+            <Button title="Admin" onPress={() => setView("admin")} color="#173A63" />
           </View>
 
           <Text style={styles.label}>Your name (optional)</Text>
@@ -409,7 +424,7 @@ export default function App() {
               <Text style={styles.startTitle}>Share presence</Text>
               <Text style={styles.help}>The POC scans only while the app is open.</Text>
             </View>
-            <Switch value={running} onValueChange={togglePresence} />
+            <Switch value={running} onValueChange={handleToggleSwitch} />
           </View>
 
           {/* Live Connected Devices & Presence Dashboard */}
@@ -676,16 +691,6 @@ export default function App() {
       >
         <Text style={styles.floatingLogIcon}>{"\u{1F4DC}"}</Text>
         <Text style={styles.floatingLogText}>Logs {logCount > 0 ? `(${logCount})` : ""}</Text>
-      </TouchableOpacity>
-
-      {/* Floating Admin Button */}
-      <TouchableOpacity
-        style={styles.floatingAdminBtn}
-        onPress={() => setView("admin")}
-        activeOpacity={0.8}
-      >
-        <Text style={styles.floatingAdminIcon}>{"\u{1F6E0}"}</Text>
-        <Text style={styles.floatingAdminText}>Admin</Text>
       </TouchableOpacity>
 
       {/* Diagnostics Logs Modal Popup */}
@@ -1024,34 +1029,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "800"
   },
-  // Floating Admin Button
-  floatingAdminBtn: {
-    position: "absolute",
-    bottom: 78,
-    right: 18,
-    backgroundColor: "#173A63",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 24,
-    borderWidth: 1.5,
-    borderColor: "#80CBC4",
-    elevation: 8,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 5
-  },
-  floatingAdminIcon: {
-    fontSize: 14
-  },
-  floatingAdminText: {
-    color: "#FFFFFF",
-    fontSize: 12,
-    fontWeight: "800"
-  }
 });
 
 registerRootComponent(App);
