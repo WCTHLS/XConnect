@@ -11,6 +11,8 @@ import {
   TouchableOpacity,
   View
 } from "react-native";
+import * as Print from "expo-print";
+import * as Sharing from "expo-sharing";
 import type { LiveRoomState, RoomMemberInfo } from "@confpresence/shared";
 
 const ADMIN_PIN = "2468";
@@ -112,6 +114,104 @@ function formatTimestamp(iso?: string | number | null): string {
   return new Date(iso).toLocaleString();
 }
 
+type AggregatedAttendee = {
+  deviceId: string;
+  displayName: string;
+  role: "presenter" | "attendee";
+  totalDurationMs: number;
+  hasOpenStay: boolean;
+  everUltrasonicVerified: boolean;
+  everMotionAnomaly: boolean;
+};
+
+/**
+ * Collapses a room's individual entry/exit rows (one per visit) into one row per person —
+ * their total time in the room across every visit, not each stay separately. Shared by the
+ * on-screen attendee list and the PDF export so the two never drift apart.
+ */
+function aggregateAttendees(members: HistoryMember[]): AggregatedAttendee[] {
+  const byDevice = new Map<string, AggregatedAttendee>();
+  for (const member of members) {
+    const existing = byDevice.get(member.deviceId) ?? {
+      deviceId: member.deviceId,
+      displayName: member.displayName,
+      role: member.role,
+      totalDurationMs: 0,
+      hasOpenStay: false,
+      everUltrasonicVerified: false,
+      everMotionAnomaly: false
+    };
+    if (member.durationMs !== undefined) existing.totalDurationMs += member.durationMs;
+    if (!member.endedAt) existing.hasOpenStay = true;
+    if (member.ultrasonicVerified) existing.everUltrasonicVerified = true;
+    if (member.motionAnomalyFlag) existing.everMotionAnomaly = true;
+    byDevice.set(member.deviceId, existing);
+  }
+  return [...byDevice.values()];
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function buildHistoryReportHtml(occurrence: HistoryDetail): string {
+  const roomSections = occurrence.rooms.map((room) => {
+    const { durationMs: roomDurationMs, stillOpen } = computeOccupiedDurationMs(room.members);
+    const attendeeCount = new Set(room.members.filter((m) => m.role === "attendee").map((m) => m.deviceId)).size;
+    const earliestStart = Math.min(...room.members.map((m) => new Date(m.startedAt).getTime()));
+    const attendees = aggregateAttendees(room.members);
+
+    const rows = attendees
+      .map((a) => {
+        const flags = [
+          a.everUltrasonicVerified ? "Ultrasonic Verified" : null,
+          a.everMotionAnomaly ? "Inactivity flag" : null
+        ].filter(Boolean).join(", ");
+        return `<tr>
+          <td>${escapeHtml(a.displayName)}</td>
+          <td>${a.role === "presenter" ? "Host" : "User"}</td>
+          <td>${formatDuration(a.totalDurationMs)}${a.hasOpenStay ? " (ongoing)" : ""}</td>
+          <td>${escapeHtml(flags || "--")}</td>
+        </tr>`;
+      })
+      .join("");
+
+    return `
+      <h2>Room: ${escapeHtml(room.roomId)}</h2>
+      <p class="meta">
+        ${escapeHtml(formatTimestamp(earliestStart))} &middot;
+        ${attendeeCount} attendee${attendeeCount === 1 ? "" : "s"} &middot;
+        ${stillOpen ? "Ongoing" : formatDuration(roomDurationMs)}
+      </p>
+      <table>
+        <thead><tr><th>Name</th><th>Role</th><th>Duration</th><th>Flags</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="4">No attendees recorded</td></tr>`}</tbody>
+      </table>`;
+  });
+
+  return `
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <style>
+          body { font-family: -apple-system, Helvetica, Arial, sans-serif; color: #173A63; padding: 24px; }
+          h1 { font-size: 20px; margin-bottom: 2px; }
+          .subtitle { color: #5D6873; font-size: 12px; margin-top: 0; margin-bottom: 20px; }
+          h2 { font-size: 15px; margin-top: 24px; margin-bottom: 4px; border-top: 1px solid #E0E6EA; padding-top: 16px; }
+          .meta { color: #5D6873; font-size: 11px; margin-top: 0; margin-bottom: 8px; }
+          table { width: 100%; border-collapse: collapse; font-size: 12px; }
+          th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #EEF2F4; }
+          th { color: #5D6873; font-weight: 600; }
+        </style>
+      </head>
+      <body>
+        <h1>Session Report</h1>
+        <p class="subtitle">Code: ${escapeHtml(occurrence.code)} &middot; Generated ${escapeHtml(new Date().toLocaleString())}</p>
+        ${roomSections.join("") || "<p>No recorded room activity for this session.</p>"}
+      </body>
+    </html>`;
+}
+
 export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
@@ -126,6 +226,7 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [selectedOccurrence, setSelectedOccurrence] = useState<HistoryDetail | null>(null);
   const [expandedRooms, setExpandedRooms] = useState<Set<string>>(new Set());
+  const [pdfGenerating, setPdfGenerating] = useState(false);
   const unlockedRef = useRef(false);
 
   useEffect(() => {
@@ -237,6 +338,24 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
       setHistoryError(err?.message || "Network error");
     } finally {
       setHistoryLoading(false);
+    }
+  };
+
+  const handleDownloadPdf = async () => {
+    if (!selectedOccurrence || pdfGenerating) return;
+    setPdfGenerating(true);
+    try {
+      const html = buildHistoryReportHtml(selectedOccurrence);
+      const { uri } = await Print.printToFileAsync({ html });
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(uri, { mimeType: "application/pdf", dialogTitle: "Session Report" });
+      } else {
+        Alert.alert("Sharing unavailable", `PDF saved to ${uri}`);
+      }
+    } catch (err: any) {
+      Alert.alert("Could not create PDF", err?.message || "Unknown error");
+    } finally {
+      setPdfGenerating(false);
     }
   };
 
@@ -458,13 +577,28 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
 
             {!historyLoading && selectedOccurrence && (
               <View>
-                <TouchableOpacity
-                  style={styles.backToSessionsBtn}
-                  onPress={() => setSelectedOccurrence(null)}
-                  activeOpacity={0.7}
-                >
-                  <Text style={styles.backToSessionsBtnText}>{"←"} Back to sessions</Text>
-                </TouchableOpacity>
+                <View style={styles.historyDetailTopRow}>
+                  <TouchableOpacity
+                    style={styles.backToSessionsBtn}
+                    onPress={() => setSelectedOccurrence(null)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.backToSessionsBtnText}>{"←"} Back to sessions</Text>
+                  </TouchableOpacity>
+
+                  {selectedOccurrence.rooms.length > 0 && (
+                    <TouchableOpacity
+                      style={styles.downloadPdfBtn}
+                      onPress={handleDownloadPdf}
+                      disabled={pdfGenerating}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.downloadPdfBtnText}>
+                        {pdfGenerating ? "Generating..." : "\u{2B07} Download PDF"}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
 
                 {selectedOccurrence.rooms.length === 0 ? (
                   <View style={styles.emptyWrap}>
@@ -505,36 +639,10 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
                       </TouchableOpacity>
 
                       {isExpanded && (() => {
-                        // Collapse this room's individual entry/exit rows into one row per
-                        // person — their total time in the room, not every visit separately.
-                        const byDevice = new Map<string, {
-                          displayName: string;
-                          role: "presenter" | "attendee";
-                          totalDurationMs: number;
-                          hasOpenStay: boolean;
-                          everUltrasonicVerified: boolean;
-                          everMotionAnomaly: boolean;
-                        }>();
-                        for (const member of room.members) {
-                          const existing = byDevice.get(member.deviceId) ?? {
-                            displayName: member.displayName,
-                            role: member.role,
-                            totalDurationMs: 0,
-                            hasOpenStay: false,
-                            everUltrasonicVerified: false,
-                            everMotionAnomaly: false
-                          };
-                          if (member.durationMs !== undefined) existing.totalDurationMs += member.durationMs;
-                          if (!member.endedAt) existing.hasOpenStay = true;
-                          if (member.ultrasonicVerified) existing.everUltrasonicVerified = true;
-                          if (member.motionAnomalyFlag) existing.everMotionAnomaly = true;
-                          byDevice.set(member.deviceId, existing);
-                        }
-
-                        return [...byDevice.entries()].map(([deviceId, attendee]) => {
+                        return aggregateAttendees(room.members).map((attendee) => {
                           const isHost = attendee.role === "presenter";
                           return (
-                            <View key={deviceId} style={styles.memberRow}>
+                            <View key={attendee.deviceId} style={styles.memberRow}>
                               <View style={styles.memberRowTop}>
                                 <Text style={styles.memberName} numberOfLines={1}>{attendee.displayName}</Text>
                                 <Text style={[styles.roleBadge, isHost ? styles.roleBadgePresenter : styles.roleBadgeAttendee]}>
@@ -595,15 +703,29 @@ const styles = StyleSheet.create({
   unlockBtnText: { color: "#FFFFFF", fontWeight: "700", fontSize: 15 },
   backLink: { marginTop: 16 },
   backLinkText: { color: "#5D6873", fontSize: 13 },
+  historyDetailTopRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+    gap: 8
+  },
   backToSessionsBtn: {
     alignSelf: "flex-start",
-    marginBottom: 12,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
     backgroundColor: "#E6F2F3"
   },
   backToSessionsBtnText: { color: "#126D7A", fontSize: 14, fontWeight: "700" },
+  downloadPdfBtn: {
+    alignSelf: "flex-start",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: "#173A63"
+  },
+  downloadPdfBtnText: { color: "#FFFFFF", fontSize: 14, fontWeight: "700" },
   header: {
     flexDirection: "row",
     justifyContent: "space-between",
