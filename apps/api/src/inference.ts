@@ -1,4 +1,5 @@
 import { getAcousticTokenForRoom, type LiveRoomState, type PresenceBatch, type RoomMemberInfo, type UltrasonicObservation, type WifiApObservation } from "@confpresence/shared";
+import { eq } from "drizzle-orm";
 import type { Db } from "./db/index.js";
 import { schema } from "./db/index.js";
 
@@ -83,6 +84,22 @@ export function isUltrasonicTokenMatch(heard?: string, expected?: string): boole
 /** How long a device can drop out of a room's cluster before its stay is considered over. */
 const ROOM_MEMBERSHIP_GRACE_MS = 45_000;
 
+/**
+ * How long a session code can go quiet before the next use of it starts a brand-new
+ * occurrence instead of resuming the old one. Survives a lunch break; forces a fresh
+ * session by the next day even if nobody explicitly ends it. An explicit "End Session"
+ * admin action (PocInferenceEngine.endSession) achieves the same thing immediately,
+ * without waiting for this timeout.
+ */
+const SESSION_AUTO_EXPIRY_MS = 8 * 60 * 60 * 1000;
+
+type ActiveSessionRecord = {
+  sessionId: string;
+  code: string;
+  startedAt: number;
+  lastActivityAt: number;
+};
+
 type RoomMembershipRecord = {
   sessionId: string;
   role: "presenter" | "attendee";
@@ -98,6 +115,16 @@ export class PocInferenceEngine {
   private readonly batches: PresenceBatch[] = [];
   /** First-seen/last-seen timestamps per room membership, keyed by `${roomId}::${deviceId}`. */
   private readonly roomMembership = new Map<string, RoomMembershipRecord>();
+  /** Which real session ID a human-typed code currently resolves to, keyed by code. */
+  private readonly activeSessionsByCode = new Map<string, ActiveSessionRecord>();
+  /**
+   * In-flight "create this session row (with its code)" write, keyed by session ID. Other
+   * fire-and-forget writers touching the same session ID (join()/ingest()'s own redundant,
+   * code-less upsert) must await this first — otherwise, on a pooled connection, their
+   * code-less INSERT ... ON CONFLICT DO NOTHING can commit first and permanently shadow the
+   * one write that actually carries `code`, since neither insert is ever retried.
+   */
+  private readonly pendingSessionCreation = new Map<string, Promise<void>>();
   /** Optional Postgres persistence. undefined = pure in-memory mode (no DATABASE_URL set). */
   private readonly db?: Db;
 
@@ -108,6 +135,87 @@ export class PocInferenceEngine {
     // room_membership stays "connected" indefinitely instead of closing ~45s after the
     // last sighting.
     setInterval(() => this.trim(), 5_000).unref();
+  }
+
+  /**
+   * Converts a human-typed session code (e.g. "ID1") into the real, unique session ID for
+   * whichever occurrence is currently active. A code is not a database identity by itself —
+   * reusing "ID1" tomorrow must not silently continue yesterday's session. If a code has no
+   * active occurrence (never used, explicitly ended via endSession(), or quiet for longer
+   * than SESSION_AUTO_EXPIRY_MS), this mints a brand-new session ID and persists it; otherwise
+   * it returns the existing one and bumps its activity timestamp. Callers (index.ts routes)
+   * call this once per incoming request and pass the resolved ID into join()/ingest()/
+   * roomState()/deviceRoomState()/listRooms() — those methods are unaware a "code" concept
+   * even exists, they just receive a plain session ID exactly as before.
+   */
+  resolveSessionCode(code: string, now: number = Date.now()): string {
+    const existing = this.activeSessionsByCode.get(code);
+    if (existing && now - existing.lastActivityAt < SESSION_AUTO_EXPIRY_MS) {
+      existing.lastActivityAt = now;
+      return existing.sessionId;
+    }
+
+    const safeCode = code.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40) || "session";
+    const sessionId = `${safeCode}__${now.toString(36)}`;
+    this.activeSessionsByCode.set(code, { sessionId, code, startedAt: now, lastActivityAt: now });
+
+    const write = this.upsertSessionAndRoomInternal(sessionId, undefined, now, code)
+      .catch((err) => console.error("[db] failed to create session row:", err))
+      .finally(() => this.pendingSessionCreation.delete(sessionId));
+    this.pendingSessionCreation.set(sessionId, write);
+
+    return sessionId;
+  }
+
+  /**
+   * Read-only counterpart to resolveSessionCode — returns the currently active session ID for
+   * this code, or undefined if none is active, but never mints a new one. Viewing live state
+   * (the admin overview, a room's live roster, a device's live lookup) must not have the side
+   * effect of starting a session; only join()/ingest() (someone actually participating) should
+   * be able to do that. Still bumps the activity timestamp when a session IS found, so an
+   * admin actively watching a live session doesn't cause it to auto-expire out from under them.
+   */
+  peekActiveSession(code: string, now: number = Date.now()): string | undefined {
+    const existing = this.activeSessionsByCode.get(code);
+    if (existing && now - existing.lastActivityAt < SESSION_AUTO_EXPIRY_MS) {
+      existing.lastActivityAt = now;
+      return existing.sessionId;
+    }
+    return undefined;
+  }
+
+  /**
+   * Explicitly closes out the currently active occurrence of a session code, so the very next
+   * use of that code (from any device) starts a fresh occurrence instead of waiting out
+   * SESSION_AUTO_EXPIRY_MS. Returns false if the code has no active occurrence to end.
+   */
+  endSession(code: string): boolean {
+    const existing = this.activeSessionsByCode.get(code);
+    if (!existing) return false;
+    this.activeSessionsByCode.delete(code);
+
+    // Flush all open room membership stays that belong to this session immediately.
+    // Without this, devices that are still sending batches would have their open stays
+    // inherited by the next occurrence of this code (since trackRoomMembership preserves
+    // existing.sessionId), causing their duration to bleed across session boundaries.
+    const now = Date.now();
+    for (const [key, membership] of this.roomMembership.entries()) {
+      if (membership.sessionId === existing.sessionId) {
+        membership.lastSeenAt = now;
+        this.persistClosedMembership(key, membership);
+        this.roomMembership.delete(key);
+      }
+    }
+
+    this.endSessionInternal(existing.sessionId, now).catch((err) =>
+      console.error("[db] failed to mark session ended:", err)
+    );
+    return true;
+  }
+
+  private async endSessionInternal(sessionId: string, now: number) {
+    if (!this.db) return;
+    await this.db.update(schema.sessions).set({ endedAt: new Date(now) }).where(eq(schema.sessions.id, sessionId));
   }
 
   join(deviceId: string, role: "presenter" | "attendee", roomId?: string, displayName?: string, sessionId?: string) {
@@ -133,10 +241,31 @@ export class PocInferenceEngine {
   }
 
   leave(deviceId: string) {
+    const device = this.devices.get(deviceId);
+    // A presenter leaving ends the room for everyone, not just themselves — attendee-side
+    // clustering is presenter-anchored (see roomState()), so without this presenter there is
+    // no room to be "in" anymore. Close every open stay in this room immediately rather than
+    // waiting up to ROOM_MEMBERSHIP_GRACE_MS for trim()'s passive staleness sweep to notice —
+    // that delay is a fallback for ungraceful disconnects, not the right latency for a clean,
+    // explicit leave.
+    if (device?.role === "presenter" && device.roomId) {
+      this.endRoom(device.roomId);
+    }
     this.devices.delete(deviceId);
     for (let i = this.batches.length - 1; i >= 0; i--) {
       if (this.batches[i].deviceId === deviceId) {
         this.batches.splice(i, 1);
+      }
+    }
+  }
+
+  /** Immediately closes every open room_membership stay for a room (see leave() above). */
+  private endRoom(roomId: string) {
+    const prefix = `${roomId}::`;
+    for (const [key, membership] of this.roomMembership.entries()) {
+      if (key.startsWith(prefix)) {
+        this.persistClosedMembership(key, membership);
+        this.roomMembership.delete(key);
       }
     }
   }
@@ -300,6 +429,17 @@ export class PocInferenceEngine {
             motionAnomalyFlag
           })
         });
+        continue;
+      }
+
+      // A device presenting a different room is never ambiguous — its own roomId already says
+      // where it belongs, unlike an attendee, there's no signal-based inference needed (or
+      // wanted) here. The multi-room affinity check below is for attendees; applying it to
+      // another presenter degenerates into comparing that presenter to themselves, which only
+      // wins by a wide-enough margin when their hop-distance and Wi-Fi environment clearly
+      // differ from this room's presenter — not guaranteed when two presenters are physically
+      // close together (e.g. testing side by side), letting them bleed into each other's rosters.
+      if (rec?.role === "presenter") {
         continue;
       }
 
@@ -535,13 +675,18 @@ export class PocInferenceEngine {
     const existing = this.roomMembership.get(key);
     let durationMs: number;
     if (existing) {
+      // Use existing.sessionId, not the sessionId parameter — a code can re-resolve to a new
+      // session occurrence (ended early, or auto-expired) while this stay is still open, and
+      // every artifact tied to one continuous stay must stay attributed to the session it
+      // actually started under, not whatever the code currently happens to resolve to.
+      //
       // Heartbeat fields (confidence, wifiSimilarity) are never persisted — only meaningful
       // boolean transitions are, and only when the value actually changes.
       if (latest.motionAnomalyFlag !== undefined && latest.motionAnomalyFlag !== existing.motionAnomalyFlag) {
-        this.recordStateChange(sessionId, roomId, deviceId, "motion_anomaly_flag", latest.motionAnomalyFlag, now);
+        this.recordStateChange(existing.sessionId, roomId, deviceId, "motion_anomaly_flag", latest.motionAnomalyFlag, now);
       }
       if (latest.ultrasonicVerified !== undefined && latest.ultrasonicVerified !== existing.ultrasonicVerified) {
-        this.recordStateChange(sessionId, roomId, deviceId, "ultrasonic_verified", latest.ultrasonicVerified, now);
+        this.recordStateChange(existing.sessionId, roomId, deviceId, "ultrasonic_verified", latest.ultrasonicVerified, now);
       }
       existing.lastSeenAt = now;
       existing.lastConfidence = latest.confidence;
@@ -755,17 +900,25 @@ export class PocInferenceEngine {
    * concurrently, so there's no guarantee the session row commits before the room insert's
    * foreign-key check runs against it — this ordering must be explicit, not assumed.
    */
-  private async upsertSessionAndRoomInternal(sessionId: string, roomId: string | undefined, now: number) {
+  private async upsertSessionAndRoomInternal(sessionId: string, roomId: string | undefined, now: number, code?: string) {
     if (!this.db) return;
-    await this.db.insert(schema.sessions).values({ id: sessionId, startedAt: new Date(now) }).onConflictDoNothing();
+    // If resolveSessionCode() just minted this exact session ID, its code-carrying insert may
+    // still be in flight — wait for it first so this call's own (usually code-less) insert
+    // can never win the race and permanently shadow the one that actually carries `code`.
+    const pending = this.pendingSessionCreation.get(sessionId);
+    if (pending) await pending;
+    // onConflictDoNothing means `code` only actually lands on the row the first time this
+    // session ID is inserted (from resolveSessionCode's mint path) — later calls from
+    // join()/ingest() with the same, already-resolved sessionId just no-op harmlessly.
+    await this.db.insert(schema.sessions).values({ id: sessionId, code, startedAt: new Date(now) }).onConflictDoNothing();
     if (roomId) {
       await this.db.insert(schema.rooms).values({ id: roomId, sessionId, label: roomId }).onConflictDoNothing();
     }
   }
 
-  private upsertSessionAndRoom(sessionId: string, roomId: string | undefined, now: number) {
+  private upsertSessionAndRoom(sessionId: string, roomId: string | undefined, now: number, code?: string) {
     if (!this.db) return;
-    this.upsertSessionAndRoomInternal(sessionId, roomId, now).catch((err) =>
+    this.upsertSessionAndRoomInternal(sessionId, roomId, now, code).catch((err) =>
       console.error("[db] failed to upsert session/room:", err)
     );
   }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  Alert,
   Platform,
   SafeAreaView,
   ScrollView,
@@ -14,6 +15,40 @@ import type { LiveRoomState, RoomMemberInfo } from "@confpresence/shared";
 
 const ADMIN_PIN = "2468";
 const POLL_INTERVAL_MS = 5000;
+
+/**
+ * Real occupied time across a set of stays, not a naive first-start-to-last-end span — a
+ * room that empties out between two separate visits (presenter leaves, comes back later)
+ * must not have that empty gap counted as if the room were active the whole time. Merges
+ * overlapping/adjacent intervals and sums only the merged, actually-occupied ranges. An
+ * open-ended stay (no endedAt yet) is treated as running until now for merging purposes,
+ * but reported back via `stillOpen` so the caller can show "Ongoing" instead of a fixed figure.
+ */
+function computeOccupiedDurationMs(stays: { startedAt: string; endedAt: string | null }[]): { durationMs: number; stillOpen: boolean } {
+  if (stays.length === 0) return { durationMs: 0, stillOpen: false };
+  const now = Date.now();
+  const stillOpen = stays.some((s) => !s.endedAt);
+  const intervals = stays
+    .map((s) => ({ start: new Date(s.startedAt).getTime(), end: s.endedAt ? new Date(s.endedAt).getTime() : now }))
+    .sort((a, b) => a.start - b.start);
+
+  let totalMs = 0;
+  let curStart = intervals[0].start;
+  let curEnd = intervals[0].end;
+  for (let i = 1; i < intervals.length; i++) {
+    const iv = intervals[i];
+    if (iv.start <= curEnd) {
+      curEnd = Math.max(curEnd, iv.end);
+    } else {
+      totalMs += curEnd - curStart;
+      curStart = iv.start;
+      curEnd = iv.end;
+    }
+  }
+  totalMs += curEnd - curStart;
+
+  return { durationMs: totalMs, stillOpen };
+}
 
 function formatDuration(ms?: number): string {
   if (ms == null || ms < 0) return "--";
@@ -35,6 +70,48 @@ type AdminScreenProps = {
   onBack: () => void;
 };
 
+type SessionOccurrence = {
+  id: string;
+  code: string;
+  // Derived from room_membership, not the session row's own bookkeeping timestamps — this is
+  // when rooms in this occurrence were actually active, which is the figure that matters here.
+  hasActivity: boolean;
+  startedAt: string | null;
+  endedAt: string | null;
+  stillOpen: boolean;
+  // Real occupied time across every room/device in this session (gaps between separate visits
+  // excluded), computed server-side — not endedAt - startedAt, which would include those gaps.
+  durationMs?: number;
+  rooms: string[];
+  hosts: string[];
+  attendeeCount: number;
+};
+
+type HistoryMember = {
+  deviceId: string;
+  displayName: string;
+  role: "presenter" | "attendee";
+  startedAt: string;
+  endedAt: string | null;
+  durationMs?: number;
+  lastConfidence?: number;
+  ultrasonicVerified?: boolean;
+  motionAnomalyFlag?: boolean;
+};
+
+type HistoryDetail = {
+  sessionId: string;
+  code: string;
+  startedAt: string;
+  endedAt: string | null;
+  rooms: { roomId: string; members: HistoryMember[] }[];
+};
+
+function formatTimestamp(iso?: string | number | null): string {
+  if (iso === undefined || iso === null) return "--";
+  return new Date(iso).toLocaleString();
+}
+
 export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) {
   const [unlocked, setUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
@@ -42,6 +119,13 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
   const [rooms, setRooms] = useState<LiveRoomState[]>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"live" | "history">("live");
+  const [historyCode, setHistoryCode] = useState("");
+  const [historyOccurrences, setHistoryOccurrences] = useState<SessionOccurrence[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [selectedOccurrence, setSelectedOccurrence] = useState<HistoryDetail | null>(null);
+  const [expandedRooms, setExpandedRooms] = useState<Set<string>>(new Set());
   const unlockedRef = useRef(false);
 
   useEffect(() => {
@@ -84,6 +168,85 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
     }
   };
 
+  const endSessionRequest = async () => {
+    try {
+      const res = await fetch(`${serverUrl}/api/admin/session/end`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId })
+      });
+      const data = await res.json().catch(() => null);
+      if (data?.ended) {
+        Alert.alert("Session Ended", `"${sessionId}" is closed. The next device to use this code starts a new session.`);
+      } else {
+        Alert.alert("Nothing to End", `"${sessionId}" has no active occurrence right now.`);
+      }
+    } catch (err: any) {
+      Alert.alert("Failed to End Session", err?.message || "Network error");
+    }
+  };
+
+  const handleEndSession = () => {
+    Alert.alert(
+      "End This Session?",
+      `This closes out "${sessionId}" for reporting. Anyone who continues using this code afterward starts a brand-new session, not a continuation of this one.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "End Session", style: "destructive", onPress: endSessionRequest }
+      ]
+    );
+  };
+
+  const searchHistory = async () => {
+    const code = historyCode.trim();
+    setHistoryLoading(true);
+    setHistoryError(null);
+    setSelectedOccurrence(null);
+    try {
+      const url = code
+        ? `${serverUrl}/api/admin/sessions?code=${encodeURIComponent(code)}`
+        : `${serverUrl}/api/admin/sessions`;
+      const res = await fetch(url);
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        setHistoryError(data?.error ? JSON.stringify(data.error) : `Server returned ${res.status}`);
+        setHistoryOccurrences([]);
+        return;
+      }
+      setHistoryOccurrences(Array.isArray(data?.sessions) ? data.sessions : []);
+    } catch (err: any) {
+      setHistoryError(err?.message || "Network error");
+      setHistoryOccurrences([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const openOccurrence = async (occurrenceSessionId: string) => {
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const res = await fetch(`${serverUrl}/api/admin/history?sessionId=${encodeURIComponent(occurrenceSessionId)}`);
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        setHistoryError(data?.error ? JSON.stringify(data.error) : `Server returned ${res.status}`);
+        return;
+      }
+      setSelectedOccurrence(data);
+    } catch (err: any) {
+      setHistoryError(err?.message || "Network error");
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (unlocked && activeTab === "history") {
+      searchHistory();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unlocked, activeTab]);
+
   if (!unlocked) {
     return (
       <SafeAreaView style={styles.safeArea}>
@@ -101,6 +264,8 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
             keyboardType="number-pad"
             secureTextEntry
             maxLength={8}
+            returnKeyType="done"
+            onSubmitEditing={handleUnlock}
           />
           {pinError && <Text style={styles.pinErrorText}>Incorrect PIN</Text>}
           <TouchableOpacity style={styles.unlockBtn} onPress={handleUnlock} activeOpacity={0.8}>
@@ -117,76 +282,289 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.header}>
-        <View>
-          <Text style={styles.headerTitle}>Live Session Overview</Text>
-          <Text style={styles.headerSubtitle}>
+        <View style={styles.headerTitleWrap}>
+          <Text style={styles.headerTitle} numberOfLines={1}>Live Session Overview</Text>
+          <Text style={styles.headerSubtitle} numberOfLines={1}>
             {rooms.length} active room{rooms.length === 1 ? "" : "s"}
             {lastUpdated ? ` · updated ${lastUpdated}` : ""}
           </Text>
         </View>
-        <TouchableOpacity style={styles.backBtn} onPress={onBack} activeOpacity={0.7}>
-          <Text style={styles.backBtnText}>{"✕"} Close</Text>
+        <View style={styles.headerActions}>
+          <TouchableOpacity style={styles.endSessionBtn} onPress={handleEndSession} activeOpacity={0.7}>
+            <Text style={styles.endSessionBtnText}>{"\u{1F6D1}"} End Session</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.backBtn} onPress={onBack} activeOpacity={0.7}>
+            <Text style={styles.backBtnText}>{"✕"} Close</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      <View style={styles.tabRow}>
+        <TouchableOpacity
+          style={[styles.tabBtn, activeTab === "live" && styles.tabBtnActive]}
+          onPress={() => setActiveTab("live")}
+          activeOpacity={0.7}
+        >
+          <Text style={[styles.tabBtnText, activeTab === "live" && styles.tabBtnTextActive]}>Live</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tabBtn, activeTab === "history" && styles.tabBtnActive]}
+          onPress={() => setActiveTab("history")}
+          activeOpacity={0.7}
+        >
+          <Text style={[styles.tabBtnText, activeTab === "history" && styles.tabBtnTextActive]}>History</Text>
         </TouchableOpacity>
       </View>
 
-      {fetchError && (
-        <View style={styles.errorBanner}>
-          <Text style={styles.errorBannerText}>{"⚠️"} {fetchError}</Text>
-        </View>
-      )}
-
-      <ScrollView contentContainerStyle={styles.scrollContent}>
-        {rooms.length === 0 ? (
-          <View style={styles.emptyWrap}>
-            <Text style={styles.emptyText}>No active rooms right now.</Text>
-          </View>
-        ) : (
-          rooms.map((room) => (
-            <View key={room.roomId} style={styles.roomCard}>
-              <Text style={styles.roomTitle}>
-                Room: {room.roomId} {"·"} {room.presenterName || room.presenterDeviceId || "Unknown host"}
-              </Text>
-              <Text style={styles.roomSubtitle}>{room.members?.length ?? 0} member(s)</Text>
-
-              {(room.members ?? []).map((member: RoomMemberInfo, index: number) => {
-                const isHost = member.role === "presenter";
-                const confPct = Math.round((member.confidence ?? (isHost ? 1.0 : 0.95)) * 100);
-                const wifiPct = member.wifiSimilarity != null ? Math.round(member.wifiSimilarity * 100) : null;
-
-                return (
-                  <View key={member.deviceId || index} style={styles.memberRow}>
-                    <View style={styles.memberRowTop}>
-                      <Text style={styles.memberName} numberOfLines={1}>
-                        {member.displayName || member.deviceId}
-                      </Text>
-                      <Text style={[styles.roleBadge, isHost ? styles.roleBadgePresenter : styles.roleBadgeAttendee]}>
-                        {isHost ? "Host" : "User"}
-                      </Text>
-                    </View>
-                    <Text style={styles.memberId} numberOfLines={1}>{member.deviceId}</Text>
-                    <View style={styles.memberMetrics}>
-                      <Text style={styles.confText}>{"\u{1F3AF} " + confPct + "% Conf"}</Text>
-                      <Text style={styles.durationText}>{"\u{23F1} " + formatDuration(member.durationMs)}</Text>
-                      <Text style={styles.bleText}>{"\u{1F4E1} BLE Active"}</Text>
-                      {isHost ? (
-                        <Text style={styles.wifiText}>{"\u{1F4F6} Wi-Fi Anchor"}</Text>
-                      ) : wifiPct != null ? (
-                        <Text style={styles.wifiText}>{"\u{1F4F6} Wi-Fi: " + wifiPct + "%"}</Text>
-                      ) : null}
-                      {member.ultrasonicVerified && (
-                        <Text style={styles.ultrasonicText}>{"\u{1F50A} Verified"}</Text>
-                      )}
-                      {member.motionAnomalyFlag && (
-                        <Text style={styles.anomalyText}>{"⚠️ Inactivity"}</Text>
-                      )}
-                    </View>
-                  </View>
-                );
-              })}
+      {activeTab === "live" ? (
+        <>
+          {fetchError && (
+            <View style={styles.errorBanner}>
+              <Text style={styles.errorBannerText}>{"⚠️"} {fetchError}</Text>
             </View>
-          ))
-        )}
-      </ScrollView>
+          )}
+
+          <ScrollView contentContainerStyle={styles.scrollContent}>
+            {rooms.length === 0 ? (
+              <View style={styles.emptyWrap}>
+                <Text style={styles.emptyText}>No active rooms right now.</Text>
+              </View>
+            ) : (
+              rooms.map((room) => (
+                <View key={room.roomId} style={styles.roomCard}>
+                  <Text style={styles.roomTitle}>
+                    Room: {room.roomId} {"·"} {room.presenterName || room.presenterDeviceId || "Unknown host"}
+                  </Text>
+                  <Text style={styles.roomSubtitle}>{room.members?.length ?? 0} member(s)</Text>
+
+                  {(room.members ?? []).map((member: RoomMemberInfo, index: number) => {
+                    const isHost = member.role === "presenter";
+                    const confPct = Math.round((member.confidence ?? (isHost ? 1.0 : 0.95)) * 100);
+                    const wifiPct = member.wifiSimilarity != null ? Math.round(member.wifiSimilarity * 100) : null;
+
+                    return (
+                      <View key={member.deviceId || index} style={styles.memberRow}>
+                        <View style={styles.memberRowTop}>
+                          <Text style={styles.memberName} numberOfLines={1}>
+                            {member.displayName || member.deviceId}
+                          </Text>
+                          <Text style={[styles.roleBadge, isHost ? styles.roleBadgePresenter : styles.roleBadgeAttendee]}>
+                            {isHost ? "Host" : "User"}
+                          </Text>
+                        </View>
+                        <Text style={styles.memberId} numberOfLines={1}>{member.deviceId}</Text>
+                        <View style={styles.memberMetrics}>
+                          <Text style={styles.confText}>{"\u{1F3AF} " + confPct + "% Conf"}</Text>
+                          <Text style={styles.durationText}>{"\u{23F1} " + formatDuration(member.durationMs)}</Text>
+                          <Text style={styles.bleText}>{"\u{1F4E1} BLE Active"}</Text>
+                          {isHost ? (
+                            <Text style={styles.wifiText}>{"\u{1F4F6} Wi-Fi Anchor"}</Text>
+                          ) : wifiPct != null ? (
+                            <Text style={styles.wifiText}>{"\u{1F4F6} Wi-Fi: " + wifiPct + "%"}</Text>
+                          ) : null}
+                          {member.ultrasonicVerified && (
+                            <Text style={styles.ultrasonicText}>{"\u{1F50A} Verified"}</Text>
+                          )}
+                          {member.motionAnomalyFlag && (
+                            <Text style={styles.anomalyText}>{"⚠️ Inactivity"}</Text>
+                          )}
+                        </View>
+                      </View>
+                    );
+                  })}
+                </View>
+              ))
+            )}
+          </ScrollView>
+        </>
+      ) : (
+        <>
+          <View style={styles.historySearchRow}>
+            <TextInput
+              style={styles.historyCodeInput}
+              value={historyCode}
+              onChangeText={setHistoryCode}
+              placeholder="Session code"
+              autoCapitalize="none"
+            />
+            <TouchableOpacity style={styles.historySearchBtn} onPress={searchHistory} activeOpacity={0.7}>
+              <Text style={styles.historySearchBtnText}>Search</Text>
+            </TouchableOpacity>
+          </View>
+
+          {historyError && (
+            <View style={styles.errorBanner}>
+              <Text style={styles.errorBannerText}>{"⚠️"} {historyError}</Text>
+            </View>
+          )}
+
+          <ScrollView contentContainerStyle={styles.scrollContent}>
+            {historyLoading && (
+              <View style={styles.emptyWrap}>
+                <Text style={styles.emptyText}>Loading...</Text>
+              </View>
+            )}
+
+            {!historyLoading && !selectedOccurrence && (
+              historyOccurrences.length === 0 ? (
+                <View style={styles.emptyWrap}>
+                  <Text style={styles.emptyText}>
+                    {historyCode.trim() ? "No past sessions found for this code yet." : "No sessions recorded yet."}
+                  </Text>
+                </View>
+              ) : (
+                historyOccurrences.map((occ) => {
+                  // hasActivity=false means no room ever actually had anyone in it — a session
+                  // row that was minted (someone joined) but never got real room_membership
+                  // data. Distinct from "active" (has activity, still ongoing) and "ended".
+                  const isOngoing = occ.hasActivity && occ.stillOpen;
+                  return (
+                    <TouchableOpacity
+                      key={occ.id}
+                      style={styles.occurrenceRow}
+                      onPress={() => openOccurrence(occ.id)}
+                      activeOpacity={0.7}
+                    >
+                      <View style={styles.occurrenceLeft}>
+                        <Text style={styles.occurrenceTitle} numberOfLines={1}>
+                          {occ.rooms.length > 0 ? occ.rooms.join(", ") : "No rooms"}
+                        </Text>
+                        <Text style={styles.occurrenceCode} numberOfLines={1}>{occ.code}</Text>
+                        <Text style={styles.occurrenceSubtitle} numberOfLines={1}>
+                          {"\u{1F464} " + (occ.hosts.length > 0 ? occ.hosts.join(", ") : "No host")}
+                        </Text>
+                      </View>
+                      {!occ.hasActivity ? (
+                        <View style={styles.occurrenceRight}>
+                          <Text style={styles.occurrenceSubtitle}>No room activity</Text>
+                        </View>
+                      ) : (
+                      <View style={styles.occurrenceRight}>
+                        <Text style={styles.occurrenceSubtitle}>{occ.startedAt ? new Date(occ.startedAt).toLocaleDateString() : "--"}</Text>
+                        <Text style={styles.occurrenceSubtitle}>{"\u{1F465} " + occ.attendeeCount}</Text>
+                        <Text style={styles.occurrenceSubtitle}>
+                          {"\u{23F1} " + (isOngoing ? "Ongoing" : formatDuration(occ.durationMs))}
+                        </Text>
+                        <Text style={[styles.occurrenceStatus, isOngoing ? styles.occurrenceStatusActive : styles.occurrenceStatusEnded]}>
+                          {isOngoing ? "\u{1F7E2} Active" : "⚫ Ended"}
+                        </Text>
+                      </View>
+                      )}
+                    </TouchableOpacity>
+                  );
+                })
+              )
+            )}
+
+            {!historyLoading && selectedOccurrence && (
+              <View>
+                <TouchableOpacity
+                  style={styles.backToSessionsBtn}
+                  onPress={() => setSelectedOccurrence(null)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.backToSessionsBtnText}>{"←"} Back to sessions</Text>
+                </TouchableOpacity>
+
+                {selectedOccurrence.rooms.length === 0 ? (
+                  <View style={styles.emptyWrap}>
+                    <Text style={styles.emptyText}>No recorded room activity for this session.</Text>
+                  </View>
+                ) : (
+                  selectedOccurrence.rooms.map((room) => {
+                    const attendeeCount = new Set(
+                      room.members.filter((m) => m.role === "attendee").map((m) => m.deviceId)
+                    ).size;
+                    const starts = room.members.map((m) => new Date(m.startedAt).getTime());
+                    const earliestStart = Math.min(...starts);
+                    const { durationMs: roomDurationMs, stillOpen } = computeOccupiedDurationMs(room.members);
+                    const isExpanded = expandedRooms.has(room.roomId);
+
+                    return (
+                    <View key={room.roomId} style={styles.roomCard}>
+                      <TouchableOpacity
+                        activeOpacity={0.7}
+                        onPress={() => {
+                          setExpandedRooms((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(room.roomId)) next.delete(room.roomId);
+                            else next.add(room.roomId);
+                            return next;
+                          });
+                        }}
+                      >
+                        <Text style={styles.roomTitle}>Room: {room.roomId}</Text>
+                        <Text style={styles.roomSubtitle}>{"\u{1F4C5} " + formatTimestamp(earliestStart)}</Text>
+                        <View style={styles.memberMetrics}>
+                          <Text style={styles.confText}>{"\u{1F465} " + attendeeCount + " attendee" + (attendeeCount === 1 ? "" : "s")}</Text>
+                          <Text style={styles.durationText}>
+                            {"\u{23F1} " + (stillOpen ? "Ongoing" : formatDuration(roomDurationMs))}
+                          </Text>
+                        </View>
+                        <Text style={styles.backLinkText}>{isExpanded ? "▲ Hide attendees" : "▼ Show attendees"}</Text>
+                      </TouchableOpacity>
+
+                      {isExpanded && (() => {
+                        // Collapse this room's individual entry/exit rows into one row per
+                        // person — their total time in the room, not every visit separately.
+                        const byDevice = new Map<string, {
+                          displayName: string;
+                          role: "presenter" | "attendee";
+                          totalDurationMs: number;
+                          hasOpenStay: boolean;
+                          everUltrasonicVerified: boolean;
+                          everMotionAnomaly: boolean;
+                        }>();
+                        for (const member of room.members) {
+                          const existing = byDevice.get(member.deviceId) ?? {
+                            displayName: member.displayName,
+                            role: member.role,
+                            totalDurationMs: 0,
+                            hasOpenStay: false,
+                            everUltrasonicVerified: false,
+                            everMotionAnomaly: false
+                          };
+                          if (member.durationMs !== undefined) existing.totalDurationMs += member.durationMs;
+                          if (!member.endedAt) existing.hasOpenStay = true;
+                          if (member.ultrasonicVerified) existing.everUltrasonicVerified = true;
+                          if (member.motionAnomalyFlag) existing.everMotionAnomaly = true;
+                          byDevice.set(member.deviceId, existing);
+                        }
+
+                        return [...byDevice.entries()].map(([deviceId, attendee]) => {
+                          const isHost = attendee.role === "presenter";
+                          return (
+                            <View key={deviceId} style={styles.memberRow}>
+                              <View style={styles.memberRowTop}>
+                                <Text style={styles.memberName} numberOfLines={1}>{attendee.displayName}</Text>
+                                <Text style={[styles.roleBadge, isHost ? styles.roleBadgePresenter : styles.roleBadgeAttendee]}>
+                                  {isHost ? "Host" : "User"}
+                                </Text>
+                              </View>
+                              <View style={styles.memberMetrics}>
+                                <Text style={styles.durationText}>
+                                  {"\u{23F1} " + formatDuration(attendee.totalDurationMs) + (attendee.hasOpenStay ? " (ongoing)" : "")}
+                                </Text>
+                                {attendee.everUltrasonicVerified && (
+                                  <Text style={styles.ultrasonicText}>{"\u{1F50A} Verified"}</Text>
+                                )}
+                                {attendee.everMotionAnomaly && (
+                                  <Text style={styles.anomalyText}>{"⚠️ Inactivity"}</Text>
+                                )}
+                              </View>
+                            </View>
+                          );
+                        });
+                      })()}
+                    </View>
+                    );
+                  })
+                )}
+              </View>
+            )}
+          </ScrollView>
+        </>
+      )}
     </SafeAreaView>
   );
 }
@@ -217,6 +595,15 @@ const styles = StyleSheet.create({
   unlockBtnText: { color: "#FFFFFF", fontWeight: "700", fontSize: 15 },
   backLink: { marginTop: 16 },
   backLinkText: { color: "#5D6873", fontSize: 13 },
+  backToSessionsBtn: {
+    alignSelf: "flex-start",
+    marginBottom: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: "#E6F2F3"
+  },
+  backToSessionsBtnText: { color: "#126D7A", fontSize: 14, fontWeight: "700" },
   header: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -227,12 +614,52 @@ const styles = StyleSheet.create({
     borderBottomColor: "#D9E3E8",
     backgroundColor: "#FFFFFF"
   },
+  headerTitleWrap: { flexShrink: 1, marginRight: 8 },
   headerTitle: { fontSize: 17, fontWeight: "800", color: "#173A63" },
   headerSubtitle: { fontSize: 12, color: "#5D6873", marginTop: 2 },
+  headerActions: { flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 0 },
   backBtn: { paddingHorizontal: 12, paddingVertical: 6, backgroundColor: "#ECEFF1", borderRadius: 6 },
   backBtnText: { fontSize: 13, fontWeight: "700", color: "#455A64" },
+  endSessionBtn: { paddingHorizontal: 12, paddingVertical: 6, backgroundColor: "#FDECEA", borderRadius: 6 },
+  endSessionBtnText: { fontSize: 13, fontWeight: "700", color: "#C62828" },
   errorBanner: { backgroundColor: "#FDECEA", padding: 10, paddingHorizontal: 16 },
   errorBannerText: { color: "#A31D33", fontSize: 12 },
+  tabRow: { flexDirection: "row", paddingHorizontal: 16, paddingTop: 10, gap: 8 },
+  tabBtn: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8, backgroundColor: "#ECEFF1" },
+  tabBtnActive: { backgroundColor: "#126D7A" },
+  tabBtnText: { fontSize: 13, fontWeight: "700", color: "#5D6873" },
+  tabBtnTextActive: { color: "#FFFFFF" },
+  historySearchRow: { flexDirection: "row", paddingHorizontal: 16, paddingTop: 12, gap: 8 },
+  historyCodeInput: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: "#D8DEE2",
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 14,
+    color: "#173A63",
+    backgroundColor: "#FFFFFF"
+  },
+  historySearchBtn: { paddingHorizontal: 16, justifyContent: "center", backgroundColor: "#126D7A", borderRadius: 8 },
+  historySearchBtnText: { color: "#FFFFFF", fontWeight: "700", fontSize: 13 },
+  occurrenceRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    backgroundColor: "#FFFFFF",
+    borderRadius: 10,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "#E3E8EB"
+  },
+  occurrenceLeft: { flexShrink: 1, marginRight: 10 },
+  occurrenceRight: { alignItems: "flex-end", flexShrink: 0 },
+  occurrenceCode: { fontSize: 11, fontWeight: "700", color: "#126D7A", textTransform: "uppercase", letterSpacing: 0.5, marginTop: 2 },
+  occurrenceTitle: { fontSize: 14, fontWeight: "700", color: "#173A63" },
+  occurrenceSubtitle: { fontSize: 12, color: "#5D6873", marginTop: 2 },
+  occurrenceStatus: { fontSize: 12, fontWeight: "700", marginTop: 4 },
+  occurrenceStatusActive: { color: "#1B7A3D" },
+  occurrenceStatusEnded: { color: "#5D6873" },
   scrollContent: { padding: 16, gap: 12 },
   emptyWrap: { paddingVertical: 60, alignItems: "center" },
   emptyText: { color: "#5D6873", fontSize: 14 },

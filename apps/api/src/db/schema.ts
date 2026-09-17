@@ -2,6 +2,11 @@ import { bigserial, boolean, pgTable, primaryKey, real, text, timestamp } from "
 
 export const sessions = pgTable("sessions", {
   id: text("id").primaryKey(),
+  // The human-typed session code (e.g. "ID1") — deliberately NOT unique. A code identifies
+  // a recurring event name, not one occurrence of it; `id` is the auto-generated identity of
+  // one specific occurrence (see PocInferenceEngine.resolveSessionCode). Nullable because rows
+  // created before this column existed won't have it.
+  code: text("code"),
   name: text("name"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   startedAt: timestamp("started_at", { withTimezone: true }),

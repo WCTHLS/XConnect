@@ -9,7 +9,10 @@ import { AppLogger } from "./appLogger";
 
 const MOTION_SAMPLE_INTERVAL_MS = 200; // ~5Hz, coarse activity level, not gesture recognition
 
-const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL ?? "https://xconnect-api.onrender.com";
+// Fallback only used if a caller doesn't pass config.apiUrl explicitly (App.tsx always does).
+// Deliberately not overridable via EXPO_PUBLIC_API_URL — that env var previously let a build
+// silently point "Cloud" at a local dev URL with no indication in the UI.
+const DEFAULT_API_URL = "https://xconnect-api.onrender.com";
 const BATCH_INTERVAL_MS = 10_000;
 // How long a heard ultrasonic token stays valid before we treat it as stale and stop
 // resending it. Must be well under the server's freshness window (45s) so the gate can
