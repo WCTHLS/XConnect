@@ -1,11 +1,10 @@
-import { bigserial, boolean, pgTable, primaryKey, real, text, timestamp } from "drizzle-orm/pg-core";
+import { bigserial, boolean, pgTable, real, text, timestamp } from "drizzle-orm/pg-core";
 
+// A grouping label for rooms, not a lifecycle entity. New rows use the human-typed label as
+// both `id` and `code`; rows from before rooms became the primary entity keep their old
+// per-occurrence ids, with the typed label in `code`.
 export const sessions = pgTable("sessions", {
   id: text("id").primaryKey(),
-  // The human-typed session code (e.g. "ID1") — deliberately NOT unique. A code identifies
-  // a recurring event name, not one occurrence of it; `id` is the auto-generated identity of
-  // one specific occurrence (see PocInferenceEngine.resolveSessionCode). Nullable because rows
-  // created before this column existed won't have it.
   code: text("code"),
   name: text("name"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -13,18 +12,19 @@ export const sessions = pgTable("sessions", {
   endedAt: timestamp("ended_at", { withTimezone: true })
 });
 
-export const rooms = pgTable(
-  "rooms",
-  {
-    id: text("id").notNull(),
-    sessionId: text("session_id")
-      .notNull()
-      .references(() => sessions.id),
-    label: text("label"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
-  },
-  (table) => [primaryKey({ columns: [table.sessionId, table.id] })]
-);
+// The primary entity. One row per real occurrence of a room: `id` is auto-generated
+// (`${safeCode}__${timestamp36}`), `code` is the human-typed room name ("room-a") and is
+// deliberately NOT unique — the same name reused tomorrow is a different occurrence.
+// `sessionId` is just an optional grouping label (sessions.id), never part of a room's identity.
+export const rooms = pgTable("rooms", {
+  id: text("id").primaryKey(),
+  code: text("code").notNull(),
+  sessionId: text("session_id").references(() => sessions.id),
+  label: text("label"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  endedAt: timestamp("ended_at", { withTimezone: true })
+});
 
 // Identity/liveness only. Heartbeat-level status (motion, connection state, confidence)
 // deliberately stays in-memory in PocInferenceEngine, never persisted here — only meaningful
@@ -42,10 +42,9 @@ export const devices = pgTable("devices", {
 // which signal changed; `value` is the value it changed to.
 export const stateChangeEvents = pgTable("state_change_events", {
   id: bigserial("id", { mode: "number" }).primaryKey(),
-  sessionId: text("session_id")
+  roomId: text("room_id")
     .notNull()
-    .references(() => sessions.id),
-  roomId: text("room_id"),
+    .references(() => rooms.id),
   deviceId: text("device_id")
     .notNull()
     .references(() => devices.deviceId),
@@ -56,10 +55,9 @@ export const stateChangeEvents = pgTable("state_change_events", {
 
 export const roomMembership = pgTable("room_membership", {
   id: bigserial("id", { mode: "number" }).primaryKey(),
-  sessionId: text("session_id")
+  roomId: text("room_id")
     .notNull()
-    .references(() => sessions.id),
-  roomId: text("room_id").notNull(),
+    .references(() => rooms.id),
   deviceId: text("device_id")
     .notNull()
     .references(() => devices.deviceId),

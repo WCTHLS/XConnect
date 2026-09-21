@@ -75,7 +75,7 @@ global CLI install, no separate `pnpm add`. The only thing you provide yourself 
    ```
 
 4. **Confirm it worked** — the command should print each migration file as it's applied
-   (currently four: `0000_*.sql` through `0003_jazzy_moira_mactaggert.sql`) and exit with
+   (currently five: `0000_*.sql` through `0004_rooms_primary_entity.sql`) and exit with
    `migrations applied successfully!` and no errors.
 
 5. **Point the actual running server at it.** Wherever the API process runs (a Render Web

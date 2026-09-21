@@ -14,6 +14,7 @@
     "@confpresence/shared": "workspace:*",
     "expo": "^54.0.0",
     "expo-dev-client": "^6.0.0",
+    "expo-file-system": "~19.0.23",
     "expo-print": "~15.0.8",
     "expo-sensors": "~15.0.8",
     "expo-sharing": "~14.0.8",

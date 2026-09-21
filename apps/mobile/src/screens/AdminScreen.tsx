@@ -13,6 +13,7 @@ import {
 } from "react-native";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
+import { EncodingType, readAsStringAsync, StorageAccessFramework } from "expo-file-system/legacy";
 import type { LiveRoomState, RoomMemberInfo } from "@confpresence/shared";
 
 const ADMIN_PIN = "2468";
@@ -108,6 +109,33 @@ type HistoryDetail = {
   endedAt: string | null;
   rooms: { roomId: string; members: HistoryMember[] }[];
 };
+
+let savedPdfDirectoryUri: string | null = null;
+
+/** Writes the PDF into a user-chosen folder (asked once per app launch). Returns false if it could not, so the caller can fall back to the share sheet. */
+async function saveToChosenFolder(pdfUri: string, code: string): Promise<boolean> {
+  try {
+    if (!savedPdfDirectoryUri) {
+      const perm = await StorageAccessFramework.requestDirectoryPermissionsAsync();
+      if (!perm.granted) return false;
+      savedPdfDirectoryUri = perm.directoryUri;
+    }
+    const base64 = await readAsStringAsync(pdfUri, { encoding: EncodingType.Base64 });
+    const safeCode = code.replace(/[^a-zA-Z0-9_-]/g, "_") || "session";
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+    const fileUri = await StorageAccessFramework.createFileAsync(
+      savedPdfDirectoryUri,
+      `XConnect-${safeCode}-${stamp}`,
+      "application/pdf"
+    );
+    await StorageAccessFramework.writeAsStringAsync(fileUri, base64, { encoding: EncodingType.Base64 });
+    Alert.alert("PDF saved", "Saved to the folder you selected.");
+    return true;
+  } catch {
+    savedPdfDirectoryUri = null;
+    return false;
+  }
+}
 
 function formatTimestamp(iso?: string | number | null): string {
   if (iso === undefined || iso === null) return "--";
@@ -347,6 +375,9 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
     try {
       const html = buildHistoryReportHtml(selectedOccurrence);
       const { uri } = await Print.printToFileAsync({ html });
+      if (Platform.OS === "android" && (await saveToChosenFolder(uri, selectedOccurrence.code))) {
+        return;
+      }
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(uri, { mimeType: "application/pdf", dialogTitle: "Session Report" });
       } else {

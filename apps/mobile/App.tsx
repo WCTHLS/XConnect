@@ -57,7 +57,8 @@ export default function App() {
     });
   }, []);
 
-  const service = useMemo(() => new PresenceService(setStatus), []);
+  const roomRejectedRef = useRef<(message: string) => void>(() => {});
+  const service = useMemo(() => new PresenceService(setStatus, (message) => roomRejectedRef.current(message)), []);
 
   const checkHealth = async (url: string) => {
     setServerHealth("checking");
@@ -94,7 +95,7 @@ export default function App() {
     try {
       const url =
         role === "presenter"
-          ? `${serverUrl}/api/rooms/${roomId}/live?sessionId=${sessionId}`
+          ? `${serverUrl}/api/rooms/${roomId}/live?sessionId=${sessionId}&deviceId=${deviceId}`
           : `${serverUrl}/api/devices/${deviceId}/live?sessionId=${sessionId}`;
 
       const res = await fetch(url);
@@ -105,6 +106,13 @@ export default function App() {
         setServerHealth("online");
         const data = await res.json();
         if (!runningRef.current) return;
+
+        // The room was ended (presenter left, or admin ended the session): stop sharing here too.
+        if (data.roomEnded === true) {
+          void togglePresence(false);
+          Alert.alert("Room ended", "This room was ended, so sharing has been turned off.");
+          return;
+        }
 
         if (data.roomId && data.roomId !== "unknown") {
           setDetectedRoom(data.roomId);
@@ -217,6 +225,11 @@ export default function App() {
       setServerConnected(null);
       Alert.alert("Unable to start BLE", error instanceof Error ? error.message : "Unknown BLE error");
     }
+  };
+
+  roomRejectedRef.current = (message: string) => {
+    void togglePresence(false);
+    Alert.alert("Room already has a presenter", message);
   };
 
   const handleToggleSwitch = (enabled: boolean) => {

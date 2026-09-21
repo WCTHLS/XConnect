@@ -1,14 +1,15 @@
 # Admin architecture
 
-How the admin layer works: session identity, live room inference, Postgres persistence,
+How the admin layer works: room identity, live room inference, Postgres persistence,
 history/PDF export, and deployment. Covers `apps/api/src/inference.ts`, `apps/api/src/index.ts`,
 `apps/api/src/db/schema.ts`, and `apps/mobile/src/screens/AdminScreen.tsx`.
 
 ## Model
 
 XConnect is built for one admin running one event with several rooms, not a multi-tenant
-system — there is no per-organizer account system, and a session ID is a convenience for
-grouping an event's data, not a security boundary between different admins' devices.
+system — there is no per-organizer account system, and a session label is a convenience for
+grouping an event's rooms, not a security boundary between different admins' devices. The room
+occurrence is the primary entity.
 
 Three pieces do the work:
 
@@ -23,44 +24,47 @@ The engine is the source of truth for *live* state; Postgres is the source of tr
 *past* state. The admin screen's Live and History tabs are reads against two different
 systems, not two views of the same table.
 
-## Session identity: code vs. occurrence
+## Room identity: name vs. occurrence
 
-A presenter types a short, reusable string — a **code**, e.g. `poc-session-1`. Reusing that
-code on a different day must not silently merge two unrelated events' data, so identity is
-split into two layers:
+A presenter types a short, reusable **room name**, e.g. `room-a`. Reusing that name on a
+different day, or under a different session label, must not merge two unrelated rooms' data, so
+identity is split into two layers:
 
 | Term | Looks like | Meaning |
 |---|---|---|
-| `code` | `poc-session-1` | What a human types. Not unique — identifies a recurring event name. |
-| `sessionId` | `poc-session-1__mu4qm03v` | Auto-generated per real occurrence: `` `${safeCode}__${now.toString(36)}` ``. Every downstream row is keyed by this. |
+| `code` | `room-a` | What a human types. Not unique. |
+| `rooms.id` | `room-a__mu4qm03v` | Auto-generated per real occurrence: `` `${safeCode}__${now.toString(36)}` ``. Every membership and state-change row points at this. |
 
-`activeSessionsByCode` (an in-memory `Map<code, {sessionId, lastActivityAt}>`) tracks which
-occurrence a code currently resolves to. Two entry points touch it:
+A **session label** (`sessions.id`, the string typed into the app's session field) is only a
+grouping label for rooms. It is not part of any room's identity, has no lifecycle of its own,
+and `rooms.session_id` is a nullable foreign key to it.
 
-| Function | Called from | Behavior |
-|---|---|---|
-| `resolveSessionCode()` | `POST /api/session/join`, `POST /api/observations` | Mints a new `sessionId` if none is active for that code (or the old one went quiet), else bumps `lastActivityAt` and reuses it. Only participating devices reach this. |
-| `peekActiveSession()` | `GET /api/admin/overview`, `GET /api/rooms*` | Read-only. Returns the active `sessionId` or `undefined` — never mints. Fixes a bug where opening the admin Live tab could start a phantom session. |
+`activeRoomsByKey` (an in-memory `Map<"label::roomName", {roomId, lastActivityAt}>`) tracks which
+occurrence a room name currently resolves to. `resolveRoom()` is the only place that mints one,
+and only presenters (join/ingest) and membership tracking reach it. Read-only views (the admin
+Live tab, `GET /api/rooms*`) never create rooms.
 
 Lifecycle:
 
-1. **First join** — no entry for the code, so a fresh `sessionId` is minted and a `sessions`
-   row is fire-and-forget inserted with that code attached.
-2. **Reuse** — same code, still within `SESSION_AUTO_EXPIRY_MS` (8 hours) of last activity,
-   returns the same occurrence.
-3. **Auto-expiry** — survives a lunch break, but forces a fresh occurrence by the next day
-   even if nobody explicitly ended it.
-4. **Explicit end** — `POST /api/admin/session/end` calls `endSession()`, which removes the
-   code from the map and stamps `ended_at` immediately.
-5. **Restart cleanup** — `activeSessionsByCode` is wiped by any server restart. Startup runs
-   `UPDATE sessions SET ended_at = now() WHERE ended_at IS NULL` so nothing is left looking
-   permanently "active" in History.
+1. **First presenter join** for a label and room name mints a new `rooms.id` and fire-and-forget
+   inserts the `sessions` label row (if new) and the `rooms` row.
+2. **Reuse** — the same label and name within `ROOM_AUTO_EXPIRY_MS` (8 hours) of last activity
+   resolves to the same occurrence.
+3. **Auto-expiry** — survives a lunch break, forces a fresh occurrence by the next day.
+4. **Presenter leaves** — `leave()` ends that room's occurrence: open stays are closed at once
+   and `rooms.ended_at` is stamped.
+5. **Admin ends a session** — `POST /api/admin/session/end` calls `endSession(label)`, which ends
+   every active room under that label.
+6. **Restart cleanup** — the active-room map is wiped by any server restart. Startup runs
+   `UPDATE rooms SET ended_at = now() WHERE ended_at IS NULL` so nothing looks permanently active.
 
-**Why this mattered:** the code-carrying insert from `resolveSessionCode()` and a redundant
-code-less upsert from `join()` were once two independent fire-and-forget writes to the same
-row — whichever's `ON CONFLICT DO NOTHING` landed first on the pooled connection won,
-sometimes permanently shadowing the code. Fixed with a `pendingSessionCreation` map that
-other writers await before their own insert.
+Two rooms with the same name in different sessions are therefore two separate occurrences, with
+separate presenters, rosters, and history. Live inference also scopes presenters by session label,
+so they can no longer show up as one room with two hosts.
+
+Room rows are created by one fire-and-forget write, tracked in `pendingRoomCreation`. Writers that
+reference the room by foreign key (membership rows, state-change events) await it first, since on
+a pooled connection their insert could otherwise reach Postgres before the room row exists.
 
 ## Live monitoring: how a room's roster is computed
 
@@ -99,11 +103,11 @@ database — every write is `.catch(console.error)`'d and fired without blocking
 
 | Table | Grain | Written when |
 |---|---|---|
-| `sessions` | one row per occurrence | on first join for a code; `ended_at` set on explicit end, auto-expiry, or server restart |
-| `rooms` | one row per room per session | alongside the session row |
+| `sessions` | one row per session label | grouping label only, created with its first room |
+| `rooms` | one row per room occurrence (primary entity) | on a presenter's first join; `ended_at` set on presenter leave, session end, or server restart |
 | `devices` | one row per device, ever | identity/liveness only, never heartbeat data |
-| `room_membership` | one row per closed stay | when a stay ends: grace-period trim, an explicit presenter `leave()`, or session end |
-| `state_change_events` | one row per meaningful transition | a boolean flag flipping (`connected`, `ultrasonic_verified`, `motion_anomaly_flag`), never a per-poll snapshot |
+| `room_membership` | one row per closed stay, FK to `rooms.id` | when a stay ends: grace-period trim, an explicit presenter `leave()`, or session end |
+| `state_change_events` | one row per meaningful transition, FK to `rooms.id` | a boolean flag flipping (`connected`, `ultrasonic_verified`, `motion_anomaly_flag`), never a per-poll snapshot |
 
 Two ways a stay closes:
 
@@ -133,8 +137,8 @@ Two endpoints back the History tab, answering different questions:
 
 | Route | Answers |
 |---|---|
-| `GET /api/admin/sessions?code=` | "What occurrences exist for this code (or all codes)?" — a search list with room names, hosts, attendee count, and total duration per occurrence. |
-| `GET /api/admin/history?sessionId=` | "Who was in which room, for how long, during this one occurrence?" — the full room-by-room, member-by-member breakdown behind a selected list entry. |
+| `GET /api/admin/sessions?code=` | "Which room occurrences exist (optionally under this session label)?" — one entry per room occurrence, with host, attendee count, and total duration. |
+| `GET /api/admin/history?roomId=` | "Who was in this room, for how long?" — the member-by-member breakdown for one room occurrence (`sessionId=` is accepted as an alias). |
 
 ### Real occupied time, not a naive span
 
@@ -167,9 +171,9 @@ two tabs:
 
 - **Live** — polls `/api/admin/overview` every 5s, rendering each active room's roster with
   role badges, confidence, and the ultrasonic-verified / motion-anomaly flags.
-- **History** — search by code (blank = everything), select an occurrence, expand a room to
-  see aggregated per-attendee totals, download the PDF, or end an ongoing session via
-  `POST /api/admin/session/end`.
+- **History** — search by session label (blank = everything), select a room occurrence, expand it to
+  see aggregated per-attendee totals, download the PDF. Ending a session from the admin screen
+  ends every active room under its label via `POST /api/admin/session/end`.
 
 Both tabs read two structurally different things through the same UI shell: Live is a
 window into `PocInferenceEngine`'s live memory; History is a query against Postgres. There

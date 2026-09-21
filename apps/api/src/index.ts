@@ -11,19 +11,19 @@ const port = Number(process.env.PORT ?? process.env.API_PORT ?? 3000);
 
 console.log(db ? "🗄️  Postgres persistence enabled" : "⚠️  No DATABASE_URL set — running in-memory only (POC mode)");
 
-// PocInferenceEngine's "which occurrence is active for this code" tracking lives only in
+// PocInferenceEngine's "which occurrence is active for this room" tracking lives only in
 // memory, so a server restart silently orphans whatever was active at the time — those rows
 // would otherwise sit with ended_at: NULL forever, looking "active" in history indefinitely.
 // A fresh boot is itself a natural "nothing is actually active anymore" boundary, so close
 // them out right here rather than leaving stale rows behind.
 if (db) {
-  db.update(schema.sessions)
+  db.update(schema.rooms)
     .set({ endedAt: new Date() })
-    .where(isNull(schema.sessions.endedAt))
+    .where(isNull(schema.rooms.endedAt))
     .then((result) => {
-      if (result.count > 0) console.log(`🧹 Closed ${result.count} session(s) left open from before this restart`);
+      if (result.count > 0) console.log(`🧹 Closed ${result.count} room(s) left open from before this restart`);
     })
-    .catch((err) => console.error("[db] failed to close orphaned sessions on startup:", err));
+    .catch((err) => console.error("[db] failed to close orphaned rooms on startup:", err));
 }
 
 app.use(cors());
@@ -88,8 +88,14 @@ app.post("/api/session/join", (request, response) => {
   if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
 
   const { sessionId: code, deviceId, role, roomId, displayName } = parsed.data;
-  const sessionId = engine.resolveSessionCode(code);
-  engine.join(deviceId, role, roomId, displayName, sessionId);
+  if (role === "presenter" && roomId) {
+    const conflict = engine.presenterConflict(code, roomId, deviceId);
+    if (conflict) {
+      console.log(`⛔ [JOIN] ${displayName || deviceId} rejected: room '${roomId}' already has presenter ${conflict.presenterName} (Session: ${code})`);
+      return response.status(409).json({ error: "room_has_presenter", presenterName: conflict.presenterName });
+    }
+  }
+  engine.join(deviceId, role, roomId, displayName, code);
 
   const roleEmoji = role === "presenter" ? "👑 [PRESENTER]" : "👤 [ATTENDEE]";
   console.log(`🟢 ${roleEmoji} ${displayName || deviceId} joined room '${roomId || "unassigned"}' (Session: ${code})`);
@@ -102,11 +108,13 @@ app.post("/api/admin/session/end", (request, response) => {
   if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
 
   const ended = engine.endSession(parsed.data.sessionId);
-  console.log(ended ? `🛑 [SESSION] '${parsed.data.sessionId}' ended by admin` : `⚠️  [SESSION] '${parsed.data.sessionId}' had no active occurrence to end`);
+  console.log(ended ? `🛑 [SESSION] all rooms under '${parsed.data.sessionId}' ended by admin` : `⚠️  [SESSION] '${parsed.data.sessionId}' had no active rooms to end`);
 
   return response.json({ ok: true, ended });
 });
 
+// History is room-centric: each entry is one occurrence of one room (rooms.id). The optional
+// `code` filter matches the session label the room was grouped under.
 app.get("/api/admin/sessions", async (request, response) => {
   if (!db) return response.status(503).json({ error: "History requires Postgres persistence (DATABASE_URL not set)" });
 
@@ -114,30 +122,21 @@ app.get("/api/admin/sessions", async (request, response) => {
   const code = String(request.query.code ?? "").trim();
 
   const rows = await db
-    .select({ id: schema.sessions.id, code: schema.sessions.code })
-    .from(schema.sessions)
+    .select({
+      id: schema.rooms.id,
+      roomCode: schema.rooms.code,
+      sessionLabel: schema.sessions.code
+    })
+    .from(schema.rooms)
+    .leftJoin(schema.sessions, eq(schema.sessions.id, schema.rooms.sessionId))
     .where(code ? eq(schema.sessions.code, code) : undefined)
-    .orderBy(desc(schema.sessions.createdAt));
+    .orderBy(desc(schema.rooms.createdAt));
 
-  const sessionIds = rows.map((r) => r.id);
-  const roomRows = sessionIds.length
-    ? await db
-        .select({ sessionId: schema.rooms.sessionId, roomId: schema.rooms.id })
-        .from(schema.rooms)
-        .where(inArray(schema.rooms.sessionId, sessionIds))
-    : [];
-
-  const roomsBySession = new Map<string, string[]>();
-  for (const r of roomRows) {
-    const list = roomsBySession.get(r.sessionId) ?? [];
-    list.push(r.roomId);
-    roomsBySession.set(r.sessionId, list);
-  }
-
-  const membershipRows = sessionIds.length
+  const roomIds = rows.map((r) => r.id);
+  const membershipRows = roomIds.length
     ? await db
         .select({
-          sessionId: schema.roomMembership.sessionId,
+          roomId: schema.roomMembership.roomId,
           deviceId: schema.roomMembership.deviceId,
           role: schema.roomMembership.role,
           displayName: schema.devices.displayName,
@@ -146,31 +145,31 @@ app.get("/api/admin/sessions", async (request, response) => {
         })
         .from(schema.roomMembership)
         .leftJoin(schema.devices, eq(schema.devices.deviceId, schema.roomMembership.deviceId))
-        .where(inArray(schema.roomMembership.sessionId, sessionIds))
+        .where(inArray(schema.roomMembership.roomId, roomIds))
     : [];
 
-  const hostsBySession = new Map<string, Set<string>>();
-  const attendeesBySession = new Map<string, Set<string>>();
-  // The session row's own started_at/ended_at are just admin bookkeeping (when the code was
-  // first minted / explicitly ended or auto-expired) — the data people actually care about is
-  // when rooms were really active, so derive that from room_membership instead.
-  const roomTimesBySession = new Map<string, { startedAt: Date; endedAt: Date | null; stillOpen: boolean }>();
-  const intervalsBySession = new Map<string, { start: number; end: number }[]>();
+  const hostsByRoom = new Map<string, Set<string>>();
+  const attendeesByRoom = new Map<string, Set<string>>();
+  // The room row's own started_at/ended_at are just bookkeeping (when the occurrence was minted /
+  // explicitly ended) — the data people actually care about is when someone was really in the
+  // room, so derive that from room_membership instead.
+  const timesByRoom = new Map<string, { startedAt: Date; endedAt: Date | null; stillOpen: boolean }>();
+  const intervalsByRoom = new Map<string, { start: number; end: number }[]>();
   const now = Date.now();
   for (const m of membershipRows) {
     if (m.role === "presenter") {
-      const set = hostsBySession.get(m.sessionId) ?? new Set<string>();
+      const set = hostsByRoom.get(m.roomId) ?? new Set<string>();
       set.add(m.displayName || m.deviceId);
-      hostsBySession.set(m.sessionId, set);
+      hostsByRoom.set(m.roomId, set);
     } else {
-      const set = attendeesBySession.get(m.sessionId) ?? new Set<string>();
+      const set = attendeesByRoom.get(m.roomId) ?? new Set<string>();
       set.add(m.deviceId);
-      attendeesBySession.set(m.sessionId, set);
+      attendeesByRoom.set(m.roomId, set);
     }
 
-    const times = roomTimesBySession.get(m.sessionId);
+    const times = timesByRoom.get(m.roomId);
     if (!times) {
-      roomTimesBySession.set(m.sessionId, { startedAt: m.startedAt, endedAt: m.endedAt, stillOpen: !m.endedAt });
+      timesByRoom.set(m.roomId, { startedAt: m.startedAt, endedAt: m.endedAt, stillOpen: !m.endedAt });
     } else {
       if (m.startedAt < times.startedAt) times.startedAt = m.startedAt;
       if (!m.endedAt) {
@@ -180,17 +179,17 @@ app.get("/api/admin/sessions", async (request, response) => {
       }
     }
 
-    const list = intervalsBySession.get(m.sessionId) ?? [];
+    const list = intervalsByRoom.get(m.roomId) ?? [];
     list.push({ start: m.startedAt.getTime(), end: m.endedAt ? m.endedAt.getTime() : now });
-    intervalsBySession.set(m.sessionId, list);
+    intervalsByRoom.set(m.roomId, list);
   }
 
   // Real occupied time, not a naive first-start-to-last-end span — a room that empties out
   // between two separate visits (presenter leaves, comes back later) must not have that gap
   // counted as if something were active the whole time. Merge overlapping/adjacent intervals
-  // across every room/device in the session and sum only the merged, actually-occupied ranges.
-  const durationBySession = new Map<string, number>();
-  for (const [sessionId, intervals] of intervalsBySession) {
+  // across every device in the room and sum only the merged, actually-occupied ranges.
+  const durationByRoom = new Map<string, number>();
+  for (const [roomId, intervals] of intervalsByRoom) {
     const sorted = [...intervals].sort((a, b) => a.start - b.start);
     let total = 0;
     let curStart = sorted[0].start;
@@ -206,22 +205,22 @@ app.get("/api/admin/sessions", async (request, response) => {
       }
     }
     total += curEnd - curStart;
-    durationBySession.set(sessionId, total);
+    durationByRoom.set(roomId, total);
   }
 
   const sessions = rows.map((r) => {
-    const times = roomTimesBySession.get(r.id);
+    const times = timesByRoom.get(r.id);
     return {
       id: r.id,
-      code: r.code,
+      code: r.sessionLabel ?? r.roomCode,
       hasActivity: Boolean(times),
       startedAt: times?.startedAt ?? null,
       endedAt: times && !times.stillOpen ? times.endedAt : null,
       stillOpen: times?.stillOpen ?? false,
-      durationMs: durationBySession.get(r.id),
-      rooms: roomsBySession.get(r.id) ?? [],
-      hosts: [...(hostsBySession.get(r.id) ?? [])],
-      attendeeCount: (attendeesBySession.get(r.id) ?? new Set()).size
+      durationMs: durationByRoom.get(r.id),
+      rooms: [r.roomCode],
+      hosts: [...(hostsByRoom.get(r.id) ?? [])],
+      attendeeCount: (attendeesByRoom.get(r.id) ?? new Set()).size
     };
   });
 
@@ -231,17 +230,27 @@ app.get("/api/admin/sessions", async (request, response) => {
 app.get("/api/admin/history", async (request, response) => {
   if (!db) return response.status(503).json({ error: "History requires Postgres persistence (DATABASE_URL not set)" });
 
-  const sessionId = String(request.query.sessionId ?? "").trim();
-  if (!sessionId) return response.status(400).json({ error: "sessionId query param is required" });
+  // `roomId` is the room occurrence ID; `sessionId` is accepted as the same thing for older clients.
+  const roomOccurrenceId = String(request.query.roomId ?? request.query.sessionId ?? "").trim();
+  if (!roomOccurrenceId) return response.status(400).json({ error: "roomId query param is required" });
 
-  const [session] = await db.select().from(schema.sessions).where(eq(schema.sessions.id, sessionId));
-  if (!session) return response.status(404).json({ error: "No session found with that ID" });
+  const [room] = await db
+    .select({
+      id: schema.rooms.id,
+      roomCode: schema.rooms.code,
+      startedAt: schema.rooms.startedAt,
+      endedAt: schema.rooms.endedAt,
+      sessionLabel: schema.sessions.code
+    })
+    .from(schema.rooms)
+    .leftJoin(schema.sessions, eq(schema.sessions.id, schema.rooms.sessionId))
+    .where(eq(schema.rooms.id, roomOccurrenceId));
+  if (!room) return response.status(404).json({ error: "No room found with that ID" });
 
   const rows = await db
     .select({
       deviceId: schema.roomMembership.deviceId,
       displayName: schema.devices.displayName,
-      roomId: schema.roomMembership.roomId,
       role: schema.roomMembership.role,
       startedAt: schema.roomMembership.startedAt,
       endedAt: schema.roomMembership.endedAt,
@@ -251,37 +260,27 @@ app.get("/api/admin/history", async (request, response) => {
     })
     .from(schema.roomMembership)
     .leftJoin(schema.devices, eq(schema.devices.deviceId, schema.roomMembership.deviceId))
-    .where(eq(schema.roomMembership.sessionId, sessionId))
-    .orderBy(schema.roomMembership.roomId, schema.roomMembership.startedAt);
+    .where(eq(schema.roomMembership.roomId, roomOccurrenceId))
+    .orderBy(schema.roomMembership.startedAt);
 
-  const roomsById = new Map<string, typeof rows>();
-  for (const row of rows) {
-    const list = roomsById.get(row.roomId) ?? [];
-    list.push(row);
-    roomsById.set(row.roomId, list);
-  }
-
-  const rooms = [...roomsById.entries()].map(([roomId, members]) => ({
-    roomId,
-    members: members.map((m) => ({
-      deviceId: m.deviceId,
-      displayName: m.displayName || m.deviceId,
-      role: m.role,
-      startedAt: m.startedAt,
-      endedAt: m.endedAt,
-      durationMs: m.endedAt ? new Date(m.endedAt).getTime() - new Date(m.startedAt).getTime() : undefined,
-      lastConfidence: m.lastConfidence,
-      ultrasonicVerified: m.ultrasonicVerified,
-      motionAnomalyFlag: m.motionAnomalyFlag
-    }))
+  const members = rows.map((m) => ({
+    deviceId: m.deviceId,
+    displayName: m.displayName || m.deviceId,
+    role: m.role,
+    startedAt: m.startedAt,
+    endedAt: m.endedAt,
+    durationMs: m.endedAt ? new Date(m.endedAt).getTime() - new Date(m.startedAt).getTime() : undefined,
+    lastConfidence: m.lastConfidence,
+    ultrasonicVerified: m.ultrasonicVerified,
+    motionAnomalyFlag: m.motionAnomalyFlag
   }));
 
   return response.json({
-    sessionId: session.id,
-    code: session.code,
-    startedAt: session.startedAt,
-    endedAt: session.endedAt,
-    rooms
+    sessionId: room.id,
+    code: room.sessionLabel ?? room.roomCode,
+    startedAt: room.startedAt,
+    endedAt: room.endedAt,
+    rooms: members.length ? [{ roomId: room.roomCode, members }] : []
   });
 });
 
@@ -309,8 +308,11 @@ app.post("/api/observations", (request, response) => {
   const parsed = batchSchema.safeParse(request.body);
   if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
 
-  const sessionId = engine.resolveSessionCode(parsed.data.sessionId);
-  engine.ingest({ ...parsed.data, sessionId });
+  if (parsed.data.role === "presenter" && parsed.data.roomId) {
+    const conflict = engine.presenterConflict(parsed.data.sessionId, parsed.data.roomId, parsed.data.deviceId);
+    if (conflict) return response.status(409).json({ error: "room_has_presenter", presenterName: conflict.presenterName });
+  }
+  engine.ingest(parsed.data);
 
   const { displayName, deviceId, role, peers, wifiFingerprint, roomId, motionVariance, ultrasonicObservation, ultrasonicEmittedToken } = parsed.data;
   const name = displayName || deviceId.slice(-8);
@@ -323,23 +325,23 @@ app.post("/api/observations", (request, response) => {
   return response.status(202).json({ ok: true, peerCount: peers.length });
 });
 
-// These four routes are read-only views of live state — they must never have the side effect
-// of starting a session, only join()/ingest() (someone actually participating) can do that.
-// peekActiveSession() returns undefined instead of minting when the code has nothing active.
+// These four routes are read-only views of live state — they never create rooms, only
+// presenters joining/sending batches do. `sessionId` is the session label the room is grouped under.
 
 app.get("/api/rooms", (request, response) => {
-  const sessionId = engine.peekActiveSession(String(request.query.sessionId ?? "poc-session"));
-  return response.json({ rooms: sessionId ? engine.listRooms(sessionId) : [] });
+  const label = String(request.query.sessionId ?? "poc-session");
+  return response.json({ rooms: engine.listRooms(label) });
 });
 
 let lastLogTime = 0;
 app.get("/api/rooms/:roomId/live", (request, response) => {
-  const code = String(request.query.sessionId ?? "poc-session");
-  const sessionId = engine.peekActiveSession(code);
-  if (!sessionId) {
-    return response.json({ sessionId: code, roomId: request.params.roomId, estimatedMemberDeviceIds: [], members: [], updatedAt: new Date().toISOString() });
+  const label = String(request.query.sessionId ?? "poc-session");
+  const state = engine.roomState(label, request.params.roomId);
+  // A presenter passes its own deviceId so an admin ending the session can switch it off too.
+  const askingDeviceId = String(request.query.deviceId ?? "");
+  if (askingDeviceId && engine.roomEndedNotice(askingDeviceId)) {
+    return response.json({ ...state, roomEnded: true });
   }
-  const state = engine.roomState(sessionId, request.params.roomId);
 
   // Throttle periodic room state summary logging to once every 15s to keep console clean
   const now = Date.now();
@@ -353,19 +355,17 @@ app.get("/api/rooms/:roomId/live", (request, response) => {
 });
 
 app.get("/api/devices/:deviceId/live", (request, response) => {
-  const code = String(request.query.sessionId ?? "poc-session");
-  const sessionId = engine.peekActiveSession(code);
-  if (!sessionId) {
-    return response.json({ sessionId: code, roomId: "unknown", estimatedMemberDeviceIds: [], members: [], updatedAt: new Date().toISOString() });
-  }
-  return response.json(engine.deviceRoomState(sessionId, request.params.deviceId));
+  const label = String(request.query.sessionId ?? "poc-session");
+  const state = engine.deviceRoomState(label, request.params.deviceId);
+  return response.json(engine.roomEndedNotice(request.params.deviceId) ? { ...state, roomEnded: true } : state);
 });
 
 app.get("/api/admin/overview", (request, response) => {
-  const sessionId = engine.peekActiveSession(String(request.query.sessionId ?? "poc-session"));
-  const rooms = sessionId
-    ? engine.listRooms(sessionId).map((roomId) => engine.roomState(sessionId, roomId)).filter((state) => state.members && state.members.length > 0)
-    : [];
+  const label = String(request.query.sessionId ?? "poc-session");
+  const rooms = engine
+    .listRooms(label)
+    .map((roomId) => engine.roomState(label, roomId))
+    .filter((state) => state.members && state.members.length > 0);
   return response.json({ rooms });
 });
 

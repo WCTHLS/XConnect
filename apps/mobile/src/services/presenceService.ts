@@ -114,7 +114,22 @@ export class PresenceService {
   private currentUltrasonicToken?: string;
   private isRunning = false;
 
-  constructor(private readonly onStatus: (status: PresenceStatus) => void) {}
+  private rejectionReported = false;
+
+  constructor(
+    private readonly onStatus: (status: PresenceStatus) => void,
+    private readonly onRoomRejected?: (message: string) => void
+  ) {}
+
+  /** The server refused this presenter because the room already has a live one. Reported once per start. */
+  private async handleRoomRejected(res: Response) {
+    if (this.rejectionReported) return;
+    this.rejectionReported = true;
+    const data = await res.json().catch(() => null);
+    const who = data?.presenterName ? ` (${data.presenterName})` : "";
+    AppLogger.log("WARN", `Room already has a presenter${who}`, "warn");
+    this.onRoomRejected?.(`This room already has a presenter${who}. Pick a different room, or wait for them to leave.`);
+  }
 
   private emitStatus(stateOverride?: "idle" | "starting" | "running" | "error", error?: string) {
     this.onStatus({
@@ -130,6 +145,7 @@ export class PresenceService {
 
   async start(config: StartConfig) {
     this.config = config;
+    this.rejectionReported = false;
     this.isRunning = true;
     this.lastWifiApCount = 0;
     this.lastKnownWifiFingerprint = [];
@@ -409,6 +425,8 @@ export class PresenceService {
       const latency = Date.now() - tStart;
       if (res.ok) {
         AppLogger.log("API", `Synced batch to cloud -> 200 OK (${latency}ms)`);
+      } else if (res.status === 409) {
+        await this.handleRoomRejected(res);
       } else {
         AppLogger.log("WARN", `Sync returned status ${res.status} (${latency}ms)`, "warn");
       }
@@ -432,6 +450,8 @@ export class PresenceService {
       });
       if (res.ok) {
         AppLogger.log("API", `Session joined: ${config.sessionId} as ${config.role}`);
+      } else if (res.status === 409) {
+        await this.handleRoomRejected(res);
       }
     } catch (err: any) {
       AppLogger.log("WARN", `Session join pending server wake: ${err?.message || "Offline"}`, "warn");
