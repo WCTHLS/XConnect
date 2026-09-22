@@ -72,6 +72,25 @@ export default function App() {
         const name = me?.name ?? fallback;
         savedNameRef.current = name;
         setDisplayName(name);
+        // The provider's token can lag behind a name just set at sign-up, so the server may not
+        // have it yet on this very first call. The client already knows it (see auth.ts), so push
+        // it through explicitly instead of waiting for the next sign-in to pick up the token claim.
+        // Only when no preferredName is set server-side yet — never overwrite a name someone chose.
+        const hasPreferredName = me?.name && me?.accountName && me.name !== me.accountName;
+        if (fallback && !hasPreferredName && name !== fallback) {
+          authFetch(`${serverUrl}/api/me`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ preferredName: fallback })
+          })
+            .then((res) => res.json())
+            .then((data) => {
+              if (cancelled) return;
+              savedNameRef.current = data?.name ?? fallback;
+              setDisplayName(savedNameRef.current);
+            })
+            .catch(() => {});
+        }
       })
       .catch(() => {
         if (cancelled) return;
@@ -398,7 +417,7 @@ export default function App() {
 
           {authSession ? (
             <View style={styles.signedInRow}>
-              <Text style={styles.label} numberOfLines={1} ellipsizeMode="tail">
+              <Text style={[styles.label, styles.signedInText]} numberOfLines={1} ellipsizeMode="tail">
                 Signed in as {authSession.email || "you"}
               </Text>
               <View style={styles.signOutBtn}>
@@ -805,6 +824,7 @@ const styles = StyleSheet.create({
   },
   roleRow: { flexDirection: "row", justifyContent: "space-between", gap: 12 },
   signedInRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  signedInText: { flexShrink: 1, minWidth: 0 },
   signOutBtn: { flexShrink: 0 },
 
   // Room Management Styles

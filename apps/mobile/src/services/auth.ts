@@ -49,7 +49,9 @@ function getDiscovery() {
 
 function decodeClaims(idToken: string): { name?: string; email?: string } {
   try {
-    const payload = idToken.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    let payload = idToken.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    // JWT segments are unpadded base64url; atob requires a length that's a multiple of 4.
+    while (payload.length % 4) payload += "=";
     const json = decodeURIComponent(
       atob(payload)
         .split("")
@@ -117,25 +119,28 @@ async function firebasePost(path: string, body: Record<string, unknown>) {
   return data;
 }
 
-function firebaseSession(data: FirebaseTokens): AuthSessionInfo {
+function firebaseSession(data: FirebaseTokens, nameOverride?: string, emailOverride?: string): AuthSessionInfo {
   return {
     provider: "firebase",
     idToken: data.idToken,
     refreshToken: data.refreshToken,
     expiresAt: Date.now() + Number(data.expiresIn || 3600) * 1000,
-    ...decodeClaims(data.idToken)
+    ...decodeClaims(data.idToken),
+    ...(nameOverride ? { name: nameOverride } : {}),
+    ...(emailOverride ? { email: emailOverride } : {})
   };
 }
 
-async function finishFirebaseSignIn(data: FirebaseTokens) {
-  const next = firebaseSession(data);
+async function finishFirebaseSignIn(data: FirebaseTokens, nameOverride?: string, emailOverride?: string) {
+  const next = firebaseSession(data, nameOverride, emailOverride);
   await persist(next);
   publish(next);
 }
 
 export async function signInWithEmail(email: string, password: string): Promise<{ ok: boolean; error?: string }> {
   try {
-    await finishFirebaseSignIn(await firebasePost("accounts:signInWithPassword", { email: email.trim(), password, returnSecureToken: true }));
+    const data = await firebasePost("accounts:signInWithPassword", { email: email.trim(), password, returnSecureToken: true });
+    await finishFirebaseSignIn(data, undefined, email.trim());
     return { ok: true };
   } catch (err: any) {
     return { ok: false, error: err?.message };
@@ -144,12 +149,17 @@ export async function signInWithEmail(email: string, password: string): Promise<
 
 export async function signUpWithEmail(name: string, email: string, password: string): Promise<{ ok: boolean; error?: string }> {
   try {
-    let data = await firebasePost("accounts:signUp", { email: email.trim(), password, returnSecureToken: true });
+    const created = await firebasePost("accounts:signUp", { email: email.trim(), password, returnSecureToken: true });
     if (name.trim()) {
-      // Sets the name on the account and returns a fresh token that carries it.
-      data = await firebasePost("accounts:update", { idToken: data.idToken, displayName: name.trim(), returnSecureToken: true });
+      await firebasePost("accounts:update", { idToken: created.idToken, displayName: name.trim() });
     }
-    await finishFirebaseSignIn(data);
+    // Re-authenticate instead of trusting accounts:update's own response for the session: that
+    // endpoint's token doesn't reliably carry the just-set name yet (Firebase's claim can lag the
+    // write) and its response isn't guaranteed to include a refreshToken the way a real sign-in's
+    // does. A plain sign-in — the same call signInWithEmail already relies on — is guaranteed
+    // complete, and by now the update above has landed.
+    const data = await firebasePost("accounts:signInWithPassword", { email: email.trim(), password, returnSecureToken: true });
+    await finishFirebaseSignIn(data, name.trim() || undefined, email.trim());
     return { ok: true };
   } catch (err: any) {
     return { ok: false, error: err?.message };
