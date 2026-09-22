@@ -18,6 +18,9 @@ type DeviceRecord = {
   displayName?: string;
   role: "presenter" | "attendee";
   roomId?: string;
+  /** Signed-in person behind this device (undefined when auth is off). */
+  userId?: string;
+  email?: string;
   /** Session label the device joined under (grouping only; a room's identity is its occurrence ID). */
   sessionLabel?: string;
   rotatingId?: string;
@@ -111,6 +114,7 @@ type RoomMembershipRecord = {
   roomId: string;
   roomCode: string;
   sessionLabel: string;
+  userId?: string;
   role: "presenter" | "attendee";
   startedAt: number;
   lastSeenAt: number;
@@ -182,6 +186,12 @@ export class PocInferenceEngine {
     return roomId;
   }
 
+  /** The active occurrence for this room, or undefined. Never creates one, and never bumps activity. */
+  private activeRoomId(sessionLabel: string, roomCode: string, now: number = Date.now()): string | undefined {
+    const existing = this.activeRoomsByKey.get(PocInferenceEngine.roomKey(sessionLabel, roomCode));
+    return existing && now - existing.lastActivityAt < ROOM_AUTO_EXPIRY_MS ? existing.roomId : undefined;
+  }
+
   /**
    * Closes every currently active room under a session label, so the next use of any of those
    * room names starts a fresh occurrence. Returns false if the label had no active rooms.
@@ -213,6 +223,15 @@ export class PocInferenceEngine {
         this.roomMembership.delete(membershipKey);
       }
     }
+    // Devices keep running until their next poll tells them the room ended. Drop this room's
+    // presenter records now so nothing (roster polls, the admin overview) keeps computing for
+    // it, and so a new occurrence can't be started by leftover state.
+    for (const [deviceId, d] of [...this.devices.entries()]) {
+      if (d.role === "presenter" && d.roomId === room.code && d.sessionLabel === room.sessionLabel) {
+        this.roomEndedNotices.set(deviceId, { roomCode: room.code, endedAt: now });
+        this.devices.delete(deviceId);
+      }
+    }
     this.endRoomInternal(room.roomId, now).catch((err) => console.error("[db] failed to mark room ended:", err));
   }
 
@@ -221,12 +240,13 @@ export class PocInferenceEngine {
    * (heard from within two windows, the same liveness test roomState() uses), returns its name.
    * A presenter that stops reporting is treated as gone after that, so someone else can take over.
    */
-  presenterConflict(sessionLabel: string, roomCode: string, deviceId: string): { presenterName: string } | undefined {
+  presenterConflict(sessionLabel: string, roomCode: string, deviceId: string, userId?: string): { presenterName: string } | undefined {
     const now = Date.now();
     for (const d of this.devices.values()) {
       if (
         d.role === "presenter" &&
         d.deviceId !== deviceId &&
+        !(userId && d.userId === userId) &&
         d.roomId === roomCode &&
         d.sessionLabel === sessionLabel &&
         now - d.updatedAt < WINDOW_MS * 2
@@ -255,7 +275,7 @@ export class PocInferenceEngine {
     await this.db.update(schema.rooms).set({ endedAt: new Date(now) }).where(eq(schema.rooms.id, roomId));
   }
 
-  join(deviceId: string, role: "presenter" | "attendee", roomId?: string, displayName?: string, sessionLabel?: string) {
+  join(deviceId: string, role: "presenter" | "attendee", roomId?: string, displayName?: string, sessionLabel?: string, userId?: string, email?: string) {
     const current = this.devices.get(deviceId);
     const now = Date.now();
     this.roomEndedNotices.delete(deviceId);
@@ -264,6 +284,8 @@ export class PocInferenceEngine {
       displayName: displayName || current?.displayName || undefined,
       role,
       roomId,
+      userId: userId ?? current?.userId,
+      email: email ?? current?.email,
       sessionLabel: sessionLabel ?? current?.sessionLabel,
       wifiFingerprint: current?.wifiFingerprint,
       uwbDiscoveryToken: current?.uwbDiscoveryToken,
@@ -276,7 +298,18 @@ export class PocInferenceEngine {
       updatedAt: now
     });
     this.upsertDevice(deviceId, displayName || current?.displayName, now);
-    if (role === "presenter" && roomId && sessionLabel) this.resolveRoom(sessionLabel, roomId, now);
+    if (role === "presenter" && roomId && sessionLabel) {
+      // The same person restarting the app arrives as a new device. Drop their older presenter
+      // record for this room so two devices never both count as its presenter.
+      if (userId) {
+        for (const [id, d] of this.devices) {
+          if (id !== deviceId && d.userId === userId && d.role === "presenter" && d.roomId === roomId && d.sessionLabel === sessionLabel) {
+            this.devices.delete(id);
+          }
+        }
+      }
+      this.resolveRoom(sessionLabel, roomId, now);
+    }
   }
 
   leave(deviceId: string) {
@@ -308,6 +341,7 @@ export class PocInferenceEngine {
       displayName: current?.displayName,
       role: current?.role ?? "attendee",
       roomId: current?.roomId,
+      userId: current?.userId,
       sessionLabel: current?.sessionLabel,
       rotatingId: current?.rotatingId,
       wifiFingerprint: current?.wifiFingerprint,
@@ -322,7 +356,9 @@ export class PocInferenceEngine {
     });
   }
 
-  ingest(batch: PresenceBatch) {
+  /** Returns false (and stores nothing) if this device's room was ended and it hasn't rejoined. */
+  ingest(batch: PresenceBatch, userId?: string, email?: string): boolean {
+    if (this.roomEndedNotice(batch.deviceId)) return false;
     const current = this.devices.get(batch.deviceId);
     const wifiHistory = current?.wifiHistory ?? new Map<string, { ap: WifiApObservation; lastSeen: number }>();
     const now = Date.now();
@@ -365,6 +401,8 @@ export class PocInferenceEngine {
       displayName: batch.displayName || current?.displayName,
       role: batch.role,
       roomId: batch.roomId ?? current?.roomId,
+      userId: userId ?? current?.userId,
+      email: email ?? current?.email,
       sessionLabel: batch.sessionId,
       rotatingId: batch.rotatingId,
       wifiFingerprint: consolidatedWifi.length > 0 ? consolidatedWifi : current?.wifiFingerprint,
@@ -382,6 +420,7 @@ export class PocInferenceEngine {
     if (batch.role === "presenter" && ingestRoomCode) this.resolveRoom(batch.sessionId, ingestRoomCode, now);
     this.batches.push(batch);
     this.trim();
+    return true;
   }
 
   roomState(sessionLabel: string, roomId: string): LiveRoomState {
@@ -452,6 +491,7 @@ export class PocInferenceEngine {
         membersInfo.push({
           deviceId: memberId,
           displayName: rec?.displayName || memberId,
+          email: rec?.email,
           role: "presenter",
           confidence: 1.0,
           wifiSimilarity: undefined,
@@ -524,6 +564,7 @@ export class PocInferenceEngine {
       membersInfo.push({
         deviceId: memberId,
         displayName: rec?.displayName || memberId,
+        email: rec?.email,
         role: rec?.role || "attendee",
         confidence,
         wifiSimilarity,
@@ -671,6 +712,19 @@ export class PocInferenceEngine {
     return Number(Math.min(0.65, rawMatch * 0.75).toFixed(2));
   }
 
+  /**
+   * Every room occurrence currently active, across all session labels — what the admin Live tab
+   * watches, so an admin sees the whole event rather than only the session code their own app
+   * happens to be set to.
+   */
+  listActiveRooms(): { sessionLabel: string; roomCode: string }[] {
+    this.trim();
+    const now = Date.now();
+    return [...this.activeRoomsByKey.values()]
+      .filter((room) => now - room.lastActivityAt < ROOM_AUTO_EXPIRY_MS)
+      .map((room) => ({ sessionLabel: room.sessionLabel, roomCode: room.code }));
+  }
+
   listRooms(sessionLabel: string): string[] {
     this.trim();
     const rooms = new Set<string>(["room-a", "room-b", "auditorium"]);
@@ -707,7 +761,10 @@ export class PocInferenceEngine {
     now: number,
     latest: { confidence?: number; wifiSimilarity?: number; ultrasonicVerified?: boolean; motionAnomalyFlag?: boolean }
   ): number {
-    const roomId = this.resolveRoom(sessionLabel, roomCode, now);
+    // Never creates a room: only a presenter's join/ingest may. A stray roster calculation for a
+    // room that was just ended must not start a new occurrence.
+    const roomId = this.activeRoomId(sessionLabel, roomCode, now);
+    if (!roomId) return 0;
     const key = `${roomId}::${deviceId}`;
     const existing = this.roomMembership.get(key);
     let durationMs: number;
@@ -732,6 +789,7 @@ export class PocInferenceEngine {
         roomId,
         roomCode,
         sessionLabel,
+        userId: this.devices.get(deviceId)?.userId,
         role,
         startedAt: now,
         lastSeenAt: now,
@@ -888,6 +946,7 @@ export class PocInferenceEngine {
     await this.db.insert(schema.roomMembership).values({
       roomId: membership.roomId,
       deviceId,
+      userId: membership.userId,
       role: membership.role,
       startedAt: new Date(membership.startedAt),
       endedAt: new Date(membership.lastSeenAt),

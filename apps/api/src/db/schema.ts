@@ -26,6 +26,22 @@ export const rooms = pgTable("rooms", {
   endedAt: timestamp("ended_at", { withTimezone: true })
 });
 
+// A signed-in person (Entra External ID). `id` is the token's stable object id, so the same
+// person is the same row across app relaunches and phones. Names and emails live here so
+// history can total a person's time across several leaves and joins.
+export const users = pgTable("users", {
+  id: text("id").primaryKey(),
+  email: text("email"),
+  // The name the provider gave. Refreshed from every sign-in token, so never edit it directly.
+  displayName: text("display_name"),
+  // A name the person chose for themselves. Wins over display_name everywhere a name is shown,
+  // and survives token refreshes. Null means "just use the account's name".
+  preferredName: text("preferred_name"),
+  isAdmin: boolean("is_admin").notNull().default(false),
+  firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow()
+});
+
 // Identity/liveness only. Heartbeat-level status (motion, connection state, confidence)
 // deliberately stays in-memory in PocInferenceEngine, never persisted here — only meaningful
 // state changes (stateChangeEvents below) and attendance metrics (roomMembership) are durable.
@@ -61,6 +77,8 @@ export const roomMembership = pgTable("room_membership", {
   deviceId: text("device_id")
     .notNull()
     .references(() => devices.deviceId),
+  // Nullable: rows from before accounts existed have no user.
+  userId: text("user_id").references(() => users.id),
   role: text("role").notNull(),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
   endedAt: timestamp("ended_at", { withTimezone: true }),

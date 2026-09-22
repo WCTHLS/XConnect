@@ -6,6 +6,7 @@ import { requireBleModule, subscribeToPeers, type NativePeer } from "../native/c
 import { getWifiFingerprint } from "../native/confPresenceWifi";
 import { isUltrasonicAvailable, requireUltrasonicModule, subscribeToUltrasonicTokens } from "../native/confPresenceUltrasonic";
 import { AppLogger } from "./appLogger";
+import { authFetch } from "./auth";
 
 const MOTION_SAMPLE_INTERVAL_MS = 200; // ~5Hz, coarse activity level, not gesture recognition
 
@@ -417,7 +418,7 @@ export class PresenceService {
 
     const tStart = Date.now();
     try {
-      const res = await fetch(`${targetUrl}/api/observations`, {
+      const res = await authFetch(`${targetUrl}/api/observations`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body)
@@ -443,7 +444,7 @@ export class PresenceService {
   private async joinSession(config: StartConfig) {
     const targetUrl = config.apiUrl || DEFAULT_API_URL;
     try {
-      const res = await fetch(`${targetUrl}/api/session/join`, {
+      const res = await authFetch(`${targetUrl}/api/session/join`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(config)
@@ -461,7 +462,7 @@ export class PresenceService {
   private async leaveSession(config: StartConfig) {
     const targetUrl = config.apiUrl || DEFAULT_API_URL;
     try {
-      await fetch(`${targetUrl}/api/session/leave`, {
+      await authFetch(`${targetUrl}/api/session/leave`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ deviceId: config.deviceId })

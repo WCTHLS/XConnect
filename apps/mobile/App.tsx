@@ -21,10 +21,12 @@ import { getOrCreateDeviceId } from "./src/services/deviceIdentity";
 import { AppLogger } from "./src/services/appLogger";
 import { LogsModal } from "./src/components/LogsModal";
 import { AdminScreen } from "./src/screens/AdminScreen";
+import { LoginScreen } from "./src/screens/LoginScreen";
+import { authConfigured, authFetch, signOut, useAuthSession } from "./src/services/auth";
 
 const DEFAULT_SESSION = "poc-session";
 const DEFAULT_ROOMS = ["room-a", "room-b", "auditorium"];
-const CLOUD_API_URL = "https://xconnect-api.onrender.com";
+const CLOUD_API_URL = "https://xconnect-ytoj.onrender.com";
 const LOCAL_API_URL = "http://192.168.0.201:3000";
 
 export default function App() {
@@ -50,6 +52,60 @@ export default function App() {
   const [showLogs, setShowLogs] = useState(false);
   const [logCount, setLogCount] = useState(0);
   const [view, setView] = useState<"main" | "admin">("main");
+  const { session: authSession, ready: authReady } = useAuthSession();
+
+  const signedIn = Boolean(authSession);
+  // The name last confirmed by the server, so an unchanged field doesn't trigger a save.
+  const savedNameRef = useRef("");
+
+  // The server knows the effective name (a chosen one if set, otherwise the account's), which the
+  // sign-in token alone can't tell us. Depends on signedIn rather than the session object so a
+  // token refresh doesn't overwrite a name being typed.
+  useEffect(() => {
+    if (!signedIn) return;
+    let cancelled = false;
+    const fallback = authSession?.name ?? "";
+    authFetch(`${serverUrl}/api/me`)
+      .then((res) => res.json())
+      .then((me) => {
+        if (cancelled) return;
+        const name = me?.name ?? fallback;
+        savedNameRef.current = name;
+        setDisplayName(name);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        savedNameRef.current = fallback;
+        setDisplayName(fallback);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signedIn, serverUrl]);
+
+  /** Saves the chosen name. Blank clears it, falling back to the account's own name. */
+  const saveDisplayName = async () => {
+    if (!signedIn || displayName.trim() === savedNameRef.current) return;
+    try {
+      const res = await authFetch(`${serverUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ preferredName: displayName.trim() })
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        Alert.alert("Could not save your name", data?.error ? JSON.stringify(data.error) : `Server returned ${res.status}`);
+        setDisplayName(savedNameRef.current);
+        return;
+      }
+      savedNameRef.current = data?.name ?? displayName.trim();
+      setDisplayName(savedNameRef.current);
+    } catch (err: any) {
+      Alert.alert("Could not save your name", err?.message || "Network error");
+      setDisplayName(savedNameRef.current);
+    }
+  };
 
   useEffect(() => {
     return AppLogger.subscribe((logs) => {
@@ -98,7 +154,7 @@ export default function App() {
           ? `${serverUrl}/api/rooms/${roomId}/live?sessionId=${sessionId}&deviceId=${deviceId}`
           : `${serverUrl}/api/devices/${deviceId}/live?sessionId=${sessionId}`;
 
-      const res = await fetch(url);
+      const res = await authFetch(url);
       if (!runningRef.current) return;
 
       if (res.ok) {
@@ -314,6 +370,9 @@ export default function App() {
 
   const activeRoomTitle = role === "presenter" ? roomId : detectedRoom ? detectedRoom : "Searching...";
 
+  if (authConfigured && !authReady) return null;
+  if (authConfigured && !authSession) return <LoginScreen />;
+
   if (view === "admin") {
     return <AdminScreen serverUrl={serverUrl} sessionId={sessionId} onBack={() => setView("main")} />;
   }
@@ -337,15 +396,28 @@ export default function App() {
             <Button title="Admin" onPress={() => setView("admin")} color="#173A63" />
           </View>
 
-          <Text style={styles.label}>Your name (optional)</Text>
+          {authSession ? (
+            <View style={styles.signedInRow}>
+              <Text style={styles.label} numberOfLines={1} ellipsizeMode="tail">
+                Signed in as {authSession.email || "you"}
+              </Text>
+              <View style={styles.signOutBtn}>
+                <Button title="Sign out" onPress={() => void signOut()} color="#75808A" disabled={running} />
+              </View>
+            </View>
+          ) : (
+            <Text style={styles.label}>Your name (optional)</Text>
+          )}
           <TextInput
             editable={!running}
             value={displayName}
             onChangeText={setDisplayName}
-            placeholder="e.g. Alice, Bob, Dr. Smith"
+            onEndEditing={() => void saveDisplayName()}
+            placeholder={signedIn ? "Display name (blank uses your account name)" : "e.g. Alice, Bob, Dr. Smith"}
             placeholderTextColor="#8C9BA5"
             style={styles.input}
             autoCapitalize="words"
+            returnKeyType="done"
           />
 
           <Text style={styles.label}>Session code</Text>
@@ -732,6 +804,8 @@ const styles = StyleSheet.create({
     fontSize: 16
   },
   roleRow: { flexDirection: "row", justifyContent: "space-between", gap: 12 },
+  signedInRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  signOutBtn: { flexShrink: 0 },
 
   // Room Management Styles
   roomSection: { marginTop: 4, gap: 6 },

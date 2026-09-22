@@ -2,6 +2,7 @@ import cors from "cors";
 import { desc, eq, inArray, isNull } from "drizzle-orm";
 import express from "express";
 import { z } from "zod";
+import { authEnabled, authenticate, forgetCachedUser, requireAdmin } from "./auth.js";
 import { db, schema } from "./db/index.js";
 import { PocInferenceEngine } from "./inference.js";
 
@@ -28,6 +29,9 @@ if (db) {
 
 app.use(cors());
 app.use(express.json({ limit: "256kb" }));
+console.log(authEnabled ? "🔐 Sign-in required" : "⚠️  No sign-in configured (FIREBASE_PROJECT_ID or AUTH_AUTHORITY/AUTH_AUDIENCE), API is open (POC mode)");
+app.use(authenticate);
+app.use("/api/admin", requireAdmin);
 
 const joinSchema = z.object({
   sessionId: z.string().min(1),
@@ -83,19 +87,44 @@ const batchSchema = z.object({
 app.get("/health", (_request, response) => response.json({ ok: true }));
 app.get("/api/health", (_request, response) => response.json({ ok: true }));
 
+app.get("/api/me", (request, response) => {
+  if (!request.user) return response.json({ authEnabled, isAdmin: !authEnabled });
+  return response.json({ authEnabled, ...request.user });
+});
+
+// A name of one's own, stored here rather than at the identity provider: it works the same for
+// email, Google and Microsoft accounts, and survives the token refresh that rewrites display_name.
+app.patch("/api/me", async (request, response) => {
+  if (!request.user) return response.status(401).json({ error: "unauthenticated" });
+  if (!db) return response.status(503).json({ error: "Changing your name requires Postgres persistence (DATABASE_URL not set)" });
+
+  const parsed = z.object({ preferredName: z.string().max(60) }).safeParse(request.body);
+  if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
+
+  // Blank clears it, falling back to whatever the account is called.
+  const preferredName = parsed.data.preferredName.trim() || null;
+  await db.update(schema.users).set({ preferredName }).where(eq(schema.users.id, request.user.id));
+  forgetCachedUser(request.user.id);
+
+  console.log(`\u{270F}\u{FE0F}  [NAME] ${request.user.email || request.user.id} is now '${preferredName ?? request.user.accountName}'`);
+  return response.json({ authEnabled, ...request.user, name: preferredName ?? request.user.accountName });
+});
+
 app.post("/api/session/join", (request, response) => {
   const parsed = joinSchema.safeParse(request.body);
   if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
 
-  const { sessionId: code, deviceId, role, roomId, displayName } = parsed.data;
+  const { sessionId: code, deviceId, role, roomId } = parsed.data;
+  // A signed-in person's name comes from their account, not from whatever the app typed.
+  const displayName = request.user?.name ?? parsed.data.displayName;
   if (role === "presenter" && roomId) {
-    const conflict = engine.presenterConflict(code, roomId, deviceId);
+    const conflict = engine.presenterConflict(code, roomId, deviceId, request.user?.id);
     if (conflict) {
       console.log(`⛔ [JOIN] ${displayName || deviceId} rejected: room '${roomId}' already has presenter ${conflict.presenterName} (Session: ${code})`);
       return response.status(409).json({ error: "room_has_presenter", presenterName: conflict.presenterName });
     }
   }
-  engine.join(deviceId, role, roomId, displayName, code);
+  engine.join(deviceId, role, roomId, displayName, code, request.user?.id, request.user?.email);
 
   const roleEmoji = role === "presenter" ? "👑 [PRESENTER]" : "👤 [ATTENDEE]";
   console.log(`🟢 ${roleEmoji} ${displayName || deviceId} joined room '${roomId || "unassigned"}' (Session: ${code})`);
@@ -138,13 +167,17 @@ app.get("/api/admin/sessions", async (request, response) => {
         .select({
           roomId: schema.roomMembership.roomId,
           deviceId: schema.roomMembership.deviceId,
+          userId: schema.roomMembership.userId,
           role: schema.roomMembership.role,
           displayName: schema.devices.displayName,
+          userName: schema.users.displayName,
+          preferredName: schema.users.preferredName,
           startedAt: schema.roomMembership.startedAt,
           endedAt: schema.roomMembership.endedAt
         })
         .from(schema.roomMembership)
         .leftJoin(schema.devices, eq(schema.devices.deviceId, schema.roomMembership.deviceId))
+        .leftJoin(schema.users, eq(schema.users.id, schema.roomMembership.userId))
         .where(inArray(schema.roomMembership.roomId, roomIds))
     : [];
 
@@ -159,11 +192,11 @@ app.get("/api/admin/sessions", async (request, response) => {
   for (const m of membershipRows) {
     if (m.role === "presenter") {
       const set = hostsByRoom.get(m.roomId) ?? new Set<string>();
-      set.add(m.displayName || m.deviceId);
+      set.add(m.preferredName || m.userName || m.displayName || m.deviceId);
       hostsByRoom.set(m.roomId, set);
     } else {
       const set = attendeesByRoom.get(m.roomId) ?? new Set<string>();
-      set.add(m.deviceId);
+      set.add(m.userId ?? m.deviceId);
       attendeesByRoom.set(m.roomId, set);
     }
 
@@ -250,6 +283,10 @@ app.get("/api/admin/history", async (request, response) => {
   const rows = await db
     .select({
       deviceId: schema.roomMembership.deviceId,
+      userId: schema.roomMembership.userId,
+      userName: schema.users.displayName,
+      preferredName: schema.users.preferredName,
+      email: schema.users.email,
       displayName: schema.devices.displayName,
       role: schema.roomMembership.role,
       startedAt: schema.roomMembership.startedAt,
@@ -260,12 +297,16 @@ app.get("/api/admin/history", async (request, response) => {
     })
     .from(schema.roomMembership)
     .leftJoin(schema.devices, eq(schema.devices.deviceId, schema.roomMembership.deviceId))
+    .leftJoin(schema.users, eq(schema.users.id, schema.roomMembership.userId))
     .where(eq(schema.roomMembership.roomId, roomOccurrenceId))
     .orderBy(schema.roomMembership.startedAt);
 
   const members = rows.map((m) => ({
-    deviceId: m.deviceId,
-    displayName: m.displayName || m.deviceId,
+    // Group by person when there's an account, so several leaves and joins (or a new phone)
+    // total up as one attendee; older rows without a user fall back to the device.
+    deviceId: m.userId ?? m.deviceId,
+    email: m.email ?? undefined,
+    displayName: m.preferredName || m.userName || m.displayName || m.deviceId,
     role: m.role,
     startedAt: m.startedAt,
     endedAt: m.endedAt,
@@ -309,10 +350,11 @@ app.post("/api/observations", (request, response) => {
   if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
 
   if (parsed.data.role === "presenter" && parsed.data.roomId) {
-    const conflict = engine.presenterConflict(parsed.data.sessionId, parsed.data.roomId, parsed.data.deviceId);
+    const conflict = engine.presenterConflict(parsed.data.sessionId, parsed.data.roomId, parsed.data.deviceId, request.user?.id);
     if (conflict) return response.status(409).json({ error: "room_has_presenter", presenterName: conflict.presenterName });
   }
-  engine.ingest(parsed.data);
+  const accepted = engine.ingest(request.user?.name ? { ...parsed.data, displayName: request.user.name } : parsed.data, request.user?.id, request.user?.email);
+  if (!accepted) return response.status(202).json({ ok: true, roomEnded: true });
 
   const { displayName, deviceId, role, peers, wifiFingerprint, roomId, motionVariance, ultrasonicObservation, ultrasonicEmittedToken } = parsed.data;
   const name = displayName || deviceId.slice(-8);
@@ -360,11 +402,13 @@ app.get("/api/devices/:deviceId/live", (request, response) => {
   return response.json(engine.roomEndedNotice(request.params.deviceId) ? { ...state, roomEnded: true } : state);
 });
 
-app.get("/api/admin/overview", (request, response) => {
-  const label = String(request.query.sessionId ?? "poc-session");
+// Deliberately not scoped to a session label: the admin watches every active room across the
+// whole event, not just the session code their own app is set to. Each room's state carries its
+// own label so the screen can tell two same-named rooms apart.
+app.get("/api/admin/overview", (_request, response) => {
   const rooms = engine
-    .listRooms(label)
-    .map((roomId) => engine.roomState(label, roomId))
+    .listActiveRooms()
+    .map(({ sessionLabel, roomCode }) => engine.roomState(sessionLabel, roomCode))
     .filter((state) => state.members && state.members.length > 0);
   return response.json({ rooms });
 });

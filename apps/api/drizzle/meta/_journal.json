@@ -36,6 +36,20 @@
       "when": 1789940927400,
       "tag": "0004_rooms_primary_entity",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1790024842343,
+      "tag": "0005_user_accounts",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790041351236,
+      "tag": "0006_preferred_name",
+      "breakpoints": true
     }
   ]
 }

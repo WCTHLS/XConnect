@@ -2,6 +2,7 @@
   "expo": {
     "name": "XConnect",
     "slug": "xconnect-poc",
+    "scheme": "xconnect",
     "version": "0.1.0",
     "icon": "./assets/icon.png",
     "orientation": "portrait",
@@ -29,6 +30,10 @@
       "eas": {
         "projectId": "7dd6c543-831d-4c0c-8d12-bbef07b96e6e"
       }
-    }
+    },
+    "plugins": [
+      "expo-web-browser",
+      "expo-secure-store"
+    ]
   }
 }

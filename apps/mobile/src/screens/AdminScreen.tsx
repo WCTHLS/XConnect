@@ -13,6 +13,7 @@ import {
 } from "react-native";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
+import { authConfigured, authFetch } from "../services/auth";
 import { EncodingType, readAsStringAsync, StorageAccessFramework } from "expo-file-system/legacy";
 import type { LiveRoomState, RoomMemberInfo } from "@confpresence/shared";
 
@@ -92,6 +93,7 @@ type SessionOccurrence = {
 
 type HistoryMember = {
   deviceId: string;
+  email?: string;
   displayName: string;
   role: "presenter" | "attendee";
   startedAt: string;
@@ -144,6 +146,7 @@ function formatTimestamp(iso?: string | number | null): string {
 
 type AggregatedAttendee = {
   deviceId: string;
+  email?: string;
   displayName: string;
   role: "presenter" | "attendee";
   totalDurationMs: number;
@@ -158,24 +161,33 @@ type AggregatedAttendee = {
  * on-screen attendee list and the PDF export so the two never drift apart.
  */
 function aggregateAttendees(members: HistoryMember[]): AggregatedAttendee[] {
-  const byDevice = new Map<string, AggregatedAttendee>();
+  const byPerson = new Map<string, { attendee: AggregatedAttendee; stays: HistoryMember[] }>();
   for (const member of members) {
-    const existing = byDevice.get(member.deviceId) ?? {
-      deviceId: member.deviceId,
-      displayName: member.displayName,
-      role: member.role,
-      totalDurationMs: 0,
-      hasOpenStay: false,
-      everUltrasonicVerified: false,
-      everMotionAnomaly: false
+    const entry = byPerson.get(member.deviceId) ?? {
+      attendee: {
+        deviceId: member.deviceId,
+        email: member.email,
+        displayName: member.displayName,
+        role: member.role,
+        totalDurationMs: 0,
+        hasOpenStay: false,
+        everUltrasonicVerified: false,
+        everMotionAnomaly: false
+      },
+      stays: []
     };
-    if (member.durationMs !== undefined) existing.totalDurationMs += member.durationMs;
-    if (!member.endedAt) existing.hasOpenStay = true;
-    if (member.ultrasonicVerified) existing.everUltrasonicVerified = true;
-    if (member.motionAnomalyFlag) existing.everMotionAnomaly = true;
-    byDevice.set(member.deviceId, existing);
+    entry.stays.push(member);
+    if (!member.endedAt) entry.attendee.hasOpenStay = true;
+    if (member.ultrasonicVerified) entry.attendee.everUltrasonicVerified = true;
+    if (member.motionAnomalyFlag) entry.attendee.everMotionAnomaly = true;
+    byPerson.set(member.deviceId, entry);
   }
-  return [...byDevice.values()];
+  // Merge overlapping stays (a person rejoining from a new phone can overlap the old one for a
+  // few seconds) so their time is never counted twice.
+  return [...byPerson.values()].map(({ attendee, stays }) => ({
+    ...attendee,
+    totalDurationMs: computeOccupiedDurationMs(stays).durationMs
+  }));
 }
 
 function escapeHtml(value: string): string {
@@ -196,7 +208,7 @@ function buildHistoryReportHtml(occurrence: HistoryDetail): string {
           a.everMotionAnomaly ? "Inactivity flag" : null
         ].filter(Boolean).join(", ");
         return `<tr>
-          <td>${escapeHtml(a.displayName)}</td>
+          <td>${escapeHtml(a.displayName)}${a.email ? `<br/><span style="color:#5D6873">${escapeHtml(a.email)}</span>` : ""}</td>
           <td>${a.role === "presenter" ? "Host" : "User"}</td>
           <td>${formatDuration(a.totalDurationMs)}${a.hasOpenStay ? " (ongoing)" : ""}</td>
           <td>${escapeHtml(flags || "--")}</td>
@@ -256,6 +268,23 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
   const [expandedRooms, setExpandedRooms] = useState<Set<string>>(new Set());
   const [pdfGenerating, setPdfGenerating] = useState(false);
   const unlockedRef = useRef(false);
+  // With sign-in on, admin rights come from the server (the PIN is only used when sign-in is off).
+  const [adminCheck, setAdminCheck] = useState<"checking" | "allowed" | "denied">(authConfigured ? "checking" : "allowed");
+
+  useEffect(() => {
+    if (!authConfigured) return;
+    authFetch(`${serverUrl}/api/me`)
+      .then((res) => res.json())
+      .then((me) => {
+        if (me?.isAdmin) {
+          setAdminCheck("allowed");
+          setUnlocked(true);
+        } else {
+          setAdminCheck("denied");
+        }
+      })
+      .catch(() => setAdminCheck("denied"));
+  }, [serverUrl]);
 
   useEffect(() => {
     unlockedRef.current = unlocked;
@@ -266,7 +295,7 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
 
     const fetchOverview = async () => {
       try {
-        const res = await fetch(`${serverUrl}/api/admin/overview?sessionId=${encodeURIComponent(sessionId)}`);
+        const res = await authFetch(`${serverUrl}/api/admin/overview`);
         if (!unlockedRef.current) return;
         if (!res.ok) {
           setFetchError(`Server returned ${res.status}`);
@@ -286,7 +315,7 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
     fetchOverview();
     const interval = setInterval(fetchOverview, POLL_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [unlocked, serverUrl, sessionId]);
+  }, [unlocked, serverUrl]);
 
   const handleUnlock = () => {
     if (pinInput.trim() === ADMIN_PIN) {
@@ -299,7 +328,7 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
 
   const endSessionRequest = async () => {
     try {
-      const res = await fetch(`${serverUrl}/api/admin/session/end`, {
+      const res = await authFetch(`${serverUrl}/api/admin/session/end`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ sessionId })
@@ -335,7 +364,7 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
       const url = code
         ? `${serverUrl}/api/admin/sessions?code=${encodeURIComponent(code)}`
         : `${serverUrl}/api/admin/sessions`;
-      const res = await fetch(url);
+      const res = await authFetch(url);
       const data = await res.json().catch(() => null);
       if (!res.ok) {
         setHistoryError(data?.error ? JSON.stringify(data.error) : `Server returned ${res.status}`);
@@ -355,7 +384,7 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
     setHistoryLoading(true);
     setHistoryError(null);
     try {
-      const res = await fetch(`${serverUrl}/api/admin/history?sessionId=${encodeURIComponent(occurrenceSessionId)}`);
+      const res = await authFetch(`${serverUrl}/api/admin/history?sessionId=${encodeURIComponent(occurrenceSessionId)}`);
       const data = await res.json().catch(() => null);
       if (!res.ok) {
         setHistoryError(data?.error ? JSON.stringify(data.error) : `Server returned ${res.status}`);
@@ -396,6 +425,22 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unlocked, activeTab]);
+
+  if (adminCheck !== "allowed") {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.pinContainer}>
+          <Text style={styles.pinTitle}>Admin Access</Text>
+          <Text style={styles.pinSubtitle}>
+            {adminCheck === "checking" ? "Checking your access..." : "Your account is not an admin."}
+          </Text>
+          <TouchableOpacity style={styles.backLink} onPress={onBack} activeOpacity={0.7}>
+            <Text style={styles.backLinkText}>{"←"} Back</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   if (!unlocked) {
     return (
@@ -481,11 +526,14 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
               </View>
             ) : (
               rooms.map((room) => (
-                <View key={room.roomId} style={styles.roomCard}>
+                // Two sessions can each have a room of the same name, so the key carries both.
+                <View key={`${room.sessionId}::${room.roomId}`} style={styles.roomCard}>
                   <Text style={styles.roomTitle}>
                     Room: {room.roomId} {"·"} {room.presenterName || room.presenterDeviceId || "Unknown host"}
                   </Text>
-                  <Text style={styles.roomSubtitle}>{room.members?.length ?? 0} member(s)</Text>
+                  <Text style={styles.roomSubtitle}>
+                    {"\u{1F5C2} " + room.sessionId} {"·"} {room.members?.length ?? 0} member(s)
+                  </Text>
 
                   {(room.members ?? []).map((member: RoomMemberInfo, index: number) => {
                     const isHost = member.role === "presenter";
@@ -502,6 +550,7 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
                             {isHost ? "Host" : "User"}
                           </Text>
                         </View>
+                        {member.email && <Text style={styles.memberEmail} numberOfLines={1}>{member.email}</Text>}
                         <Text style={styles.memberId} numberOfLines={1}>{member.deviceId}</Text>
                         <View style={styles.memberMetrics}>
                           <Text style={styles.confText}>{"\u{1F3AF} " + confPct + "% Conf"}</Text>
@@ -675,11 +724,14 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
                           return (
                             <View key={attendee.deviceId} style={styles.memberRow}>
                               <View style={styles.memberRowTop}>
-                                <Text style={styles.memberName} numberOfLines={1}>{attendee.displayName}</Text>
+                                <Text style={styles.memberName} numberOfLines={1}>
+                                  {attendee.displayName}
+                                </Text>
                                 <Text style={[styles.roleBadge, isHost ? styles.roleBadgePresenter : styles.roleBadgeAttendee]}>
                                   {isHost ? "Host" : "User"}
                                 </Text>
                               </View>
+                              {attendee.email && <Text style={styles.memberEmail} numberOfLines={1}>{attendee.email}</Text>}
                               <View style={styles.memberMetrics}>
                                 <Text style={styles.durationText}>
                                   {"\u{23F1} " + formatDuration(attendee.totalDurationMs) + (attendee.hasOpenStay ? " (ongoing)" : "")}
@@ -837,6 +889,7 @@ const styles = StyleSheet.create({
   memberRowTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   memberName: { fontSize: 13, fontWeight: "700", color: "#173A63", flex: 1 },
   memberId: { fontSize: 11, color: "#5D6873", fontFamily: "monospace" },
+  memberEmail: { fontSize: 11, color: "#5D6873", marginTop: 1 },
   roleBadge: {
     fontSize: 10,
     fontWeight: "700",

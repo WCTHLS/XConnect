@@ -55,6 +55,7 @@ export interface UwbTokenRequest {
 export interface RoomMemberInfo {
   deviceId: string;
   displayName: string;
+  email?: string;
   role: ParticipantRole;
   confidence?: number;
   wifiSimilarity?: number;

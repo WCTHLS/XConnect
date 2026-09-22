@@ -66,6 +66,63 @@ Room rows are created by one fire-and-forget write, tracked in `pendingRoomCreat
 reference the room by foreign key (membership rows, state-change events) await it first, since on
 a pooled connection their insert could otherwise reach Postgres before the room row exists.
 
+## Sign-in and users
+
+Two providers run **side by side**, each enabled by its own settings. A token is routed to
+whichever one issued it, so both are equally valid:
+
+- **Firebase Auth** — email/password and Google. The app has its own sign-in screen and talks to
+  Firebase's REST API directly. Google uses `expo-auth-session` (PKCE) against Google, then trades
+  the result for a Firebase session.
+- **Microsoft** — an ordinary Entra ID app registration (account types: any organizational
+  directory *and* personal Microsoft accounts), reached straight from the app with
+  `expo-auth-session`, not through Firebase. Firebase refuses manually supplied Microsoft
+  credentials because it cannot verify their audience, and its own Microsoft handshake would
+  require the native Firebase SDK.
+
+Either way the tokens are kept in secure storage and sent as `Authorization: Bearer ...` on every
+call (`authFetch` in `apps/mobile/src/services/auth.ts`). A session records which provider signed
+it in, since that decides how it is refreshed.
+
+`apps/api/src/auth.ts` builds one verifier per configured provider, picks the one whose issuer
+matches the token, checks the signature and audience against that provider's published keys, then
+upserts the person into `users` (name, email) at most every 5 minutes. `request.user` is then
+available to the routes.
+
+| Setting | Where | Meaning |
+|---|---|---|
+| `FIREBASE_PROJECT_ID` | API env | Firebase project ID; turns on Firebase token checking |
+| `AUTH_AUTHORITY` | API env | `https://login.microsoftonline.com/common/v2.0` for work and personal Microsoft accounts |
+| `AUTH_AUDIENCE` | API env | The Microsoft app registration's Application (client) ID |
+| `ADMIN_EMAILS` | API env | Comma-separated emails that become admins on first sign-in |
+| `FIREBASE_API_KEY`, `GOOGLE_ANDROID_CLIENT_ID` | `apps/mobile/src/config/authConfig.ts` | Firebase web API key and the Android OAuth client; empty hides email and Google |
+| `AUTH_AUTHORITY`, `AUTH_CLIENT_ID` | `apps/mobile/src/config/authConfig.ts` | Same authority and client ID as the API; empty hides the Microsoft button |
+
+- With neither provider configured the API is open and the app has no login, the same "unset means
+  POC mode" switch as `DATABASE_URL`.
+- A multi-tenant Microsoft authority advertises a literal `{tenantid}` template as its issuer, and
+  each token carries its signer's own tenant GUID, so the issuer is matched by shape. A
+  single-tenant authority (Entra External ID) advertises its real issuer and is compared exactly,
+  which is what the eventual move to Azure will use.
+- Microsoft's `sub` is per-application, so the stable `oid` claim identifies the person instead.
+- Running two providers means one person who signs in with Google one day and Microsoft the next
+  is two rows in `users`. Accepted deliberately; it disappears once everything moves to Entra.
+- `/api/admin/*` requires an admin. The Admin screen asks `GET /api/me` and shows "not an admin"
+  instead of the PIN when sign-in is on.
+- A person's name comes from their account, never from whatever the app sends. They can override
+  it with `PATCH /api/me { preferredName }`, stored as `users.preferred_name`, which wins wherever
+  a name is shown (live roster, History, the PDF). Blank clears it. The provider's own name stays
+  in `users.display_name`, refreshed from every token, so the real account is always recoverable.
+  This works the same for email, Google and Microsoft accounts, which matters because a provider's
+  name often can't be changed from here at all.
+- `room_membership.user_id` ties each stay to a person. History groups by person, so several
+  leaves and joins, or a new phone, add up as one attendee. Overlapping stays are merged so time
+  is not counted twice. Older rows without a user fall back to the device.
+- The same person joining as presenter from a new device replaces their old presenter device, and
+  is never blocked by their own stale one.
+- Bluetooth and ultrasonic identifiers stay anonymous per-device tokens; only the server links
+  them to a person.
+
 ## Live monitoring: how a room's roster is computed
 
 Every poll re-derives the room from scratch out of a 30-second sliding window of recent
@@ -169,7 +226,9 @@ on-screen list uses, so the two can't drift apart — then hands it to `expo-pri
 A 4-digit PIN gate sits in front of everything (local-only, not a real auth boundary), then
 two tabs:
 
-- **Live** — polls `/api/admin/overview` every 5s, rendering each active room's roster with
+- **Live** — polls `/api/admin/overview` every 5s. Deliberately unscoped: it shows every active
+  room across **all** session codes, not just the one the admin's own app is set to, so each card
+  names its session. Rendering covers each room's roster with
   role badges, confidence, and the ultrasonic-verified / motion-anomaly flags.
 - **History** — search by session label (blank = everything), select a room occurrence, expand it to
   see aggregated per-attendee totals, download the PDF. Ending a session from the admin screen
