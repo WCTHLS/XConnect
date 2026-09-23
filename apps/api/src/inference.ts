@@ -91,11 +91,14 @@ const ROOM_MEMBERSHIP_GRACE_MS = 45_000;
 
 /**
  * How long a room can go quiet before the next use of its name starts a brand-new occurrence
- * instead of resuming the old one. Survives a lunch break; forces a fresh occurrence by the
- * next day even if nobody explicitly ends it. An explicit room end (presenter leaving) or
- * PocInferenceEngine.endSession achieves the same thing immediately.
+ * instead of resuming the old one. Long enough to cover a genuine brief interruption (a restart,
+ * stepping out, a connectivity blip); short enough that hours of silence reliably means someone
+ * unrelated is reusing this room+session name, not the same presenter coming back — the two are
+ * otherwise indistinguishable and a long window quietly merges unrelated presentations into one
+ * room record. An explicit room end (presenter leaving) or PocInferenceEngine.endSession achieves
+ * a fresh occurrence immediately regardless of this window.
  */
-const ROOM_AUTO_EXPIRY_MS = 8 * 60 * 60 * 1000;
+const ROOM_AUTO_EXPIRY_MS = 15 * 60 * 1000;
 
 /** How long a "your room was ended" notice stays available to a device that hasn't polled yet. */
 const ROOM_ENDED_NOTICE_TTL_MS = 10 * 60 * 1000;
@@ -206,6 +209,15 @@ export class PocInferenceEngine {
     return ended;
   }
 
+  /** Closes one specific active room occurrence. Returns false if it wasn't active. */
+  endRoom(sessionLabel: string, roomCode: string): boolean {
+    const key = PocInferenceEngine.roomKey(sessionLabel, roomCode);
+    const room = this.activeRoomsByKey.get(key);
+    if (!room) return false;
+    this.endRoomOccurrence(key, room);
+    return true;
+  }
+
   /**
    * Ends one active room occurrence: flushes all its open stays right away (otherwise devices
    * still sending batches would carry their open stays into the next occurrence) and stamps
@@ -217,7 +229,17 @@ export class PocInferenceEngine {
     const prefix = `${room.roomId}::`;
     for (const [membershipKey, membership] of this.roomMembership.entries()) {
       if (membershipKey.startsWith(prefix)) {
-        this.roomEndedNotices.set(membershipKey.slice(prefix.length), { roomCode: room.code, endedAt: now });
+        const deviceId = membershipKey.slice(prefix.length);
+        // This membership row can be stale: a device that was an attendee here may have since
+        // become the presenter of a different room entirely, within the grace window that keeps
+        // this row alive after they stopped being counted as a member. Only tell it "your room
+        // ended" if it hasn't moved on — otherwise a presenter elsewhere would be wrongly kicked
+        // off their own, unrelated, still-live room.
+        const current = this.devices.get(deviceId);
+        const movedToDifferentRoom = current?.role === "presenter" && (current.roomId !== room.code || current.sessionLabel !== room.sessionLabel);
+        if (!movedToDifferentRoom) {
+          this.roomEndedNotices.set(deviceId, { roomCode: room.code, endedAt: now });
+        }
         membership.lastSeenAt = now;
         this.persistClosedMembership(membershipKey, membership);
         this.roomMembership.delete(membershipKey);
@@ -723,6 +745,12 @@ export class PocInferenceEngine {
     return [...this.activeRoomsByKey.values()]
       .filter((room) => now - room.lastActivityAt < ROOM_AUTO_EXPIRY_MS)
       .map((room) => ({ sessionLabel: room.sessionLabel, roomCode: room.code }));
+  }
+
+  /** Distinct session labels with at least one active room right now — lets an attendee pick a
+   * live session instead of needing to already know its code. */
+  listActiveSessionLabels(): string[] {
+    return [...new Set(this.listActiveRooms().map((r) => r.sessionLabel))];
   }
 
   listRooms(sessionLabel: string): string[] {

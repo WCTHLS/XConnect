@@ -21,6 +21,14 @@ const BATCH_INTERVAL_MS = 10_000;
 // perpetually refreshed by resending the same old observation every batch.
 const ULTRASONIC_OBSERVATION_TTL_MS = 15_000;
 
+/** The server refused this device as presenter because the room already has a live one. */
+export class RoomRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RoomRejectedError";
+  }
+}
+
 async function requestBlePermissions(): Promise<boolean> {
   if (Platform.OS !== "android") return true;
 
@@ -167,10 +175,20 @@ export class PresenceService {
       throw new Error("Nearby devices / Bluetooth permissions are required. Please grant permissions in your phone settings.");
     }
 
-    // Attempt join asynchronously without blocking local BLE hardware activation
-    this.joinSession(config).catch(() => {
-      // Offline / connecting
-    });
+    // Awaited (but still tolerant of offline failure) rather than fire-and-forget: a caller that
+    // starts polling live state once start() resolves must never be able to race this exact
+    // request — otherwise a poll can land on the server before the join does and see stale state
+    // (e.g. a "room ended" notice from a previous session under this same room) that the join
+    // itself was about to clear. A room-conflict rejection is NOT tolerated the way offline is:
+    // it must abort start() here, before BLE/ultrasonic setup below, so a rejected presenter never
+    // ends up advertising itself as live over BLE/ultrasonic despite the server having refused it.
+    try {
+      await this.joinSession(config);
+    } catch (err) {
+      this.isRunning = false;
+      this.emitStatus("idle");
+      throw err;
+    }
 
     await this.rotateAndAdvertise(true);
     const ble = requireBleModule();
@@ -441,21 +459,29 @@ export class PresenceService {
     this.emitStatus();
   }
 
+  /** Network/offline failures are tolerated (BLE still starts) — only a 409 room conflict throws. */
   private async joinSession(config: StartConfig) {
     const targetUrl = config.apiUrl || DEFAULT_API_URL;
+    let res: Response;
     try {
-      const res = await authFetch(`${targetUrl}/api/session/join`, {
+      res = await authFetch(`${targetUrl}/api/session/join`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(config)
       });
-      if (res.ok) {
-        AppLogger.log("API", `Session joined: ${config.sessionId} as ${config.role}`);
-      } else if (res.status === 409) {
-        await this.handleRoomRejected(res);
-      }
     } catch (err: any) {
       AppLogger.log("WARN", `Session join pending server wake: ${err?.message || "Offline"}`, "warn");
+      return;
+    }
+    if (res.ok) {
+      AppLogger.log("API", `Session joined: ${config.sessionId} as ${config.role}`);
+      return;
+    }
+    if (res.status === 409) {
+      const data = await res.json().catch(() => null);
+      const who = data?.presenterName ? ` (${data.presenterName})` : "";
+      AppLogger.log("WARN", `Room already has a presenter${who}`, "warn");
+      throw new RoomRejectedError(`This room already has a presenter${who}. Pick a different room, or wait for them to leave.`);
     }
   }
 

@@ -16,8 +16,9 @@ import {
   View
 } from "react-native";
 import type { ParticipantRole, RoomMemberInfo } from "@confpresence/shared";
-import { PresenceService, type PresenceStatus } from "./src/services/presenceService";
+import { PresenceService, RoomRejectedError, type PresenceStatus } from "./src/services/presenceService";
 import { getOrCreateDeviceId } from "./src/services/deviceIdentity";
+import { clearActiveSession, getActiveSession, saveActiveSession, type ActiveSessionSnapshot } from "./src/services/lastActiveSession";
 import { AppLogger } from "./src/services/appLogger";
 import { LogsModal } from "./src/components/LogsModal";
 import { AdminScreen } from "./src/screens/AdminScreen";
@@ -32,8 +33,8 @@ const LOCAL_API_URL = "http://192.168.0.201:3000";
 export default function App() {
   const [role, setRole] = useState<ParticipantRole>("attendee");
   const [sessionId, setSessionId] = useState(DEFAULT_SESSION);
-  const [serverEnv, setServerEnv] = useState<"cloud" | "local" | "custom">("cloud");
-  const [serverUrl, setServerUrl] = useState(CLOUD_API_URL);
+  const [serverEnv, setServerEnv] = useState<"cloud" | "local" | "custom">("local");
+  const [serverUrl, setServerUrl] = useState(LOCAL_API_URL);
   const [serverHealth, setServerHealth] = useState<"checking" | "online" | "offline">("checking");
   const [showServerConfig, setShowServerConfig] = useState(false);
   const [displayName, setDisplayName] = useState("");
@@ -43,6 +44,7 @@ export default function App() {
   const [newRoomText, setNewRoomText] = useState("");
   const [showAddRoom, setShowAddRoom] = useState(false);
   const [deviceId, setDeviceId] = useState("");
+  const [activeSessions, setActiveSessions] = useState<string[]>([]);
   const [status, setStatus] = useState<PresenceStatus>({ state: "idle", peerCount: 0 });
   const [running, setRunning] = useState(false);
   const runningRef = useRef(false);
@@ -157,12 +159,129 @@ export default function App() {
 
   useEffect(() => {
     getOrCreateDeviceId().then(setDeviceId);
-    checkHealth(CLOUD_API_URL);
+    checkHealth(LOCAL_API_URL);
     return () => {
       runningRef.current = false;
       void service.stop();
     };
   }, [service]);
+
+  // Attendees pick from what's actually live instead of typing a code, so this only matters
+  // while they're choosing (not sharing yet) and while they're the role that needs it at all.
+  useEffect(() => {
+    if (role !== "attendee" || running) return;
+    let cancelled = false;
+    const fetchActiveSessions = async () => {
+      try {
+        const res = await authFetch(`${serverUrl}/api/sessions/active`);
+        if (cancelled || !res.ok) return;
+        const data = await res.json().catch(() => null);
+        if (!cancelled && Array.isArray(data?.sessions)) setActiveSessions(data.sessions);
+      } catch {
+        // Leave the last-known list showing rather than clearing it on a transient error.
+      }
+    };
+    fetchActiveSessions();
+    const interval = setInterval(fetchActiveSessions, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [role, running, serverUrl]);
+
+  // Passed explicitly through every step below rather than kept in state — Alert buttons fire
+  // well after this render, and reading a snapshot back out of state at that point is exactly
+  // the kind of stale/no-op-update trap that broke the rejoin flow before (see acceptRejoin's
+  // comment). Threading the same object through every function sidesteps it entirely.
+  const acceptRejoin = (snapshot: ActiveSessionSnapshot) => {
+    setRole(snapshot.role);
+    setRoomId(snapshot.roomId);
+    setSessionId(snapshot.sessionId);
+    // Passed directly rather than read back from state, since setRole/setRoomId/setSessionId
+    // above may be no-ops if the rejoin values equal what was already showing (e.g. this
+    // screen's own defaults) — state that doesn't change doesn't trigger anything to notice it.
+    void togglePresence(true, snapshot);
+  };
+
+  const closeRoomAfterDismiss = async () => {
+    void clearActiveSession();
+    // Read fresh rather than from the deviceId state variable: this whole chain only ever runs
+    // from inside the one-time mount effect below, whose closure was captured on the very first
+    // render — before getOrCreateDeviceId() had resolved — and never gets a newer one, no matter
+    // how much later this actually fires.
+    const myDeviceId = await getOrCreateDeviceId();
+    authFetch(`${serverUrl}/api/session/leave`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: myDeviceId })
+    }).catch(() => {});
+  };
+
+  const showRejoinPrompt = (snapshot: ActiveSessionSnapshot) => {
+    Alert.alert(
+      "Resume presenting?",
+      `The app closed while you were presenting "${snapshot.roomId}" (session "${snapshot.sessionId}"). Rejoin where you left off?`,
+      [
+        { text: "Dismiss", style: "cancel", onPress: () => void confirmDismiss(snapshot) },
+        { text: "Rejoin", onPress: () => acceptRejoin(snapshot) }
+      ]
+    );
+  };
+
+  const confirmDismiss = async (snapshot: ActiveSessionSnapshot) => {
+    let attendeeCount = 0;
+    try {
+      const res = await authFetch(`${serverUrl}/api/rooms/${encodeURIComponent(snapshot.roomId)}/live?sessionId=${encodeURIComponent(snapshot.sessionId)}`);
+      const data = res.ok ? await res.json().catch(() => null) : null;
+      if (Array.isArray(data?.members)) {
+        attendeeCount = data.members.filter((m: RoomMemberInfo) => m.role === "attendee").length;
+      }
+    } catch {
+      // Unknown count — the confirmation still works, just without a number to show.
+    }
+
+    Alert.alert(
+      "Close this room?",
+      attendeeCount > 0
+        ? `"${snapshot.roomId}" currently has ${attendeeCount} attendee${attendeeCount === 1 ? "" : "s"}. Ending it will disconnect them and record their attendance as ended now.`
+        : `"${snapshot.roomId}" has no attendees right now. End it for reporting?`,
+      [
+        // Cancelling here cancels the *dismiss*, not the rejoin — back to the original choice,
+        // not a dead end. Nothing has been cleared or ended yet at this point.
+        { text: "Cancel", style: "cancel", onPress: () => showRejoinPrompt(snapshot) },
+        { text: "End Room", style: "destructive", onPress: closeRoomAfterDismiss }
+      ]
+    );
+  };
+
+  // Sharing was on when the app last closed without a deliberate stop (force close, crash) —
+  // offer to resume exactly where things were left off, but only if that room is still genuinely
+  // alive: an admin may well have ended it while the app was gone (a presenter that vanished
+  // without a trace looks exactly like one that's abandoned it), and rejoining a room that's
+  // already gone would just mint a brand-new, empty occurrence under the same name.
+  useEffect(() => {
+    (async () => {
+      const snapshot = await getActiveSession();
+      if (!snapshot) return;
+      // Read directly rather than from the deviceId state var, which may not have landed yet —
+      // this effect only runs once on mount and would otherwise be stuck with its initial value.
+      const myDeviceId = await getOrCreateDeviceId();
+      try {
+        const res = await authFetch(`${serverUrl}/api/devices/${encodeURIComponent(myDeviceId)}/live?sessionId=${encodeURIComponent(snapshot.sessionId)}`);
+        const data = res.ok ? await res.json().catch(() => null) : null;
+        if (data?.roomEnded) {
+          void clearActiveSession();
+          Alert.alert("Room already ended", `"${snapshot.roomId}" was ended while the app was closed.`);
+          return;
+        }
+      } catch {
+        // Couldn't reach the server to check — fall through and offer the rejoin anyway; the
+        // rejoin attempt itself will surface any real problem.
+      }
+      showRejoinPrompt(snapshot);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const fetchLiveRoom = async () => {
     if (!runningRef.current) return;
@@ -268,29 +387,59 @@ export default function App() {
         confidence: 1.0
       }]);
     }
-    fetchLiveRoom();
-    const interval = setInterval(() => fetchLiveRoom(), 3000);
+    // Keeps the rejoin snapshot's timestamp fresh for as long as sharing is genuinely alive, so
+    // a force close is only offered as a rejoin within REJOIN_WINDOW_MS of the app actually
+    // dying — not within that window of whenever sharing happened to start. Presenter-only: an
+    // attendee's "membership" is just proximity detection, which resumes on its own the moment
+    // sharing is back on — there's nothing structural to restore for them. Piggybacks on the
+    // same 3s tick as the live-room poll below rather than running its own separate timer.
+    const tick = () => {
+      fetchLiveRoom();
+      if (role === "presenter") void saveActiveSession({ role, roomId, sessionId });
+    };
+    tick();
+    const interval = setInterval(tick, 3000);
     return () => clearInterval(interval);
   }, [running, role, roomId, sessionId, serverUrl, deviceId]);
 
-  const togglePresence = async (enabled: boolean) => {
-    runningRef.current = enabled;
-    setRunning(enabled);
+  // Overrides let a caller (the rejoin flow) start sharing with values it already knows,
+  // instead of setting state and hoping an effect notices the change — setState is a no-op
+  // when the new value equals the old one (e.g. rejoining into the same defaults this screen
+  // already had), and nothing re-runs in that case.
+  const togglePresence = async (enabled: boolean, overrides?: { role: ParticipantRole; roomId: string; sessionId: string }) => {
+    const effRole = overrides?.role ?? role;
+    const effRoomId = overrides?.roomId ?? roomId;
+    const effSessionId = overrides?.sessionId ?? sessionId;
     try {
       if (enabled) {
+        // Read fresh rather than trust the deviceId state variable: this function is reachable
+        // from the rejoin flow (acceptRejoin), whose whole call chain only ever fires from inside
+        // a one-time mount effect frozen at the very first render — before getOrCreateDeviceId()
+        // had resolved. Without this, a fast rejoin silently sends an empty deviceId, which fails
+        // the server's validation with no logging at all, looking exactly like a dropped request.
+        const effDeviceId = deviceId || (await getOrCreateDeviceId());
+        // running flips only once the join has actually landed — not before — since
+        // fetchLiveRoom's polling effect starts the instant `running` becomes true, and it must
+        // never be able to reach the server before this join does (see presenceService.start()).
         await service.start({
-          sessionId,
-          roomId: role === "presenter" ? roomId : undefined,
-          role,
-          deviceId,
+          sessionId: effSessionId,
+          roomId: effRole === "presenter" ? effRoomId : undefined,
+          role: effRole,
+          deviceId: effDeviceId,
           displayName: displayName.trim() || undefined,
           apiUrl: serverUrl
         });
+        runningRef.current = true;
+        setRunning(true);
+        if (effRole === "presenter") void saveActiveSession({ role: effRole, roomId: effRoomId, sessionId: effSessionId });
       } else {
+        runningRef.current = false;
+        setRunning(false);
         await service.stop();
         setRoomMembers([]);
         setDetectedRoom("");
         setServerConnected(null);
+        void clearActiveSession();
       }
     } catch (error) {
       runningRef.current = false;
@@ -298,7 +447,11 @@ export default function App() {
       setRoomMembers([]);
       setDetectedRoom("");
       setServerConnected(null);
-      Alert.alert("Unable to start BLE", error instanceof Error ? error.message : "Unknown BLE error");
+      if (error instanceof RoomRejectedError) {
+        Alert.alert("Room already has a presenter", error.message);
+      } else {
+        Alert.alert("Unable to start BLE", error instanceof Error ? error.message : "Unknown BLE error");
+      }
     }
   };
 
@@ -308,6 +461,14 @@ export default function App() {
   };
 
   const handleToggleSwitch = (enabled: boolean) => {
+    if (enabled && role === "attendee" && !activeSessions.includes(sessionId)) {
+      // Joining under a session that isn't actually live fails silently server-side (its
+      // /api/session/join and /api/observations calls just get rejected, with the toggle still
+      // flipping on locally and BLE scanning genuinely starting) — block it here instead of
+      // letting that happen invisibly.
+      Alert.alert("Pick an active session first", "There's no active session selected — choose one from the list before sharing.");
+      return;
+    }
     if (!enabled && role === "presenter") {
       Alert.alert(
         "Stop Sharing?",
@@ -440,15 +601,38 @@ export default function App() {
           />
 
           <Text style={styles.label}>Session code</Text>
-          <TextInput
-            editable={!running}
-            value={sessionId}
-            onChangeText={setSessionId}
-            placeholder="e.g. poc-session"
-            placeholderTextColor="#8C9BA5"
-            style={styles.input}
-            autoCapitalize="none"
-          />
+          {role === "attendee" ? (
+            activeSessions.length === 0 ? (
+              <Text style={styles.noActiveSessionsText}>No active sessions right now.</Text>
+            ) : (
+              <View style={styles.roomChipsWrap}>
+                {activeSessions.map((s) => {
+                  const isSelected = s === sessionId;
+                  return (
+                    <TouchableOpacity
+                      key={s}
+                      disabled={running}
+                      style={[styles.roomChip, isSelected && styles.roomChipSelected]}
+                      onPress={() => setSessionId(s)}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[styles.roomChipText, isSelected && styles.roomChipTextSelected]}>{s}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )
+          ) : (
+            <TextInput
+              editable={!running}
+              value={sessionId}
+              onChangeText={setSessionId}
+              placeholder="e.g. poc-session"
+              placeholderTextColor="#8C9BA5"
+              style={styles.input}
+              autoCapitalize="none"
+            />
+          )}
 
           {/* Room Management Section - Presenter Only */}
           {role === "presenter" && (
@@ -528,7 +712,11 @@ export default function App() {
               <Text style={styles.startTitle}>Share presence</Text>
               <Text style={styles.help}>The POC scans only while the app is open.</Text>
             </View>
-            <Switch value={running} onValueChange={handleToggleSwitch} />
+            <Switch
+              value={running}
+              onValueChange={handleToggleSwitch}
+              disabled={!running && role === "attendee" && !activeSessions.includes(sessionId)}
+            />
           </View>
 
           {/* Live Connected Devices & Presence Dashboard */}
@@ -813,6 +1001,7 @@ const styles = StyleSheet.create({
   title: { fontSize: 28, fontWeight: "700", color: "#173A63" },
   subtitle: { fontSize: 15, color: "#5D6873", marginBottom: 6, fontWeight: "600" },
   label: { color: "#173A63", fontWeight: "700", marginTop: 4 },
+  noActiveSessionsText: { color: "#75808A", fontSize: 13, fontStyle: "italic", marginTop: 4 },
   input: {
     borderColor: "#C8D3DA",
     borderWidth: 1,

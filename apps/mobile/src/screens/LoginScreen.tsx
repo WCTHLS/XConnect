@@ -28,6 +28,8 @@ export function LoginScreen() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
@@ -50,6 +52,10 @@ export function LoginScreen() {
     }
     if (mode === "signup" && !name.trim()) {
       setError("Enter your name.");
+      return;
+    }
+    if (mode === "signup" && password !== confirmPassword) {
+      setError("Passwords don't match.");
       return;
     }
     void run(() => (mode === "signup" ? signUpWithEmail(name, email, password) : signInWithEmail(email, password)));
@@ -112,16 +118,38 @@ export function LoginScreen() {
                 keyboardType="email-address"
                 autoCorrect={false}
               />
-              <TextInput
-                style={styles.input}
-                value={password}
-                onChangeText={setPassword}
-                placeholder="Password"
-                placeholderTextColor="#8C9BA5"
-                secureTextEntry
-                autoCapitalize="none"
-                onSubmitEditing={submit}
-              />
+              <View style={styles.passwordRow}>
+                <TextInput
+                  style={[styles.input, styles.passwordInput]}
+                  value={password}
+                  onChangeText={setPassword}
+                  placeholder="Password"
+                  placeholderTextColor="#8C9BA5"
+                  secureTextEntry={!showPassword}
+                  autoCapitalize="none"
+                  onSubmitEditing={mode === "signup" ? undefined : submit}
+                />
+                <TouchableOpacity style={styles.showPasswordBtn} onPress={() => setShowPassword((v) => !v)} activeOpacity={0.7}>
+                  <Text style={styles.showPasswordText}>{showPassword ? "Hide" : "Show"}</Text>
+                </TouchableOpacity>
+              </View>
+              {mode === "signup" && (
+                <View style={styles.passwordRow}>
+                  <TextInput
+                    style={[styles.input, styles.passwordInput]}
+                    value={confirmPassword}
+                    onChangeText={setConfirmPassword}
+                    placeholder="Confirm password"
+                    placeholderTextColor="#8C9BA5"
+                    secureTextEntry={!showPassword}
+                    autoCapitalize="none"
+                    onSubmitEditing={submit}
+                  />
+                  <TouchableOpacity style={styles.showPasswordBtn} onPress={() => setShowPassword((v) => !v)} activeOpacity={0.7}>
+                    <Text style={styles.showPasswordText}>{showPassword ? "Hide" : "Show"}</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
 
               <TouchableOpacity style={styles.button} onPress={submit} disabled={busy} activeOpacity={0.8}>
                 {busy ? <ActivityIndicator color="#FFFFFF" /> : <Text style={styles.buttonText}>{mode === "signup" ? "Create account" : "Sign in"}</Text>}
@@ -135,6 +163,8 @@ export function LoginScreen() {
               <TouchableOpacity
                 onPress={() => {
                   setMode(mode === "signin" ? "signup" : "signin");
+                  setConfirmPassword("");
+                  setShowPassword(false);
                   setError(null);
                   setInfo(null);
                 }}
@@ -169,6 +199,10 @@ const styles = StyleSheet.create({
     color: "#173A63",
     marginBottom: 12
   },
+  passwordRow: { position: "relative", justifyContent: "center" },
+  passwordInput: { paddingRight: 64 },
+  showPasswordBtn: { position: "absolute", right: 14, top: 0, bottom: 12, justifyContent: "center" },
+  showPasswordText: { color: "#126D7A", fontSize: 13, fontWeight: "700" },
   button: { backgroundColor: "#126D7A", borderRadius: 10, paddingVertical: 15, alignItems: "center", marginTop: 4 },
   buttonText: { color: "#FFFFFF", fontSize: 16, fontWeight: "700" },
   socialButton: {

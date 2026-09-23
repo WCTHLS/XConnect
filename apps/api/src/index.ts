@@ -142,6 +142,17 @@ app.post("/api/admin/session/end", (request, response) => {
   return response.json({ ok: true, ended });
 });
 
+app.post("/api/admin/rooms/end", (request, response) => {
+  const parsed = z.object({ sessionId: z.string().min(1), roomId: z.string().min(1) }).safeParse(request.body);
+  if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
+
+  const { sessionId, roomId } = parsed.data;
+  const ended = engine.endRoom(sessionId, roomId);
+  console.log(ended ? `🛑 [ROOM] '${roomId}' under '${sessionId}' ended by admin` : `⚠️  [ROOM] '${roomId}' under '${sessionId}' was not active`);
+
+  return response.json({ ok: true, ended });
+});
+
 // History is room-centric: each entry is one occurrence of one room (rooms.id). The optional
 // `code` filter matches the session label the room was grouped under.
 app.get("/api/admin/sessions", async (request, response) => {
@@ -375,6 +386,10 @@ app.get("/api/rooms", (request, response) => {
   return response.json({ rooms: engine.listRooms(label) });
 });
 
+app.get("/api/sessions/active", (_request, response) => {
+  return response.json({ sessions: engine.listActiveSessionLabels() });
+});
+
 let lastLogTime = 0;
 app.get("/api/rooms/:roomId/live", (request, response) => {
   const label = String(request.query.sessionId ?? "poc-session");
@@ -405,11 +420,15 @@ app.get("/api/devices/:deviceId/live", (request, response) => {
 // Deliberately not scoped to a session label: the admin watches every active room across the
 // whole event, not just the session code their own app is set to. Each room's state carries its
 // own label so the screen can tell two same-named rooms apart.
+//
+// Deliberately NOT filtered to rooms with live members: a room whose only presenter has gone
+// stale (backgrounded, force-closed without a graceful leave) still shows here with 0 members —
+// hiding it would leave the admin with no way to ever discover and close a room stuck in that
+// state, since this endpoint is also what "Manage Rooms" reads from.
 app.get("/api/admin/overview", (_request, response) => {
   const rooms = engine
     .listActiveRooms()
-    .map(({ sessionLabel, roomCode }) => engine.roomState(sessionLabel, roomCode))
-    .filter((state) => state.members && state.members.length > 0);
+    .map(({ sessionLabel, roomCode }) => engine.roomState(sessionLabel, roomCode));
   return response.json({ rooms });
 });
 

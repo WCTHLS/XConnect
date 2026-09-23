@@ -326,34 +326,70 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
     }
   };
 
-  const endSessionRequest = async () => {
+  const endRoomRequest = async (roomSessionId: string, roomId: string) => {
+    try {
+      const res = await authFetch(`${serverUrl}/api/admin/rooms/end`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId: roomSessionId, roomId })
+      });
+      const data = await res.json().catch(() => null);
+      if (data?.ended) {
+        setRooms((prev) => prev.filter((r) => !(r.sessionId === roomSessionId && r.roomId === roomId)));
+      } else {
+        Alert.alert("Nothing to End", `Room "${roomId}" is no longer active.`);
+      }
+    } catch (err: any) {
+      Alert.alert("Failed to End Room", err?.message || "Network error");
+    }
+  };
+
+  const handleEndRoom = (roomSessionId: string, roomId: string) => {
+    Alert.alert(
+      "End This Room?",
+      `This closes out room "${roomId}" (session "${roomSessionId}") for reporting. Other rooms in this session are not affected.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "End Room", style: "destructive", onPress: () => endRoomRequest(roomSessionId, roomId) }
+      ]
+    );
+  };
+
+  const endAllInSessionRequest = async (roomSessionId: string) => {
     try {
       const res = await authFetch(`${serverUrl}/api/admin/session/end`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId })
+        body: JSON.stringify({ sessionId: roomSessionId })
       });
       const data = await res.json().catch(() => null);
       if (data?.ended) {
-        Alert.alert("Session Ended", `"${sessionId}" is closed. The next device to use this code starts a new session.`);
+        setRooms((prev) => prev.filter((r) => r.sessionId !== roomSessionId));
       } else {
-        Alert.alert("Nothing to End", `"${sessionId}" has no active occurrence right now.`);
+        Alert.alert("Nothing to End", `"${roomSessionId}" has no active rooms right now.`);
       }
     } catch (err: any) {
       Alert.alert("Failed to End Session", err?.message || "Network error");
     }
   };
 
-  const handleEndSession = () => {
+  const handleEndAllInSession = (roomSessionId: string, count: number) => {
     Alert.alert(
-      "End This Session?",
-      `This closes out "${sessionId}" for reporting. Anyone who continues using this code afterward starts a brand-new session, not a continuation of this one.`,
+      "End All Rooms In This Session?",
+      `This closes out all ${count} active room(s) under "${roomSessionId}" for reporting. Anyone who continues using this code afterward starts brand-new rooms, not a continuation of these.`,
       [
         { text: "Cancel", style: "cancel" },
-        { text: "End Session", style: "destructive", onPress: endSessionRequest }
+        { text: "End All", style: "destructive", onPress: () => endAllInSessionRequest(roomSessionId) }
       ]
     );
   };
+
+  const roomsBySession = rooms.reduce<Map<string, LiveRoomState[]>>((acc, room) => {
+    const list = acc.get(room.sessionId) ?? [];
+    list.push(room);
+    acc.set(room.sessionId, list);
+    return acc;
+  }, new Map());
 
   const searchHistory = async () => {
     const code = historyCode.trim();
@@ -485,9 +521,6 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
           </Text>
         </View>
         <View style={styles.headerActions}>
-          <TouchableOpacity style={styles.endSessionBtn} onPress={handleEndSession} activeOpacity={0.7}>
-            <Text style={styles.endSessionBtnText}>{"\u{1F6D1}"} End Session</Text>
-          </TouchableOpacity>
           <TouchableOpacity style={styles.backBtn} onPress={onBack} activeOpacity={0.7}>
             <Text style={styles.backBtnText}>{"✕"} Close</Text>
           </TouchableOpacity>
@@ -525,15 +558,47 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
                 <Text style={styles.emptyText}>No active rooms right now.</Text>
               </View>
             ) : (
-              rooms.map((room) => (
+              [...roomsBySession.entries()].map(([label, sessionRooms]) => (
+                <View key={label} style={styles.sessionGroup}>
+                  <View style={styles.sessionGroupHeader}>
+                    <Text style={styles.sessionGroupTitle} numberOfLines={1}>
+                      {"\u{1F5C2} " + label} {"·"} {sessionRooms.length} room{sessionRooms.length === 1 ? "" : "s"}
+                    </Text>
+                    <TouchableOpacity
+                      style={styles.endAllBtn}
+                      onPress={() => handleEndAllInSession(label, sessionRooms.length)}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.endAllBtnText}>End All</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {sessionRooms.map((room) => (
                 // Two sessions can each have a room of the same name, so the key carries both.
                 <View key={`${room.sessionId}::${room.roomId}`} style={styles.roomCard}>
-                  <Text style={styles.roomTitle}>
-                    Room: {room.roomId} {"·"} {room.presenterName || room.presenterDeviceId || "Unknown host"}
-                  </Text>
-                  <Text style={styles.roomSubtitle}>
-                    {"\u{1F5C2} " + room.sessionId} {"·"} {room.members?.length ?? 0} member(s)
-                  </Text>
+                  <View style={styles.roomCardHeader}>
+                    <View style={styles.roomCardHeaderText}>
+                      <Text style={styles.roomTitle}>
+                        Room: {room.roomId} {"·"} {room.presenterName || room.presenterDeviceId || "Unknown host"}
+                      </Text>
+                      <Text style={styles.roomSubtitle}>
+                        {"\u{1F5C2} " + room.sessionId} {"·"} {room.members?.length ?? 0} member(s)
+                      </Text>
+                      {/* A presenter always counts as a member of their own room, so 0 members
+                          unambiguously means the presenter's device has gone stale, not just that
+                          nobody else has joined yet. */}
+                      {(room.members?.length ?? 0) === 0 && (
+                        <Text style={styles.presenterOfflineBadge}>{"⚠️"} Presenter offline</Text>
+                      )}
+                    </View>
+                    <TouchableOpacity
+                      style={styles.endRoomBtn}
+                      onPress={() => handleEndRoom(room.sessionId, room.roomId)}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.endRoomBtnText}>End</Text>
+                    </TouchableOpacity>
+                  </View>
 
                   {(room.members ?? []).map((member: RoomMemberInfo, index: number) => {
                     const isHost = member.role === "presenter";
@@ -571,6 +636,8 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
                       </View>
                     );
                   })}
+                </View>
+                  ))}
                 </View>
               ))
             )}
@@ -827,6 +894,15 @@ const styles = StyleSheet.create({
   backBtnText: { fontSize: 13, fontWeight: "700", color: "#455A64" },
   endSessionBtn: { paddingHorizontal: 12, paddingVertical: 6, backgroundColor: "#FDECEA", borderRadius: 6 },
   endSessionBtnText: { fontSize: 13, fontWeight: "700", color: "#C62828" },
+  sessionGroup: { marginBottom: 4 },
+  sessionGroupHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8, paddingHorizontal: 2 },
+  sessionGroupTitle: { fontSize: 14, fontWeight: "700", color: "#173A63", flexShrink: 1, marginRight: 8 },
+  endAllBtn: { paddingHorizontal: 10, paddingVertical: 5, backgroundColor: "#FDECEA", borderRadius: 6, flexShrink: 0 },
+  endAllBtnText: { fontSize: 12, fontWeight: "700", color: "#C62828" },
+  roomCardHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
+  roomCardHeaderText: { flex: 1, marginRight: 8 },
+  endRoomBtn: { paddingHorizontal: 10, paddingVertical: 5, backgroundColor: "#ECEFF1", borderRadius: 6, flexShrink: 0 },
+  endRoomBtnText: { fontSize: 12, fontWeight: "700", color: "#455A64" },
   errorBanner: { backgroundColor: "#FDECEA", padding: 10, paddingHorizontal: 16 },
   errorBannerText: { color: "#A31D33", fontSize: 12 },
   tabRow: { flexDirection: "row", paddingHorizontal: 16, paddingTop: 10, gap: 8 },
@@ -879,6 +955,7 @@ const styles = StyleSheet.create({
   },
   roomTitle: { fontSize: 15, fontWeight: "700", color: "#173A63" },
   roomSubtitle: { fontSize: 12, color: "#5D6873", marginBottom: 4 },
+  presenterOfflineBadge: { fontSize: 12, color: "#B7791F", fontWeight: "700", marginBottom: 4 },
   memberRow: {
     borderTopWidth: 1,
     borderTopColor: "#F0F4F8",

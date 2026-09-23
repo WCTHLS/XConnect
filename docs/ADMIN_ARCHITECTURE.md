@@ -48,9 +48,11 @@ Lifecycle:
 
 1. **First presenter join** for a label and room name mints a new `rooms.id` and fire-and-forget
    inserts the `sessions` label row (if new) and the `rooms` row.
-2. **Reuse** — the same label and name within `ROOM_AUTO_EXPIRY_MS` (8 hours) of last activity
+2. **Reuse** — the same label and name within `ROOM_AUTO_EXPIRY_MS` (15 minutes) of last activity
    resolves to the same occurrence.
-3. **Auto-expiry** — survives a lunch break, forces a fresh occurrence by the next day.
+3. **Auto-expiry** — survives a brief interruption (restart, connectivity blip), but a longer gap
+   forces a fresh occurrence rather than silently merging an unrelated later use into the same
+   room record.
 4. **Presenter leaves** — `leave()` ends that room's occurrence: open stays are closed at once
    and `rooms.ended_at` is stamped.
 5. **Admin ends a session** — `POST /api/admin/session/end` calls `endSession(label)`, which ends
