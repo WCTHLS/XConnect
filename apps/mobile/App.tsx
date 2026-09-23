@@ -33,8 +33,8 @@ const LOCAL_API_URL = "http://192.168.0.201:3000";
 export default function App() {
   const [role, setRole] = useState<ParticipantRole>("attendee");
   const [sessionId, setSessionId] = useState(DEFAULT_SESSION);
-  const [serverEnv, setServerEnv] = useState<"cloud" | "local" | "custom">("local");
-  const [serverUrl, setServerUrl] = useState(LOCAL_API_URL);
+  const [serverEnv, setServerEnv] = useState<"cloud" | "local" | "custom">("cloud");
+  const [serverUrl, setServerUrl] = useState(CLOUD_API_URL);
   const [serverHealth, setServerHealth] = useState<"checking" | "online" | "offline">("checking");
   const [showServerConfig, setShowServerConfig] = useState(false);
   const [displayName, setDisplayName] = useState("");
@@ -159,7 +159,7 @@ export default function App() {
 
   useEffect(() => {
     getOrCreateDeviceId().then(setDeviceId);
-    checkHealth(LOCAL_API_URL);
+    checkHealth(CLOUD_API_URL);
     return () => {
       runningRef.current = false;
       void service.stop();
