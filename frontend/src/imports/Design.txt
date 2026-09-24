@@ -1,0 +1,142 @@
+# Comprehensive Production UI/UX Design Prompt for Figma Make: XConnect Mobile (iOS & Android)
+
+## 1. Product Context & Overview
+Design an enterprise-grade, production-ready mobile application UI/UX for **XConnect**, a zero-hardware indoor conference presence and room detection system. 
+
+XConnect eliminates physical beacons, QR-code scanners, NFC gates, and GPS by fusing four mobile sensor modalities:
+1. **Peer-to-Peer Bluetooth Low Energy (BLE) Mesh**: Phones broadcast ephemeral rotating tokens (60s epoch) and scan neighbors to form a real-time proximity graph.
+2. **Ambient Wi-Fi Fingerprinting**: Samples ambient Wi-Fi BSSID access points to compute in-room cosine similarity vectors.
+3. **Ultrasonic Acoustic Hard Gate (18.5–19.5 kHz)**: Presenter phones emit an inaudible acoustic room token that participant phone microphones detect. Because ultrasound cannot penetrate drywall or glass doors, this provides 99% audit-grade proof of in-room presence.
+4. **IMU Motion Dynamics**: Accelerometer magnitude variance identifies unattended or abandoned devices.
+
+The target product must look like a high-end, commercial enterprise product (similar in polish to Linear, Stripe Mobile, Apple Health, or DJI Pro) rather than a proof-of-concept developer tool. Normal users must never see raw RSSI, BSSIDs, or token hashes; they must experience an effortless, intelligent presence system.
+
+---
+
+## 2. Target Users & Core Roles
+1. **Presenter (Room Anchor / Speaker)**:
+   - Selects or creates an Anchor Room (e.g., "Hall A", "Workshop 1", "Auditorium").
+   - Starts the session. Their phone broadcasts the room anchor and emits the ultrasonic gate.
+   - Monitors a live, real-time presence radar and confirmed attendee count with audit-ready confidence indicators.
+2. **Attendee (Participant / Delegate)**:
+   - Taps "Connect". Their phone scans ambient signals.
+   - Automatically detects the room they are sitting in without entering room numbers or scanning codes.
+   - Sees an affirmative "Presence Confirmed" status, host name, and live dwell duration.
+3. **Enterprise Auditor / Administrator**:
+   - Accesses a PIN-gated overview (`PIN: 2468`) to inspect all active rooms, live occupancy counts, dwell times, and sensor health.
+
+---
+
+## 3. Visual Identity & Design Direction
+- **Atmosphere**: Modern, premium, confident, quiet, and technologically sophisticated.
+- **Color Philosophy**: Avoid generic corporate blue. Utilize deep oceanic slate and midnight obsidian paired with precise emerald for verified presence, sky cyan for telemetry, amber for anomalies, and crimson for offline alerts.
+- **Theme Support**: Complete Light Theme AND Dark Theme (Slate Obsidian).
+
+### Color Tokens
+- **Brand Dark Surface**: `#0B0F17` (Deep Obsidian Base)
+- **Brand Dark Card**: `#161F30` with border `#223147`
+- **Brand Light Surface**: `#F8FAFC` (Slate 50)
+- **Brand Light Card**: `#FFFFFF` with border `#E2E8F0`
+- **Primary Accent (Presence Verified)**: `#10B981` (Emerald 500) / Light: `#059669` (Emerald 600)
+- **Secondary Accent (Active Mesh)**: `#0284C7` (Sky 600) / Dark: `#38BDF8` (Sky 400)
+- **Ultrasonic Wave Highlight**: `#2DD4BF` (Teal 400)
+- **Warning / Motion Anomaly**: `#F59E0B` (Amber 500)
+- **Error / Disconnected**: `#EF4444` (Rose 500)
+- **Text Hierarchy (Dark)**: Primary `#F8FAFC`, Secondary `#94A3B8`, Muted `#64748B`
+- **Text Hierarchy (Light)**: Primary `#0F172A`, Secondary `#475569`, Muted `#94A3B8`
+
+### Typography System
+- **Font Family**: Inter or SF Pro Display / Text. Tabular monospace for numbers (`SF Mono` / `Roboto Mono`).
+- **Scale**:
+  - `Hero Counter`: 56pt, Bold (800), Tabular figures
+  - `Display Large`: 28pt, Bold (700), Letter-spacing -0.5px
+  - `Title Medium`: 20pt, Semi-Bold (600)
+  - `Section Header`: 16pt, Semi-Bold (600)
+  - `Body Regular`: 15pt, Regular (400), 22pt line-height
+  - `Caption / Badge`: 11pt, Bold (700), Uppercase, Letter-spacing +0.5px
+
+---
+
+## 4. Key Interactive Components & Foundations
+
+1. **The Signature "Living Presence Radar"**:
+   - Central interactive component for both Presenter and Attendee.
+   - Three concentric expanding wave ripples with variable opacity representing ultrasonic acoustic room boundaries and BLE mesh signals.
+   - Central pulse core with the user’s device node.
+   - Floating participant nodes that dynamically appear with subtle spring physics as attendees are confirmed.
+   - A floating status pill at the bottom: `"Acoustic Gate Verified · 99% Confidence"`.
+
+2. **Hero Presence Counter Card**:
+   - Displays confirmed attendees in large 56pt typography.
+   - Live badge: `"● LIVE IN-ROOM"` (pulsing green dot).
+   - Sensor Health Indicator Bar: 4 micro-pills showing status of BLE Mesh, Wi-Fi Affinity, Ultrasonic Gate, and Motion Sensors.
+
+3. **In-Room Participant Card**:
+   - Clean horizontal list row with user avatar, display name, role badge (`Host` vs `Attendee`), and session dwell timer (`24m 12s`).
+   - Secondary row: Sensor verification chips (`Ultrasonic Verified`, `Wi-Fi Match 94%`, `BLE Mesh Active`, `⚠️ Inactivity Flag`).
+
+4. **Room Selector Chips**:
+   - Horizontally scrollable capsule chips (`Room A`, `Hall 1`, `Auditorium`, `+ Add Room`) with selected states featuring emerald glowing borders.
+
+5. **Diagnostic & Admin Drawer**:
+   - Slide-up bottom sheet with dark terminal-inspired log entries, color-coded by category: BLE (Cyan), Wi-Fi (Green), Audio (Teal), Motion (Pink), API (Purple).
+
+---
+
+## 5. Complete Mobile Screen Inventory (Design All Screens in Light & Dark Mode)
+
+### A. Onboarding & Permissions
+1. **Screen 01 — Cinematic App Launch**: Minimalist dark background with glowing XConnect monogram, subtle acoustic ripple, and engine status `"Calibrating Quad-Sensors..."`.
+2. **Screen 02 — Zero-Hardware Value Primer**: 3 carousel slides explaining mesh proximity, drywall acoustic gating, and zero-hardware infrastructure.
+3. **Screen 03 — Permission Primer**: Contextual cards explaining Bluetooth Nearby Devices and Microphone (clearly stating: *"Used solely to decode inaudible room sound frequencies; your conversations are never recorded"*).
+
+### B. Hub & Setup
+4. **Screen 04 — Role Selection Hub**: Clean card interface allowing the user to select **"Host a Room" (Presenter)** or **"Join Presence" (Attendee)**, with a quick-switch toggle for returning users.
+5. **Screen 05 — Presenter Room Configuration**: Session code input, quick room chips, display name input, and server environment status pill (Cloud vs Local). Primary CTA: `"Start Broadcasting Presence"`.
+
+### C. Presenter Experience
+6. **Screen 06 — Presenter Active Live Dashboard**: 
+   - Top Bar: Room name (`Room A`), Session Code (`poc-session`), and Settings cog.
+   - Center: Living Presence Radar with live floating participant nodes.
+   - Middle: Large Attendee Count (`24 Verified Attendees`).
+   - Bottom: Compact preview of the last 3 joined attendees with a `"View Full Roster (24) →"` trigger.
+7. **Screen 07 — Presenter Detailed Attendee Roster**: Fullscreen or expandable sheet showing all confirmed attendees, sorting by dwell duration or confidence, search filter, and individual sensor verification badges.
+8. **Screen 08 — Presenter Session End & Audit Report**: Summary card after session ends showing total unique attendees, peak concurrency, average attendance duration, and export options (`Share Attendance CSV / PDF`).
+
+### D. Attendee Experience
+9. **Screen 09 — Attendee Discovery Radar**: Searching state with deep oceanic background, undulating waves, and status `"Scanning ambient acoustic & radio signals..."`.
+10. **Screen 10 — Attendee Presence Confirmed**: 
+    - Prominent green affirmative shield badge: `"Verified in Room A"`.
+    - Presenter name: `"Anchored to Dr. Alice"`.
+    - Live dwell counter: `"Present for 18m 42s"`.
+    - Information notice: `"Your presence is logged automatically. You can safely minimize this app."`
+11. **Screen 11 — Attendee Out-of-Range Transition**: Amber warning card when the attendee steps into the hallway: `"Out of Room Boundary. Presence grace period active (32s remaining)..."`.
+
+### E. System & Administration
+12. **Screen 12 — Admin PIN Auth & Live Multi-Room Overview**: Keypad for PIN entry (`2468`), followed by an executive dashboard listing all concurrent rooms (`Room A: 24`, `Room B: 12`, `Auditorium: 85`), total network count, and server latency.
+13. **Screen 13 — System Diagnostics Modal**: Clean telemetry log viewer with real-time log stream, category tabs, and `"Export Log File"` button.
+14. **Screen 14 — Edge State & Offline Recovery**: Full UI states for "Bluetooth Disabled", "Microphone Permission Required", "Server Reconnecting", and "Empty Room (Waiting for participants)".
+
+---
+
+## 6. Motion & Micro-Interaction Specifications
+- **Radar Pulse**: Continuous 2.4s ease-out loop, scaling from 0.8x to 1.5x with opacity fading from 0.6 to 0.0.
+- **Presence Lock-In**: When an attendee is confirmed, the radar contracts with a swift spring, bursting into an emerald checkmark badge with medium haptic feedback.
+- **Roster Counter**: Animated rolling odometer for numerical updates.
+- **Pull-to-Refresh**: Micro-spinner accompanied by a subtle radar sweep.
+
+---
+
+## 7. Platform Adaptations
+- **iOS (iPhone 15/16 Pro)**: Account for Dynamic Island, Home Indicator bar, SF Pro typography, Large Navigation Titles, and native interactive bottom sheets with top drag grabbers.
+- **Android (Pixel 8 / Samsung Galaxy S24)**: Account for Material You surface elevations, edge-to-edge system navigation bars, centered headers, and predictive back gestures.
+
+---
+
+## 8. Figma Deliverable Structure
+Organize the Figma canvas into dedicated pages:
+1. `🎨 Foundations`: Color palettes, typography hierarchy, elevation, spacing grid, and icon library.
+2. `🧩 Components & Variants`: Radar modules, participant cards, status pills, room chips, buttons, and bottom sheets in all interactive states (Default, Pressed, Active, Disabled, Loading).
+3. `📱 iOS Screens (Light & Dark)`: All 14 screens framed for iPhone 16 Pro (393 × 852).
+4. `🤖 Android Screens (Light & Dark)`: All 14 screens framed for Google Pixel 8 (412 × 915).
+5. `⚡ Interactive Prototype Flows`: Linked flows for Presenter Session Start, Attendee Auto-Discovery, Admin Inspection, and Edge State Recovery.

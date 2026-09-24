@@ -7,14 +7,14 @@ RUN npm install -g pnpm@10.14.0
 # Copy workspace manifests
 COPY package.json pnpm-workspace.yaml ./
 COPY packages/shared/package.json ./packages/shared/
-COPY apps/api/package.json ./apps/api/
+COPY backend/package.json ./backend/
 
 # Install Linux dependencies cleanly without OS lockfile mismatch
 RUN pnpm install --no-frozen-lockfile
 
 # Copy source code
 COPY packages/shared ./packages/shared
-COPY apps/api ./apps/api
+COPY backend ./backend
 
 EXPOSE 3000
 ENV PORT=3000

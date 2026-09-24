@@ -1,0 +1,11 @@
+{
+  "title": "XConnect Mobile App",
+  "description": "This web application enables users to securely upload, share, and manage files online, enhancing collaboration and accessibility for teams and individuals.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

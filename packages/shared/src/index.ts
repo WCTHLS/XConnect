@@ -114,3 +114,39 @@ export function getAcousticTokenForRoom(roomId?: string): string {
   const alpha = clean.replace(/[^a-z0-9]/gi, "").toUpperCase();
   return (alpha || "RM-A").slice(0, 6);
 }
+
+/**
+ * Resolves an acoustic token (e.g. "WK-1", "HL-A", "AUD") back to a human-readable room name.
+ */
+export function getRoomForAcousticToken(token?: string, knownRooms?: string[]): string | undefined {
+  if (!token || !token.trim()) return undefined;
+  const upperToken = token.trim().toUpperCase();
+
+  // 1. Check against known rooms list
+  if (knownRooms && Array.isArray(knownRooms)) {
+    const match = knownRooms.find(r => getAcousticTokenForRoom(r) === upperToken);
+    if (match) return match;
+  }
+
+  // 2. Heuristic resolution for standard prefixes
+  if (upperToken.startsWith("WK-")) {
+    return `Workshop ${upperToken.slice(3)}`;
+  }
+  if (upperToken.startsWith("HL-")) {
+    return `Hall ${upperToken.slice(3)}`;
+  }
+  if (upperToken.startsWith("RM-")) {
+    return `Room ${upperToken.slice(3)}`;
+  }
+  if (upperToken.startsWith("ST-")) {
+    return `Stage ${upperToken.slice(3)}`;
+  }
+  if (upperToken === "AUD") {
+    return "Auditorium";
+  }
+  if (upperToken === "CONF") {
+    return "Conference Hall";
+  }
+
+  return upperToken;
+}
