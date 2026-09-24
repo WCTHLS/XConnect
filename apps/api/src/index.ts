@@ -5,6 +5,7 @@ import { z } from "zod";
 import { authEnabled, authenticate, forgetCachedUser, requireAdmin } from "./auth.js";
 import { db, schema } from "./db/index.js";
 import { PocInferenceEngine } from "./inference.js";
+import { pushEnabled, registerInstallation, sendToEmails } from "./notifications.js";
 
 const app = express();
 const engine = new PocInferenceEngine({ db });
@@ -108,6 +109,46 @@ app.patch("/api/me", async (request, response) => {
 
   console.log(`\u{270F}\u{FE0F}  [NAME] ${request.user.email || request.user.id} is now '${preferredName ?? request.user.accountName}'`);
   return response.json({ authEnabled, ...request.user, name: preferredName ?? request.user.accountName });
+});
+
+// Called once after sign-in (and again whenever the push token changes) so this device can
+// receive notifications. Registration is keyed by installationId (the client's own deviceId),
+// not tied to any particular room/session — it's account-level, same as auth itself.
+app.post("/api/push/register", async (request, response) => {
+  if (!request.user) return response.status(401).json({ error: "unauthenticated" });
+  if (!pushEnabled) return response.status(503).json({ error: "Push notifications are not configured" });
+
+  const parsed = z.object({ installationId: z.string().min(8), pushChannel: z.string().min(1) }).safeParse(request.body);
+  if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
+
+  try {
+    await registerInstallation(parsed.data.installationId, request.user.id, request.user.email, parsed.data.pushChannel);
+    console.log(`🔔 [PUSH] Registered device for ${request.user.email || request.user.id}`);
+    return response.json({ ok: true });
+  } catch (err) {
+    console.error("[push] registration failed:", err);
+    return response.status(500).json({ error: "Registration failed" });
+  }
+});
+
+// Admin-only: send a plain notification right now to every device signed in under the given
+// emails. No scheduling yet (see SCHEDULER_DESIGN.md) — this is the notification pipe on its own.
+app.post("/api/admin/notifications/send", async (request, response) => {
+  if (!pushEnabled) return response.status(503).json({ error: "Push notifications are not configured" });
+
+  const parsed = z
+    .object({ emails: z.array(z.string().email()).min(1).max(100), title: z.string().min(1).max(80), message: z.string().min(1).max(500) })
+    .safeParse(request.body);
+  if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
+
+  try {
+    const { matchedEmails, unmatchedEmails } = await sendToEmails(parsed.data.emails, parsed.data.title, parsed.data.message);
+    console.log(`🔔 [PUSH] Sent "${parsed.data.title}" to ${matchedEmails.length}/${parsed.data.emails.length} email(s)`);
+    return response.json({ ok: true, matchedEmails, unmatchedEmails });
+  } catch (err) {
+    console.error("[push] send failed:", err);
+    return response.status(500).json({ error: "Send failed" });
+  }
 });
 
 app.post("/api/session/join", (request, response) => {

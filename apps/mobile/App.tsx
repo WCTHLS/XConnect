@@ -24,6 +24,7 @@ import { LogsModal } from "./src/components/LogsModal";
 import { AdminScreen } from "./src/screens/AdminScreen";
 import { LoginScreen } from "./src/screens/LoginScreen";
 import { authConfigured, authFetch, signOut, useAuthSession } from "./src/services/auth";
+import { registerForPushNotifications } from "./src/services/pushNotifications";
 
 const DEFAULT_SESSION = "poc-session";
 const DEFAULT_ROOMS = ["room-a", "room-b", "auditorium"];
@@ -105,6 +106,13 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signedIn, serverUrl]);
 
+  // Registers this device for push notifications once signed in. Re-runs on serverUrl change
+  // too, since registration is a POST to that specific server, same as every other API call here.
+  useEffect(() => {
+    if (!signedIn) return;
+    void registerForPushNotifications(serverUrl);
+  }, [signedIn, serverUrl]);
+
   /** Saves the chosen name. Blank clears it, falling back to the account's own name. */
   const saveDisplayName = async () => {
     if (!signedIn || displayName.trim() === savedNameRef.current) return;
@@ -137,7 +145,7 @@ export default function App() {
   const roomRejectedRef = useRef<(message: string) => void>(() => {});
   const service = useMemo(() => new PresenceService(setStatus, (message) => roomRejectedRef.current(message)), []);
 
-  const checkHealth = async (url: string) => {
+  const checkHealth = async (url: string): Promise<boolean> => {
     setServerHealth("checking");
     try {
       const controller = new AbortController();
@@ -147,13 +155,16 @@ export default function App() {
       if (res.ok) {
         setServerHealth("online");
         setServerConnected(true);
+        return true;
       } else {
         setServerHealth("offline");
         setServerConnected(false);
+        return false;
       }
     } catch {
       setServerHealth("offline");
       setServerConnected(false);
+      return false;
     }
   };
 
@@ -447,6 +458,14 @@ export default function App() {
       setRoomMembers([]);
       setDetectedRoom("");
       setServerConnected(null);
+      // A failed start() can still have already joined server-side before the failure (e.g.
+      // joinSession succeeds over HTTP, then BLE setup throws right after — Bluetooth off and
+      // the enable prompt dismissed is the common case). Without this, the server keeps showing
+      // a presenter that joined once and never sent another update, until it goes stale on its
+      // own ~60s later — exactly the "started, then goes to Presenter offline" symptom. stop()
+      // is safe to call even when nothing actually started (RoomRejectedError case included):
+      // every internal cleanup step it does is already itself guarded/no-op-safe.
+      void service.stop();
       if (error instanceof RoomRejectedError) {
         Alert.alert("Room already has a presenter", error.message);
       } else {
@@ -460,7 +479,23 @@ export default function App() {
     Alert.alert("Room already has a presenter", message);
   };
 
-  const handleToggleSwitch = (enabled: boolean) => {
+  const handleToggleSwitch = async (enabled: boolean) => {
+    // Not a Wi-Fi-specific check on purpose: the real problem is "can this device reach the
+    // selected server at all," which Wi-Fi being off only causes in Local mode (a LAN-only
+    // address) — someone on Cloud mode with Wi-Fi off but cellular on is completely fine.
+    // Re-checked live here rather than trusting the cached serverHealth state, since that's only
+    // ever refreshed at launch or on a manual server-picker tap — stale by the time someone
+    // actually flips the switch, e.g. if Wi-Fi was on at launch and got turned off since. Without
+    // this, join/observations fail silently server-side while BLE genuinely starts locally — a
+    // "phantom presenting" state that looks successful on this device but never created anything
+    // server-side.
+    if (enabled) {
+      const reachable = await checkHealth(serverUrl);
+      if (!reachable) {
+        Alert.alert("Can't reach the server", "The selected server appears offline — check your connection or switch servers before sharing.");
+        return;
+      }
+    }
     if (enabled && role === "attendee" && !activeSessions.includes(sessionId)) {
       // Joining under a session that isn't actually live fails silently server-side (its
       // /api/session/join and /api/observations calls just get rejected, with the toggle still

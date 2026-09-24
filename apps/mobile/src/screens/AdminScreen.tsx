@@ -259,7 +259,13 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
   const [rooms, setRooms] = useState<LiveRoomState[]>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"live" | "history">("live");
+  const [activeTab, setActiveTab] = useState<"live" | "history" | "notify">("live");
+  const [notifyEmails, setNotifyEmails] = useState("");
+  const [notifyTitle, setNotifyTitle] = useState("");
+  const [notifyMessage, setNotifyMessage] = useState("");
+  const [notifySending, setNotifySending] = useState(false);
+  const [notifyResult, setNotifyResult] = useState<{ matchedEmails: string[]; unmatchedEmails: string[] } | null>(null);
+  const [notifyError, setNotifyError] = useState<string | null>(null);
   const [historyCode, setHistoryCode] = useState("");
   const [historyOccurrences, setHistoryOccurrences] = useState<SessionOccurrence[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -316,6 +322,36 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
     const interval = setInterval(fetchOverview, POLL_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [unlocked, serverUrl]);
+
+  const handleSendNotification = async () => {
+    const emails = notifyEmails
+      .split(/[,\n]/)
+      .map((e) => e.trim())
+      .filter(Boolean);
+    if (emails.length === 0) return setNotifyError("Enter at least one email address.");
+    if (!notifyTitle.trim() || !notifyMessage.trim()) return setNotifyError("Enter a title and a message.");
+
+    setNotifySending(true);
+    setNotifyError(null);
+    setNotifyResult(null);
+    try {
+      const res = await authFetch(`${serverUrl}/api/admin/notifications/send`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ emails, title: notifyTitle.trim(), message: notifyMessage.trim() })
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        setNotifyError(data?.error ? JSON.stringify(data.error) : `Server returned ${res.status}`);
+      } else {
+        setNotifyResult({ matchedEmails: data.matchedEmails ?? [], unmatchedEmails: data.unmatchedEmails ?? [] });
+      }
+    } catch (err: any) {
+      setNotifyError(err?.message || "Network error");
+    } finally {
+      setNotifySending(false);
+    }
+  };
 
   const handleUnlock = () => {
     if (pinInput.trim() === ADMIN_PIN) {
@@ -542,6 +578,13 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
         >
           <Text style={[styles.tabBtnText, activeTab === "history" && styles.tabBtnTextActive]}>History</Text>
         </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tabBtn, activeTab === "notify" && styles.tabBtnActive]}
+          onPress={() => setActiveTab("notify")}
+          activeOpacity={0.7}
+        >
+          <Text style={[styles.tabBtnText, activeTab === "notify" && styles.tabBtnTextActive]}>Notify</Text>
+        </TouchableOpacity>
       </View>
 
       {activeTab === "live" ? (
@@ -643,7 +686,7 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
             )}
           </ScrollView>
         </>
-      ) : (
+      ) : activeTab === "history" ? (
         <>
           <View style={styles.historySearchRow}>
             <TextInput
@@ -822,6 +865,51 @@ export function AdminScreen({ serverUrl, sessionId, onBack }: AdminScreenProps) 
             )}
           </ScrollView>
         </>
+      ) : (
+        <ScrollView contentContainerStyle={[styles.scrollContent, styles.notifyContainer]}>
+          <Text style={styles.notifyLabel}>Emails (comma or newline separated)</Text>
+          <TextInput
+            style={styles.notifyInput}
+            value={notifyEmails}
+            onChangeText={setNotifyEmails}
+            placeholder="alice@example.com, bob@example.com"
+            placeholderTextColor="#8C9BA5"
+            autoCapitalize="none"
+            keyboardType="email-address"
+            multiline
+          />
+          <Text style={styles.notifyLabel}>Title</Text>
+          <TextInput
+            style={styles.notifyInputSingle}
+            value={notifyTitle}
+            onChangeText={setNotifyTitle}
+            placeholder="Session starting soon"
+            placeholderTextColor="#8C9BA5"
+          />
+          <Text style={styles.notifyLabel}>Message</Text>
+          <TextInput
+            style={styles.notifyInput}
+            value={notifyMessage}
+            onChangeText={setNotifyMessage}
+            placeholder="Your session begins in 5 minutes."
+            placeholderTextColor="#8C9BA5"
+            multiline
+          />
+          <TouchableOpacity style={styles.notifySendBtn} onPress={handleSendNotification} disabled={notifySending} activeOpacity={0.8}>
+            <Text style={styles.notifySendBtnText}>{notifySending ? "Sending..." : "Send Notification"}</Text>
+          </TouchableOpacity>
+          {notifyError && <Text style={styles.notifyErrorText}>{notifyError}</Text>}
+          {notifyResult && (
+            <View style={styles.notifyResultBox}>
+              <Text style={styles.notifyResultText}>
+                {"✅"} Sent to {notifyResult.matchedEmails.length} of {notifyResult.matchedEmails.length + notifyResult.unmatchedEmails.length} email(s)
+              </Text>
+              {notifyResult.unmatchedEmails.length > 0 && (
+                <Text style={styles.notifyResultMissing}>No device registered: {notifyResult.unmatchedEmails.join(", ")}</Text>
+              )}
+            </View>
+          )}
+        </ScrollView>
       )}
     </SafeAreaView>
   );
@@ -956,6 +1044,36 @@ const styles = StyleSheet.create({
   roomTitle: { fontSize: 15, fontWeight: "700", color: "#173A63" },
   roomSubtitle: { fontSize: 12, color: "#5D6873", marginBottom: 4 },
   presenterOfflineBadge: { fontSize: 12, color: "#B7791F", fontWeight: "700", marginBottom: 4 },
+  notifyContainer: { padding: 16 },
+  notifyLabel: { fontSize: 13, fontWeight: "700", color: "#173A63", marginTop: 14, marginBottom: 6 },
+  notifyInput: {
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#D5DCE1",
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 15,
+    color: "#173A63",
+    minHeight: 80,
+    textAlignVertical: "top"
+  },
+  notifyInputSingle: {
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#D5DCE1",
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 15,
+    color: "#173A63"
+  },
+  notifySendBtn: { backgroundColor: "#126D7A", borderRadius: 10, paddingVertical: 14, alignItems: "center", marginTop: 20 },
+  notifySendBtnText: { color: "#FFFFFF", fontSize: 16, fontWeight: "700" },
+  notifyErrorText: { fontSize: 14, color: "#B3261E", textAlign: "center", marginTop: 14 },
+  notifyResultBox: { marginTop: 16, padding: 12, backgroundColor: "#E8F5E9", borderRadius: 10 },
+  notifyResultText: { fontSize: 14, color: "#1B6E3C", fontWeight: "600" },
+  notifyResultMissing: { fontSize: 13, color: "#B7791F", marginTop: 6 },
   memberRow: {
     borderTopWidth: 1,
     borderTopColor: "#F0F4F8",

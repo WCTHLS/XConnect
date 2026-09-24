@@ -16,6 +16,9 @@ coverage/
 *.env
 !.env.example
 
+# Firebase Android app config — tied to a specific Firebase project + package name
+google-services.json
+
 # Build outputs & Release binaries
 outputs/
 *.apk

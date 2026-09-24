@@ -12,6 +12,7 @@
     "db:migrate": "drizzle-kit migrate"
   },
   "dependencies": {
+    "@azure/notification-hubs": "^2.1.0",
     "@confpresence/shared": "workspace:*",
     "cors": "^2.8.5",
     "drizzle-orm": "^0.45.2",
