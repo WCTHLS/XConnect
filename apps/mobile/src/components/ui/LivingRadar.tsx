@@ -110,7 +110,10 @@ export const LivingRadar: React.FC<LivingRadarProps> = ({
   };
 
   return (
-    <View style={styles.wrapper}>
+    // Purely decorative — never interactive. pulseRing scales up to 1.4x (220px -> ~308px),
+    // overflowing its own container's bounds; same class of touch-stealing bug found in
+    // HomeScreen's orb rings (see HomeScreen.tsx). Guarding the whole radar preemptively.
+    <View style={styles.wrapper} pointerEvents="none">
       <View style={styles.container}>
         {/* Pulsing concentric rings */}
         {renderPulseRing(pulse1)}

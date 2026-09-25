@@ -50,6 +50,13 @@
       "when": 1790041351236,
       "tag": "0006_preferred_name",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790219441924,
+      "tag": "0007_slow_spyke",
+      "breakpoints": true
     }
   ]
 }

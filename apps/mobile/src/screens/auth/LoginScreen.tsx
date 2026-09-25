@@ -10,7 +10,7 @@ import {
   Platform,
   ScrollView,
 } from 'react-native';
-import Svg, { Path } from 'react-native-svg';
+import Svg, { Path, Circle } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
 import { GoogleLogo, MicrosoftLogo } from '../../components/BrandIcons';
@@ -90,7 +90,19 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigate, onSuccess 
         {/* Header Branding */}
         <View style={styles.header}>
           <View style={styles.logoBadge}>
-            <Text style={styles.logoX}>X</Text>
+            {/* Reproduces assets/icon.svg's glyph (same viewBox/paths, scaled down) rather than
+                importing the .svg directly — Metro isn't configured with an SVG transformer, and
+                every other icon in this codebase is hand-authored react-native-svg JSX already. */}
+            <Svg width={38} height={38} viewBox="0 0 1024 1024">
+              <Path d="M 284 284 L 512 512 L 740 740" fill="none" stroke="#FFFFFF" strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
+              <Path d="M 740 284 L 512 512 L 284 740" fill="none" stroke={palette.mintPresence} strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
+              <Circle cx={284} cy={284} r={102} fill="#FFFFFF" />
+              <Circle cx={740} cy={740} r={102} fill="#FFFFFF" />
+              <Circle cx={740} cy={284} r={102} fill={palette.mintPresence} />
+              <Circle cx={284} cy={740} r={102} fill={palette.mintPresence} />
+              <Circle cx={512} cy={512} r={64} fill="#102A2A" />
+              <Circle cx={512} cy={512} r={24} fill="#FFFFFF" />
+            </Svg>
           </View>
           <Text style={[styles.title, { color: colors.txt }]}>Welcome to XConnect</Text>
           <Text style={[styles.subtitle, { color: colors.sub }]}>
@@ -252,15 +264,10 @@ const styles = StyleSheet.create({
     width: 60,
     height: 60,
     borderRadius: 18,
-    backgroundColor: palette.mintPresence,
+    backgroundColor: '#102A2A',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 16,
-  },
-  logoX: {
-    fontSize: 34,
-    fontWeight: '900',
-    color: '#060B12',
   },
   title: {
     fontSize: 22,

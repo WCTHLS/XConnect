@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   View,
   Text,
@@ -7,80 +7,40 @@ import {
   ScrollView,
 } from 'react-native';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
+import type { LiveRoomState } from '@confpresence/shared';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
 import { TopBar } from '../../components/ui/TopBar';
 import { LiveBadge } from '../../components/ui/LiveBadge';
 import { MobileScreen } from '../../components/navigation/BottomNav';
 
-export interface RoomMatrixItem {
-  id: string;
-  name: string;
-  anchor: string;
-  count: number;
-  peak: number;
-  health: 'green' | 'amber';
-  since: string;
-}
-
-const DEFAULT_MATRIX: RoomMatrixItem[] = [
-  {
-    id: 'room-a',
-    name: 'ROOM A',
-    anchor: 'Alex M. (Presenter)',
-    count: 14,
-    peak: 18,
-    health: 'green',
-    since: '09:30 AM',
-  },
-  {
-    id: 'room-b',
-    name: 'ROOM B',
-    anchor: 'Sarah L. (Presenter)',
-    count: 8,
-    peak: 12,
-    health: 'green',
-    since: '10:00 AM',
-  },
-  {
-    id: 'auditorium',
-    name: 'AUDITORIUM',
-    anchor: 'Keynote Host',
-    count: 42,
-    peak: 45,
-    health: 'green',
-    since: '09:00 AM',
-  },
-  {
-    id: 'workshop-1',
-    name: 'WORKSHOP 1',
-    anchor: 'David K. (Presenter)',
-    count: 6,
-    peak: 10,
-    health: 'amber',
-    since: '11:15 AM',
-  },
-];
+// A room's updatedAt is refreshed by any device's batch (presenter or attendee) roughly every
+// 10s; twice that with slack is a reasonable "still actively reporting" cutoff before flagging
+// it amber the same way the presenter-offline indicator elsewhere in the app does.
+const STALE_MS = 25_000;
 
 interface AdminOverviewScreenProps {
-  onSelectRoom: (room: RoomMatrixItem) => void;
+  rooms: LiveRoomState[];
+  error: string | null;
+  onSelectRoom: (room: LiveRoomState) => void;
   onNavigate: (screen: MobileScreen) => void;
 }
 
 export const AdminOverviewScreen: React.FC<AdminOverviewScreenProps> = ({
+  rooms,
+  error,
   onSelectRoom,
   onNavigate,
 }) => {
   const { colors } = useTheme();
-  const [matrix, setMatrix] = useState<RoomMatrixItem[]>(DEFAULT_MATRIX);
 
-  const totalLiveAttendees = matrix.reduce((sum, r) => sum + r.count, 0);
+  const totalLiveAttendees = rooms.reduce((sum, r) => sum + (r.members?.length ?? 0), 0);
 
   return (
     <View style={[styles.container, { backgroundColor: colors.bg }]}>
       <TopBar
         title="Multi-Room Operations"
-        subtitle={`Live Monitor · ${matrix.length} Active Rooms`}
+        subtitle={`Live Monitor · ${rooms.length} Active Room${rooms.length === 1 ? '' : 's'}`}
         onBack={() => onNavigate('home')}
         onSettings={() => onNavigate('diagnostics')}
       />
@@ -118,68 +78,83 @@ export const AdminOverviewScreen: React.FC<AdminOverviewScreenProps> = ({
             ACTIVE ROOM MATRIX
           </Text>
 
-          {matrix.map(r => {
-            const isGreen = r.health === 'green';
-            return (
-              <TouchableOpacity
-                key={r.id}
-                activeOpacity={0.8}
-                onPress={() => {
-                  onSelectRoom(r);
-                  onNavigate('adminRoomDetail');
-                }}
-                style={[
-                  styles.roomCard,
-                  {
-                    backgroundColor: colors.card,
-                    borderColor: colors.border,
-                  },
-                ]}
-              >
-                <View style={styles.roomHeader}>
-                  <View style={styles.roomTitleRow}>
-                    <View
-                      style={[
-                        styles.healthDot,
-                        {
-                          backgroundColor: isGreen
-                            ? palette.mintPresence
-                            : palette.amberWarn,
-                        },
-                      ]}
-                    />
-                    <Text style={[styles.roomName, { color: colors.txt }]}>
-                      {r.name}
+          {error ? (
+            <View style={[styles.emptyCard, { backgroundColor: colors.card, borderColor: palette.roseError }]}>
+              <Text style={[styles.emptyText, { color: palette.roseError }]}>{error}</Text>
+            </View>
+          ) : rooms.length === 0 ? (
+            <View style={[styles.emptyCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+              <Text style={[styles.emptyText, { color: colors.muted }]}>
+                No active rooms right now. This list updates every 5 seconds as presenters start broadcasting.
+              </Text>
+            </View>
+          ) : (
+            rooms.map(r => {
+              const presenter = r.members?.find(m => m.role === 'presenter');
+              const memberCount = r.members?.length ?? 0;
+              const isFresh = Date.now() - new Date(r.updatedAt).getTime() < STALE_MS;
+              const key = `${r.sessionId}::${r.roomId}`;
+              return (
+                <TouchableOpacity
+                  key={key}
+                  activeOpacity={0.8}
+                  onPress={() => {
+                    onSelectRoom(r);
+                    onNavigate('adminRoomDetail');
+                  }}
+                  style={[
+                    styles.roomCard,
+                    {
+                      backgroundColor: colors.card,
+                      borderColor: colors.border,
+                    },
+                  ]}
+                >
+                  <View style={styles.roomHeader}>
+                    <View style={styles.roomTitleRow}>
+                      <View
+                        style={[
+                          styles.healthDot,
+                          {
+                            backgroundColor: isFresh
+                              ? palette.mintPresence
+                              : palette.amberWarn,
+                          },
+                        ]}
+                      />
+                      <Text style={[styles.roomName, { color: colors.txt }]}>
+                        {r.roomId.toUpperCase()}
+                      </Text>
+                    </View>
+
+                    <View style={styles.countBadge}>
+                      <Text style={styles.countDigit}>{memberCount}</Text>
+                      <Text style={styles.countLabel}>LIVE</Text>
+                    </View>
+                  </View>
+
+                  <Text style={[styles.anchorText, { color: colors.muted }]}>
+                    Anchor: {presenter?.displayName ?? presenter?.deviceId ?? 'Unknown'}
+                  </Text>
+
+                  <View style={styles.roomFooter}>
+                    <Text style={[styles.peakText, { color: colors.sub }]}>
+                      Session: {r.sessionId} {isFresh ? '' : '· possibly offline'}
+                    </Text>
+                    <Text
+                      style={{
+                        color: palette.mintPresence,
+                        fontSize: 12,
+                        fontWeight: '700',
+                      }}
+                    >
+                      Inspect →
                     </Text>
                   </View>
-
-                  <View style={styles.countBadge}>
-                    <Text style={styles.countDigit}>{r.count}</Text>
-                    <Text style={styles.countLabel}>LIVE</Text>
-                  </View>
-                </View>
-
-                <Text style={[styles.anchorText, { color: colors.muted }]}>
-                  Anchor: {r.anchor}
-                </Text>
-
-                <View style={styles.roomFooter}>
-                  <Text style={[styles.peakText, { color: colors.sub }]}>
-                    Peak: {r.peak} · Active since {r.since}
-                  </Text>
-                  <Text
-                    style={{
-                      color: palette.mintPresence,
-                      fontSize: 12,
-                      fontWeight: '700',
-                    }}
-                  >
-                    Inspect →
-                  </Text>
-                </View>
-              </TouchableOpacity>
-            );
-          })}
+                </TouchableOpacity>
+              );
+            })
+          )}
         </View>
       </ScrollView>
     </View>
@@ -231,6 +206,17 @@ const styles = StyleSheet.create({
     padding: 16,
     borderRadius: 16,
     borderWidth: 1.5,
+  },
+  emptyCard: {
+    padding: 20,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    alignItems: 'center',
+  },
+  emptyText: {
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: 'center',
   },
   roomHeader: {
     flexDirection: 'row',

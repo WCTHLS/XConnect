@@ -9,7 +9,7 @@ import {
 } from 'react-native';
 import { registerRootComponent } from 'expo';
 import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
-import type { ParticipantRole, RoomMemberInfo } from '@confpresence/shared';
+import type { ParticipantRole, RoomMemberInfo, LiveRoomState } from '@confpresence/shared';
 import { getAcousticTokenForRoom, getRoomForAcousticToken } from '@confpresence/shared';
 import { PresenceService, RoomRejectedError, type PresenceStatus } from './src/services/presenceService';
 import { getOrCreateDeviceId } from './src/services/deviceIdentity';
@@ -20,8 +20,10 @@ import {
   type ActiveSessionSnapshot,
 } from './src/services/lastActiveSession';
 import { authConfigured, authFetch, signOut, useAuthSession } from './src/services/auth';
+import { registerForPushNotifications } from './src/services/pushNotifications';
 import { ThemeProvider, useTheme } from './src/theme/useTheme';
 import { BottomNav, MobileScreen, Role } from './src/components/navigation/BottomNav';
+import { DevScreenSwitcher } from './src/components/navigation/DevScreenSwitcher';
 
 // Screens
 import { LaunchScreen } from './src/screens/auth/LaunchScreen';
@@ -38,8 +40,9 @@ import { SessionEndScreen } from './src/screens/presenter/SessionEndScreen';
 import { AttendeeDiscoveryScreen } from './src/screens/attendee/AttendeeDiscoveryScreen';
 import { AttendeeConfirmedScreen } from './src/screens/attendee/AttendeeConfirmedScreen';
 import { AttendeeOutOfRangeScreen } from './src/screens/attendee/AttendeeOutOfRangeScreen';
-import { AdminOverviewScreen, RoomMatrixItem } from './src/screens/admin/AdminOverviewScreen';
+import { AdminOverviewScreen } from './src/screens/admin/AdminOverviewScreen';
 import { AdminRoomDetailScreen } from './src/screens/admin/AdminRoomDetailScreen';
+import { AdminNotifyScreen } from './src/screens/admin/AdminNotifyScreen';
 import { DiagnosticsScreen } from './src/screens/admin/DiagnosticsScreen';
 import { EdgeStateScreen } from './src/screens/admin/EdgeStateScreen';
 
@@ -60,6 +63,7 @@ const NAV_SCREENS: MobileScreen[] = [
   'attendeeOutOfRange',
   'adminOverview',
   'adminRoomDetail',
+  'adminNotify',
   'diagnostics',
   'edgeState',
 ];
@@ -71,15 +75,12 @@ function MainApp() {
   // Navigation State
   const [screen, setScreen] = useState<MobileScreen>('launch');
   const [role, setRole] = useState<Role>('attendee');
-  const [selectedAdminRoom, setSelectedAdminRoom] = useState<RoomMatrixItem>({
-    id: 'hall-a',
-    name: 'Hall A',
-    anchor: 'Alex M. (Presenter)',
-    count: 14,
-    peak: 18,
-    health: 'green',
-    since: '09:30 AM',
-  });
+  const [selectedAdminRoom, setSelectedAdminRoom] = useState<LiveRoomState | null>(null);
+  const [adminRooms, setAdminRooms] = useState<LiveRoomState[]>([]);
+  const [adminError, setAdminError] = useState<string | null>(null);
+  // Running max of members.length seen per room across admin polls this session — the server
+  // doesn't track a peak, so this is a real (if session-scoped, not lifetime) observed high.
+  const [adminRoomPeaks, setAdminRoomPeaks] = useState<Record<string, number>>({});
 
   // Backend & Session State
   const [sessionId, setSessionId] = useState(DEFAULT_SESSION);
@@ -100,7 +101,7 @@ function MainApp() {
   const [sessionDurationMs, setSessionDurationMs] = useState<number>(0);
 
   // Auth Hook
-  const { session: authSession } = useAuthSession();
+  const { session: authSession, ready: authReady } = useAuthSession();
   const signedIn = Boolean(authSession);
   const savedNameRef = useRef('');
 
@@ -166,6 +167,13 @@ function MainApp() {
       cancelled = true;
     };
   }, [signedIn, serverUrl, authSession]);
+
+  // Registers this device for push notifications once signed in. Re-runs on serverUrl change
+  // too, since registration is a POST to that specific server, same as every other API call here.
+  useEffect(() => {
+    if (!signedIn) return;
+    void registerForPushNotifications(serverUrl);
+  }, [signedIn, serverUrl]);
 
   const saveDisplayName = async (newName: string) => {
     try {
@@ -267,6 +275,7 @@ function MainApp() {
         // Session was ended
         if (data.roomEnded === true) {
           void togglePresence(false);
+          nav('home');
           Alert.alert('Room ended', 'This session has ended.');
           return;
         }
@@ -311,7 +320,7 @@ function MainApp() {
         setServerHealth('offline');
       }
     }
-  }, [role, roomId, sessionId, serverUrl, deviceId, displayName, sessionStartTime]);
+  }, [role, roomId, sessionId, serverUrl, deviceId, displayName, sessionStartTime, nav]);
 
   // 3-Second Live Polling Interval
   useEffect(() => {
@@ -374,6 +383,46 @@ function MainApp() {
     };
   }, [role, running, serverUrl, roomId]);
 
+  // Admin Live Overview Polling — every active room across every session, refreshed on the same
+  // 5s cadence the old single-screen admin view used. Runs whenever the admin role is selected,
+  // not just while on the overview/detail screens, so switching between them doesn't restart it.
+  useEffect(() => {
+    if (role !== 'admin') return;
+    let cancelled = false;
+    const fetchOverview = async () => {
+      try {
+        const res = await authFetch(`${serverUrl}/api/admin/overview`);
+        if (cancelled) return;
+        if (!res.ok) {
+          setAdminError(res.status === 403 ? 'This account is not an admin.' : `Server returned ${res.status}`);
+          return;
+        }
+        const data = await res.json().catch(() => null);
+        if (cancelled) return;
+        setAdminError(null);
+        const rooms: LiveRoomState[] = Array.isArray(data?.rooms) ? data.rooms : [];
+        setAdminRooms(rooms);
+        setAdminRoomPeaks(prev => {
+          const next = { ...prev };
+          for (const r of rooms) {
+            const key = `${r.sessionId}::${r.roomId}`;
+            const count = r.members?.length ?? 0;
+            next[key] = Math.max(next[key] ?? 0, count);
+          }
+          return next;
+        });
+      } catch {
+        if (!cancelled) setAdminError('Unable to reach the server.');
+      }
+    };
+    void fetchOverview();
+    const interval = setInterval(fetchOverview, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [role, serverUrl]);
+
   // Presenter Rejoin flow on app launch
   useEffect(() => {
     (async () => {
@@ -417,13 +466,75 @@ function MainApp() {
     })();
   }, []);
 
-  // Handle completion of the 7-phase Launch animation
-  const handleLaunchComplete = () => {
+  // The launch animation runs on its own fixed timer (or can be skipped early by a tap),
+  // completely independent of how long SecureStore/auth-session restoration actually takes to
+  // resolve. Routing the moment the animation finishes used to read hasOnboarded/signedIn
+  // before they'd settled from their initial "still loading" values (null / not-yet-ready),
+  // which could send an already-signed-in user to the login screen on a slow cold start or a
+  // skipped animation. Splitting "animation finished" from "we actually know where to go"
+  // fixes that: this effect only navigates once every piece of state it needs has resolved.
+  const [launchAnimationDone, setLaunchAnimationDone] = useState(false);
+  const handleLaunchComplete = () => setLaunchAnimationDone(true);
+
+  useEffect(() => {
+    if (screen !== 'launch') return;
+    if (!launchAnimationDone || hasOnboarded === null || !authReady) return;
     if (hasOnboarded === false) {
       nav('onboarding');
     } else {
       nav(signedIn ? 'home' : 'login');
     }
+  }, [screen, launchAnimationDone, hasOnboarded, authReady, signedIn]);
+
+  // Ends the currently-selected admin room via the real backend action — the only primitive
+  // this API exposes is ending the whole room occurrence (attendees included); there's no way
+  // to remove just the presenter and keep the room open, which is why the admin UI only offers
+  // one real close action rather than a separate (and undeliverable) "evict presenter" button.
+  const handleEndAdminRoom = async () => {
+    if (!selectedAdminRoom) return;
+    try {
+      const res = await authFetch(`${serverUrl}/api/admin/rooms/end`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: selectedAdminRoom.sessionId, roomId: selectedAdminRoom.roomId }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.ended) {
+        setSelectedAdminRoom(null);
+        nav('adminOverview');
+      } else {
+        Alert.alert('Could not end room', 'The room may have already ended on its own.');
+      }
+    } catch (err: any) {
+      Alert.alert('Network error', err?.message || 'Could not reach the server.');
+    }
+  };
+
+  // Sends a push notification to whoever's signed in under the given emails. Throws on failure
+  // (network error, non-2xx, or push not configured server-side) so AdminNotifyScreen's own
+  // try/catch can show the error inline rather than this owning that UI concern.
+  const handleSendNotification = async (emails: string[], title: string, message: string) => {
+    const res = await authFetch(`${serverUrl}/api/admin/notifications/send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ emails, title, message }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      throw new Error(data?.error ? JSON.stringify(data.error) : `Server returned ${res.status}`);
+    }
+    return { matchedEmails: data.matchedEmails ?? [], unmatchedEmails: data.unmatchedEmails ?? [] };
+  };
+
+  // Every known account with an email, for the Notify screen's recipient picker — fetched once
+  // when that screen mounts, not polled, since the user list doesn't change fast enough to need it.
+  const handleFetchUsers = async () => {
+    const res = await authFetch(`${serverUrl}/api/admin/users`);
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      throw new Error(data?.error ? JSON.stringify(data.error) : `Server returned ${res.status}`);
+    }
+    return (data.users ?? []) as { id: string; email: string; name: string }[];
   };
 
   const showNav = NAV_SCREENS.includes(screen);
@@ -600,14 +711,44 @@ function MainApp() {
       case 'adminOverview':
         return (
           <AdminOverviewScreen
+            rooms={adminRooms}
+            error={adminError}
             onSelectRoom={setSelectedAdminRoom}
             onNavigate={nav}
           />
         );
-      case 'adminRoomDetail':
+      case 'adminRoomDetail': {
+        // selectedAdminRoom is only the identity captured at the moment of selection — the
+        // actual displayed room is looked up fresh from adminRooms every render, so the roster
+        // updates on each 5s poll instead of freezing at whatever it looked like when tapped.
+        // A miss means the room ended (or never existed under this session/roomId anymore).
+        const liveSelectedRoom = selectedAdminRoom
+          ? adminRooms.find(r => r.sessionId === selectedAdminRoom.sessionId && r.roomId === selectedAdminRoom.roomId) ?? null
+          : null;
+        if (!liveSelectedRoom) {
+          return (
+            <AdminOverviewScreen
+              rooms={adminRooms}
+              error={adminError}
+              onSelectRoom={setSelectedAdminRoom}
+              onNavigate={nav}
+            />
+          );
+        }
         return (
           <AdminRoomDetailScreen
-            room={selectedAdminRoom}
+            room={liveSelectedRoom}
+            peak={adminRoomPeaks[`${liveSelectedRoom.sessionId}::${liveSelectedRoom.roomId}`] ?? liveSelectedRoom.members?.length ?? 0}
+            onEndRoom={handleEndAdminRoom}
+            onNavigate={nav}
+          />
+        );
+      }
+      case 'adminNotify':
+        return (
+          <AdminNotifyScreen
+            onSendNotification={handleSendNotification}
+            onFetchUsers={handleFetchUsers}
             onNavigate={nav}
           />
         );
@@ -632,7 +773,7 @@ function MainApp() {
       style={[
         styles.safeArea,
         {
-          backgroundColor: screen === 'launch' ? '#0F2F2C' : colors.surf,
+          backgroundColor: screen === 'launch' ? '#102A2A' : colors.surf, // matches assets/icon.svg
           paddingTop:
             Platform.OS === 'android' && screen !== 'launch'
               ? (StatusBar.currentHeight ?? 24)
@@ -641,6 +782,7 @@ function MainApp() {
       ]}
     >
       <ExpoStatusBar style={screen === 'launch' || isDark ? 'light' : 'dark'} />
+      {__DEV__ && <DevScreenSwitcher currentRole={role} onSelectRole={setRole} onNavigate={nav} />}
       <View style={styles.screenContainer}>{renderScreen()}</View>
       {showNav && (
         <BottomNav currentScreen={screen} onNavigate={nav} role={role} />

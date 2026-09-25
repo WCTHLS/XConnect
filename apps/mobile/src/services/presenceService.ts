@@ -153,6 +153,12 @@ export class PresenceService {
   }
 
   async start(config: StartConfig) {
+    // A second start() while one is already running (e.g. resuming a stale presenter
+    // session, then switching to attendee) must not leave the first session's BLE/ultrasonic/
+    // timer running underneath the new one — tear it down first so only one role is ever live.
+    if (this.isRunning) {
+      await this.stop();
+    }
     this.config = config;
     this.rejectionReported = false;
     this.isRunning = true;
@@ -303,6 +309,7 @@ export class PresenceService {
 
     const now = Date.now();
     const isNew = !this.activePeerCache.has(peerPrefix);
+    const sizeBefore = this.activePeerCache.size;
     this.peers.set(peerPrefix, peer);
     this.activePeerCache.set(peerPrefix, { peer, lastSeenAt: now });
     this.cleanExpiredPeers(now);
@@ -311,7 +318,13 @@ export class PresenceService {
       AppLogger.log("BLE", `Heard Peer: ${peerPrefix} (RSSI: ${peer.rssi} dBm)`);
     }
 
-    this.emitStatus();
+    // A re-advertisement from an already-known peer (every ~100ms per device) doesn't change
+    // anything emitStatus() publishes — only activePeerCache.size can move. Emitting on every
+    // packet regardless was tens of no-op React re-renders per second with a few devices in
+    // range, saturating the JS thread badly enough to make UI taps get dropped.
+    if (this.activePeerCache.size !== sizeBefore) {
+      this.emitStatus();
+    }
   }
 
   private async rotateAndAdvertise(force = false) {

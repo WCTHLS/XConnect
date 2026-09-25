@@ -164,7 +164,19 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       <View style={styles.topBar}>
         <View style={styles.brandRow}>
           <View style={styles.miniLogoBadge}>
-            <Text style={styles.miniLogoX}>X</Text>
+            {/* Reproduces assets/icon.svg's glyph (same viewBox/paths, scaled down) rather than
+                importing the .svg directly — Metro isn't configured with an SVG transformer, and
+                every other icon in this codebase is hand-authored react-native-svg JSX already. */}
+            <Svg width={20} height={20} viewBox="0 0 1024 1024">
+              <Path d="M 284 284 L 512 512 L 740 740" fill="none" stroke="#FFFFFF" strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
+              <Path d="M 740 284 L 512 512 L 284 740" fill="none" stroke={palette.mintPresence} strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
+              <Circle cx={284} cy={284} r={102} fill="#FFFFFF" />
+              <Circle cx={740} cy={740} r={102} fill="#FFFFFF" />
+              <Circle cx={740} cy={284} r={102} fill={palette.mintPresence} />
+              <Circle cx={284} cy={740} r={102} fill={palette.mintPresence} />
+              <Circle cx={512} cy={512} r={64} fill="#102A2A" />
+              <Circle cx={512} cy={512} r={24} fill="#FFFFFF" />
+            </Svg>
           </View>
           <Text style={[styles.brandTitle, { color: isDark ? '#FFFFFF' : '#0F2F2C' }]}>
             XConnect
@@ -212,38 +224,44 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         ))}
       </View>
 
-      {/* Presence Core Orb */}
-      <View style={styles.orbSection}>
-        <View style={styles.orbContainer}>
-          {renderOrbRing(ring1)}
-          {renderOrbRing(ring2)}
+      {/* Presence Core Orb — purely decorative status display, never interactive. The pulsing
+          rings scale up to 1.7x mid-animation (130px -> ~221px). orbBounds is sized to that max
+          extent with overflow:hidden, so the animation is physically clipped at its own box
+          instead of relying only on pointerEvents to stop it swallowing taps meant for the role
+          tabs above — a future tweak to scale/opacity can't silently reopen that bug. */}
+      <View style={styles.orbSection} pointerEvents="none">
+        <View style={styles.orbBounds}>
+          <View style={styles.orbContainer}>
+            {renderOrbRing(ring1)}
+            {renderOrbRing(ring2)}
 
-          <Animated.View
-            style={[
-              styles.centerOrb,
-              {
-                transform: [{ scale: orbScale }],
-              },
-            ]}
-          >
-            <Svg width={44} height={44} viewBox="0 0 44 44" fill="none">
-              <Path
-                d="M8 8L36 36M36 8L8 36"
-                stroke={palette.mintPresence}
-                strokeWidth={5}
-                strokeLinecap="round"
-              />
-              <Circle
-                cx={22}
-                cy={22}
-                r={8}
-                stroke={palette.skyMesh}
-                strokeWidth={1.2}
-                strokeDasharray="3 2"
-                opacity={0.7}
-              />
-            </Svg>
-          </Animated.View>
+            <Animated.View
+              style={[
+                styles.centerOrb,
+                {
+                  transform: [{ scale: orbScale }],
+                },
+              ]}
+            >
+              <Svg width={44} height={44} viewBox="0 0 44 44" fill="none">
+                <Path
+                  d="M8 8L36 36M36 8L8 36"
+                  stroke={palette.mintPresence}
+                  strokeWidth={5}
+                  strokeLinecap="round"
+                />
+                <Circle
+                  cx={22}
+                  cy={22}
+                  r={8}
+                  stroke={palette.skyMesh}
+                  strokeWidth={1.2}
+                  strokeDasharray="3 2"
+                  opacity={0.7}
+                />
+              </Svg>
+            </Animated.View>
+          </View>
         </View>
 
         <Text style={styles.orbStatusText}>Space Ready · 18ms</Text>
@@ -600,14 +618,9 @@ const styles = StyleSheet.create({
     width: 32,
     height: 32,
     borderRadius: 8,
-    backgroundColor: palette.mintPresence,
+    backgroundColor: '#102A2A',
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  miniLogoX: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: '#060B12',
   },
   brandTitle: {
     fontSize: 18,
@@ -657,6 +670,16 @@ const styles = StyleSheet.create({
   orbSection: {
     alignItems: 'center',
     paddingVertical: 14,
+  },
+  orbBounds: {
+    // Sized to the ring's max scaled extent (130 * 1.7 ~= 221px) so the pulse animation is
+    // clipped at this box no matter how its scale/opacity values change later.
+    width: 230,
+    height: 230,
+    borderRadius: 115,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
   },
   orbContainer: {
     width: 130,

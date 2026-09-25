@@ -21,6 +21,7 @@ export type MobileScreen =
   | 'attendeeOutOfRange'
   | 'adminOverview'
   | 'adminRoomDetail'
+  | 'adminNotify'
   | 'diagnostics'
   | 'edgeState';
 
@@ -183,6 +184,24 @@ export const BottomNav: React.FC<BottomNavProps> = ({
     </Svg>
   );
 
+  const bellIcon = (active: boolean, c: string) => (
+    <Svg width={20} height={20} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M6 8a6 6 0 0 1 12 0c0 4 1.5 5.5 2 6.5H4c.5-1 2-2.5 2-6.5z"
+        stroke={active ? em : c}
+        strokeWidth={2}
+        strokeLinejoin="round"
+        fill={active ? 'rgba(51,209,172,0.18)' : 'none'}
+      />
+      <Path
+        d="M10 18a2 2 0 0 0 4 0"
+        stroke={active ? em : c}
+        strokeWidth={2}
+        strokeLinecap="round"
+      />
+    </Svg>
+  );
+
   const attendeeTabs: NavTab[] = [
     { label: 'Home', target: 'home', icon: radarIcon },
     { label: 'My Activity', target: 'attendeeConfirmed', icon: clockIcon },
@@ -198,6 +217,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
 
   const adminTabs: NavTab[] = [
     { label: 'Monitor', target: 'adminOverview', icon: monitorIcon },
+    { label: 'Notify', target: 'adminNotify', icon: bellIcon },
     { label: 'Diagnostics', target: 'diagnostics', icon: chartIcon },
     { label: 'Profile', target: 'profile', icon: profileIcon },
   ];

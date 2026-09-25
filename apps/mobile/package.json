@@ -17,6 +17,7 @@
     "expo-crypto": "~15.0.9",
     "expo-dev-client": "^6.0.0",
     "expo-file-system": "~19.0.23",
+    "expo-notifications": "~0.32.17",
     "expo-print": "~15.0.8",
     "expo-secure-store": "~15.0.8",
     "expo-sensors": "~15.0.8",

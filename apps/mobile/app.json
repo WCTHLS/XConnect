@@ -9,6 +9,7 @@
     "userInterfaceStyle": "light",
     "android": {
       "package": "com.confpresence.zero",
+      "googleServicesFile": "./google-services.json",
       "permissions": [
         "android.permission.BLUETOOTH_SCAN",
         "android.permission.BLUETOOTH_ADVERTISE",
@@ -33,7 +34,8 @@
     },
     "plugins": [
       "expo-web-browser",
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-notifications"
     ]
   }
 }

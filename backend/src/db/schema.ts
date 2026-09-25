@@ -69,6 +69,22 @@ export const stateChangeEvents = pgTable("state_change_events", {
   changedAt: timestamp("changed_at", { withTimezone: true }).notNull()
 });
 
+// One row per device registered for push notifications via Azure Notification Hubs.
+// `installationId` is the id we hand Notification Hubs itself (currently the device's own
+// `deviceId` — see deviceIdentity.ts client-side), so this table is purely local bookkeeping for
+// "does this email have any registered device" (the admin send-notification UI's "no device
+// registered" indicator) — Notification Hubs itself is what actually resolves a send's email tag
+// filter to devices, this table is never queried to build that filter.
+export const pushInstallations = pgTable("push_installations", {
+  installationId: text("installation_id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id),
+  email: text("email"),
+  platform: text("platform"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+});
+
 export const roomMembership = pgTable("room_membership", {
   id: bigserial("id", { mode: "number" }).primaryKey(),
   roomId: text("room_id")

@@ -3,6 +3,7 @@ import * as SecureStore from 'expo-secure-store';
 import { Theme, ThemeColors, getThemeColors } from './colors';
 
 const ONBOARDED_KEY = 'xconnect.has_onboarded_v1';
+const THEME_KEY = 'xconnect.theme_v1';
 
 interface ThemeContextType {
   theme: Theme;
@@ -23,8 +24,9 @@ const ThemeContext = createContext<ThemeContextType>({
 });
 
 export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Default to Figma's signature Light Mode
-  const [theme, setTheme] = useState<Theme>('light');
+  // Default to Figma's signature Light Mode — overridden below once the persisted choice (if
+  // any) loads from SecureStore, same pattern as hasOnboarded.
+  const [theme, setThemeState] = useState<Theme>('light');
   const [hasOnboarded, setHasOnboarded] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -34,6 +36,13 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       })
       .catch(() => {
         setHasOnboarded(false);
+      });
+    SecureStore.getItemAsync(THEME_KEY)
+      .then(res => {
+        if (res === 'light' || res === 'dark') setThemeState(res);
+      })
+      .catch(() => {
+        // No stored preference (or read failed) — keep the 'light' default.
       });
   }, []);
 
@@ -46,8 +55,15 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   };
 
+  const setTheme = (t: Theme) => {
+    setThemeState(t);
+    void SecureStore.setItemAsync(THEME_KEY, t).catch(() => {
+      // Best-effort: worst case, this choice doesn't survive a restart.
+    });
+  };
+
   const toggleTheme = () => {
-    setTheme(prev => (prev === 'dark' ? 'light' : 'dark'));
+    setTheme(theme === 'dark' ? 'light' : 'dark');
   };
 
   const colors = getThemeColors(theme);
