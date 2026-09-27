@@ -197,6 +197,28 @@ app.post("/api/session/join", (request, response) => {
   return response.status(201).json({ ok: true });
 });
 
+// Presenter rejoin flow: a server-truth check for "do I already have a room open anywhere",
+// so the Home screen can offer Rejoin/End instead of letting someone start a second room while
+// an old one is still live. Authenticated only — there's no meaningful "my rooms" without a
+// signed-in user to own them.
+app.get("/api/me/active-rooms", (request, response) => {
+  if (!request.user) return response.status(401).json({ error: "unauthenticated" });
+  return response.json({ rooms: engine.myActiveRooms(request.user.id) });
+});
+
+app.post("/api/me/rooms/end", (request, response) => {
+  if (!request.user) return response.status(401).json({ error: "unauthenticated" });
+  const parsed = z.object({ sessionId: z.string().min(1), roomId: z.string().min(1) }).safeParse(request.body);
+  if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
+
+  const ended = engine.endRoomIfOwner(parsed.data.sessionId, parsed.data.roomId, request.user.id);
+  console.log(ended
+    ? `🛑 [SELF-END] ${request.user.email || request.user.id} ended their room '${parsed.data.roomId}'`
+    : `⚠️  [SELF-END] ${request.user.email || request.user.id} tried to end '${parsed.data.roomId}' but doesn't own it`);
+
+  return response.json({ ok: true, ended });
+});
+
 app.post("/api/admin/session/end", (request, response) => {
   const parsed = z.object({ sessionId: z.string().min(1) }).safeParse(request.body);
   if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });

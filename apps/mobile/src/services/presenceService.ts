@@ -159,6 +159,10 @@ export class PresenceService {
     if (this.isRunning) {
       await this.stop();
     }
+    // Plain console.log (not AppLogger, which only feeds the in-app log viewer, not the Metro
+    // terminal) so a session/room mismatch between two test devices is verifiable by just
+    // reading each device's own Metro output, instead of assuming what values were actually sent.
+    console.log(`[SESSION] role=${config.role} roomId=${config.roomId} sessionId=${config.sessionId} deviceId=${config.deviceId}`);
     this.config = config;
     this.rejectionReported = false;
     this.isRunning = true;

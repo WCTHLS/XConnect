@@ -7,13 +7,12 @@ import {
   StyleSheet,
   ScrollView,
   Switch,
-  Alert,
 } from 'react-native';
-import Svg, { Circle, Path } from 'react-native-svg';
+import Svg, { Path } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
-import { signOut } from '../../services/auth';
-import { MobileScreen, Role } from '../../components/navigation/BottomNav';
+import { Role } from '../../components/navigation/BottomNav';
+import { AppAlert } from '../../components/ui/AppAlert';
 
 interface ProfileScreenProps {
   displayName: string;
@@ -24,8 +23,7 @@ interface ProfileScreenProps {
   serverEnv: 'cloud' | 'local' | 'custom';
   serverUrl: string;
   onSelectServerEnv: (env: 'cloud' | 'local' | 'custom', customUrl?: string) => void;
-  onNavigate: (screen: MobileScreen) => void;
-  onSignOut: () => void;
+  onSignOut: () => Promise<void>;
 }
 
 export const ProfileScreen: React.FC<ProfileScreenProps> = ({
@@ -37,7 +35,6 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
   serverEnv,
   serverUrl,
   onSelectServerEnv,
-  onNavigate,
   onSignOut,
 }) => {
   const { colors, theme, toggleTheme } = useTheme();
@@ -54,16 +51,16 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
       await onSaveDisplayName(name.trim());
       setEditing(false);
     } catch (err: any) {
-      Alert.alert('Error', err?.message ?? 'Failed to update name');
+      AppAlert.alert('Error', err?.message ?? 'Failed to update name');
     } finally {
       setSaving(false);
     }
   };
 
-  const handleSignOut = async () => {
-    await signOut();
-    onSignOut();
-    onNavigate('login');
+  // The whole teardown (stop presence, then drop the token, then reset role and navigate) is
+  // owned by App.tsx — the ordering matters and only it can see the live presence state.
+  const handleSignOut = () => {
+    void onSignOut();
   };
 
   const initials = (name || displayName || 'User')
@@ -83,28 +80,6 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
       {/* Top Header */}
       <View style={styles.topHeader}>
         <Text style={[styles.headerTitle, { color: colors.txt }]}>Profile</Text>
-        <TouchableOpacity
-          onPress={() => {
-            if (editing) handleSaveName();
-            else setEditing(true);
-          }}
-          style={[
-            styles.editPill,
-            {
-              backgroundColor: editing ? 'rgba(51,209,172,0.15)' : colors.cardSecondary,
-              borderColor: editing ? palette.mintPresence : colors.border,
-            },
-          ]}
-        >
-          <Text
-            style={[
-              styles.editPillText,
-              { color: editing ? palette.mintPresence : colors.sub },
-            ]}
-          >
-            {editing ? 'Done' : 'Edit Profile'}
-          </Text>
-        </TouchableOpacity>
       </View>
 
       {/* Profile Card */}
@@ -142,10 +117,12 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                 ]}
                 value={name}
                 onChangeText={setName}
+                onSubmitEditing={handleSaveName}
+                returnKeyType="done"
                 autoFocus
               />
             ) : (
-              <Text style={[styles.userName, { color: colors.txt }]}>
+              <Text style={[styles.userName, { color: colors.txt }]} numberOfLines={1}>
                 {name || displayName || 'XConnect User'}
               </Text>
             )}
@@ -156,6 +133,48 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
               <Text style={styles.roleTagText}>{role.toUpperCase()} ACCOUNT</Text>
             </View>
           </View>
+
+          {/* Pinned to the card's right edge rather than sitting next to the name: the display
+              name is the only editable field here, so this is the card's one action. */}
+          <TouchableOpacity
+            activeOpacity={0.7}
+            disabled={saving}
+            onPress={() => {
+              if (editing) handleSaveName();
+              else setEditing(true);
+            }}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            style={[
+              styles.nameEditButton,
+              {
+                backgroundColor: editing ? 'rgba(51,209,172,0.15)' : colors.cardSecondary,
+                borderColor: editing ? palette.mintPresence : colors.border,
+                opacity: saving ? 0.5 : 1,
+              },
+            ]}
+          >
+            {editing ? (
+              <Svg width={15} height={15} viewBox="0 0 24 24" fill="none">
+                <Path
+                  d="M5 13l4 4L19 7"
+                  stroke={palette.mintPresence}
+                  strokeWidth={2.5}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </Svg>
+            ) : (
+              <Svg width={15} height={15} viewBox="0 0 24 24" fill="none">
+                <Path
+                  d="M4 20h4l10-10a2.1 2.1 0 0 0-3-3L5 17v3z"
+                  stroke={colors.sub}
+                  strokeWidth={2}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </Svg>
+            )}
+          </TouchableOpacity>
         </View>
 
         {/* Stats 3-Column Row */}
@@ -280,25 +299,12 @@ const styles = StyleSheet.create({
     paddingBottom: 36,
   },
   topHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
     marginBottom: 16,
   },
   headerTitle: {
     fontSize: 22,
     fontWeight: '800',
     letterSpacing: -0.4,
-  },
-  editPill: {
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: 999,
-    borderWidth: 1,
-  },
-  editPillText: {
-    fontSize: 13,
-    fontWeight: '700',
   },
   profileCard: {
     borderRadius: 20,
@@ -333,6 +339,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   nameInput: {
+    alignSelf: 'stretch',
     paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 8,
@@ -344,6 +351,18 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '800',
     letterSpacing: -0.3,
+  },
+  nameEditButton: {
+    // Sits at the card's right edge, aligned with the top of the name rather than centred on the
+    // whole three-line block, so it reads as acting on the name and not on the card at large.
+    alignSelf: 'flex-start',
+    marginTop: 2,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   userEmail: {
     fontSize: 12,

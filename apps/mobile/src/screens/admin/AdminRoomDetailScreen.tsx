@@ -5,13 +5,13 @@ import {
   TouchableOpacity,
   StyleSheet,
   ScrollView,
-  Alert,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import type { LiveRoomState, RoomMemberInfo } from '@confpresence/shared';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
 import { MobileScreen } from '../../components/navigation/BottomNav';
+import { AppAlert } from '../../components/ui/AppAlert';
 
 interface AdminRoomDetailScreenProps {
   room: LiveRoomState;
@@ -61,7 +61,7 @@ export const AdminRoomDetailScreen: React.FC<AdminRoomDetailScreenProps> = ({
   const rosterOrder: RoomMemberInfo[] = presenter ? [presenter, ...attendees] : attendees;
 
   const handleCloseRoom = () => {
-    Alert.alert(
+    AppAlert.alert(
       'End Room Session',
       `End ${roomName} now? This disconnects everyone currently in it — the presenter and all ${attendees.length} attendee${attendees.length === 1 ? '' : 's'} — and records their attendance as ended.`,
       [

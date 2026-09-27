@@ -42,7 +42,6 @@ export const AdminOverviewScreen: React.FC<AdminOverviewScreenProps> = ({
         title="Multi-Room Operations"
         subtitle={`Live Monitor · ${rooms.length} Active Room${rooms.length === 1 ? '' : 's'}`}
         onBack={() => onNavigate('home')}
-        onSettings={() => onNavigate('diagnostics')}
       />
 
       <ScrollView

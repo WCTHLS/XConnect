@@ -14,19 +14,17 @@ import { SensorPill } from '../../components/ui/SensorPill';
 import { MobileScreen } from '../../components/navigation/BottomNav';
 
 interface AttendeeDiscoveryScreenProps {
-  targetRoom?: string;
   detectedRoom?: string;
   acousticToken?: string;
   peerCount: number;
   wifiApCount?: number;
   ultrasonicState?: 'broadcasting' | 'listening' | 'verified' | 'idle';
   running: boolean;
-  onJoinDetectedRoom: (room: string) => void;
+  onJoinDetectedRoom: (room: string) => Promise<boolean>;
   onNavigate: (screen: MobileScreen) => void;
 }
 
 export const AttendeeDiscoveryScreen: React.FC<AttendeeDiscoveryScreenProps> = ({
-  targetRoom,
   detectedRoom,
   acousticToken,
   peerCount,
@@ -46,7 +44,6 @@ export const AttendeeDiscoveryScreen: React.FC<AttendeeDiscoveryScreenProps> = (
         title="In-Room Discovery"
         subtitle="Zero-Hardware Attendance"
         onBack={() => onNavigate('home')}
-        onSettings={() => onNavigate('diagnostics')}
       />
 
       <ScrollView
@@ -126,10 +123,10 @@ export const AttendeeDiscoveryScreen: React.FC<AttendeeDiscoveryScreenProps> = (
 
             <TouchableOpacity
               activeOpacity={0.8}
-              onPress={() => {
+              onPress={async () => {
                 if (detectedRoom) {
-                  onJoinDetectedRoom(detectedRoom);
-                  onNavigate('attendeeConfirmed');
+                  const ok = await onJoinDetectedRoom(detectedRoom);
+                  if (ok) onNavigate('attendeeConfirmed');
                 }
               }}
               style={styles.joinButton}
@@ -158,33 +155,6 @@ export const AttendeeDiscoveryScreen: React.FC<AttendeeDiscoveryScreenProps> = (
             <Text style={[styles.detectedDesc, { color: colors.muted }]}>
               Stay in the room. The ultrasonic microphone and BLE receiver are listening for the presenter's active broadcast beacon.
             </Text>
-
-            {targetRoom ? (
-              <TouchableOpacity
-                activeOpacity={0.8}
-                onPress={() => {
-                  onJoinDetectedRoom(targetRoom);
-                  onNavigate('attendeeConfirmed');
-                }}
-                style={[
-                  styles.joinButton,
-                  {
-                    backgroundColor: isDark ? '#1C293D' : '#E2E8F0',
-                    shadowOpacity: 0,
-                    elevation: 0,
-                  },
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.joinButtonText,
-                    { color: isDark ? '#94A3B8' : '#475569' },
-                  ]}
-                >
-                  Manual Join: {targetRoom.toUpperCase()}
-                </Text>
-              </TouchableOpacity>
-            ) : null}
           </View>
         )}
       </ScrollView>

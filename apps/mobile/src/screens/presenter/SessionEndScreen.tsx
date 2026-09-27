@@ -5,17 +5,21 @@ import {
   TouchableOpacity,
   StyleSheet,
   ScrollView,
-  Alert,
 } from 'react-native';
-import Svg, { Path } from 'react-native-svg';
+import Svg, { Path, Circle } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
 import { TopBar } from '../../components/ui/TopBar';
 import { MobileScreen } from '../../components/navigation/BottomNav';
+import { AppAlert } from '../../components/ui/AppAlert';
 
 interface SessionEndScreenProps {
   roomId: string;
   sessionId: string;
+  /** True while this room is actually being broadcast right now — the "Analysis" tab reuses this
+   * same screen both for a live in-progress summary and for the last-ended report, and the two
+   * need clearly different framing so the numbers are never mistaken for the wrong one. */
+  isLive: boolean;
   totalAttendees?: number;
   durationMs?: number;
   acousticMatchPercent?: number;
@@ -26,6 +30,7 @@ interface SessionEndScreenProps {
 export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
   roomId,
   sessionId,
+  isLive,
   totalAttendees = 0,
   durationMs = 0,
   acousticMatchPercent = 99.2,
@@ -42,7 +47,7 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
       : `${totalMinutes}m`;
 
   const handleExportReport = () => {
-    Alert.alert(
+    AppAlert.alert(
       'Session Report Generated',
       `Full verified attendance report for ${roomId.toUpperCase()} (${totalAttendees} attendees, ${dwellFormatted} dwell) is ready for export.`
     );
@@ -51,7 +56,7 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
   return (
     <View style={[styles.container, { backgroundColor: colors.surf }]}>
       <TopBar
-        title="Session Summary"
+        title={isLive ? 'Live Session Summary' : 'Session Summary'}
         subtitle={`${roomId.toUpperCase()} · ${sessionId}`}
         onBack={() => onNavigate('home')}
       />
@@ -60,36 +65,61 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
       >
-        {/* Verification Success Banner */}
-        <View
-          style={[
-            styles.successBanner,
-            {
-              backgroundColor: 'rgba(51,209,172,0.12)',
-              borderColor: palette.mintPresence,
-            },
-          ]}
-        >
-          <View style={styles.successIcon}>
-            <Svg width={20} height={20} viewBox="0 0 24 24" fill="none">
-              <Path
-                d="M5 13l4 4L19 7"
-                stroke={palette.mintPresence}
-                strokeWidth={3}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </Svg>
+        {isLive ? (
+          <View
+            style={[
+              styles.successBanner,
+              {
+                backgroundColor: 'rgba(51,209,172,0.12)',
+                borderColor: palette.mintPresence,
+              },
+            ]}
+          >
+            <View style={styles.successIcon}>
+              <Svg width={20} height={20} viewBox="0 0 24 24" fill="none">
+                <Circle cx={12} cy={12} r={5} fill={palette.mintPresence} />
+              </Svg>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.successTitle, { color: palette.mintPresence }]}>
+                Live Session In Progress
+              </Text>
+              <Text style={[styles.successSubtitle, { color: colors.sub }]}>
+                Updating in real time from the room's current sensor telemetry.
+              </Text>
+            </View>
           </View>
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.successTitle, { color: palette.mintPresence }]}>
-              Session Completed Successfully
-            </Text>
-            <Text style={[styles.successSubtitle, { color: colors.sub }]}>
-              Multi-factor sensor telemetry verified and recorded.
-            </Text>
+        ) : (
+          <View
+            style={[
+              styles.successBanner,
+              {
+                backgroundColor: 'rgba(245,158,11,0.12)',
+                borderColor: palette.amberWarn,
+              },
+            ]}
+          >
+            <View style={[styles.successIcon, { backgroundColor: 'rgba(245,158,11,0.2)' }]}>
+              <Svg width={20} height={20} viewBox="0 0 24 24" fill="none">
+                <Path
+                  d="M12 9v4M12 17h.01"
+                  stroke={palette.amberWarn}
+                  strokeWidth={2.5}
+                  strokeLinecap="round"
+                />
+                <Circle cx={12} cy={12} r={9} stroke={palette.amberWarn} strokeWidth={2} />
+              </Svg>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.successTitle, { color: palette.amberWarn }]}>
+                No Active Room Right Now
+              </Text>
+              <Text style={[styles.successSubtitle, { color: colors.sub }]}>
+                The summary below is from your last ended session, not a live one.
+              </Text>
+            </View>
           </View>
-        </View>
+        )}
 
         {/* Analytics 2x2 Grid */}
         <View style={styles.grid}>

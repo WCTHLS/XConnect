@@ -78,7 +78,6 @@ export const AttendeeConfirmedScreen: React.FC<AttendeeConfirmedScreenProps> = (
       <TopBar
         title={roomId.toUpperCase()}
         subtitle={`Verified Attendee · ${sessionId}`}
-        onSettings={() => onNavigate('diagnostics')}
       />
 
       <ScrollView

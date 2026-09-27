@@ -48,7 +48,7 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onComplete }) => {
     setTimeout(() => {
       setPhase(2);
       Animated.timing(xTranslateAnim, {
-        toValue: -80,
+        toValue: -65,
         duration: 320,
         easing: Easing.bezier(0.4, 0, 0.2, 1),
         useNativeDriver: true,
@@ -60,7 +60,7 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onComplete }) => {
       setPhase(3);
       Animated.parallel([
         Animated.timing(connectTranslateAnim, {
-          toValue: 46,
+          toValue: 25,
           duration: 380,
           easing: Easing.bezier(0.22, 1, 0.36, 1),
           useNativeDriver: true,
@@ -152,9 +152,9 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onComplete }) => {
         >
           <View style={styles.xLogoBadge}>
             {/* Reproduces assets/icon.svg's actual glyph (same viewBox/paths as the app icon and
-                the Home/Login badges) rather than the previous plain crossed-line + dashed-orbit
-                placeholder — the translucent glass badge behind it stays as its own launch-screen
-                treatment, only what's drawn inside changed. */}
+                the Home/Login badges). The glyph sits on the screen background with no badge
+                behind it; xLogoBadge only reserves the 80x80 box the scale/translate animations
+                are tuned against. */}
             <Svg width={54} height={54} viewBox="0 0 1024 1024">
               <Path d="M 284 284 L 512 512 L 740 740" fill="none" stroke="#FFFFFF" strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
               <Path d="M 740 284 L 512 512 L 284 740" fill="none" stroke={palette.mintPresence} strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
@@ -225,10 +225,6 @@ const styles = StyleSheet.create({
   xLogoBadge: {
     width: 80,
     height: 80,
-    borderRadius: 22,
-    backgroundColor: 'rgba(51,209,172,0.14)',
-    borderWidth: 1.5,
-    borderColor: 'rgba(51,209,172,0.45)',
     alignItems: 'center',
     justifyContent: 'center',
   },

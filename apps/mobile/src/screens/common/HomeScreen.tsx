@@ -12,11 +12,11 @@ import Svg, { Path, Circle, Rect } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
 import { MobileScreen, Role } from '../../components/navigation/BottomNav';
+import type { LiveRoomState, ParticipantRole } from '@confpresence/shared';
 
 interface HomeScreenProps {
   displayName: string;
   role: Role;
-  onSelectRole: (role: Role) => void;
   onNavigate: (screen: MobileScreen) => void;
   serverConnected: boolean | null;
   serverEnv: 'cloud' | 'local' | 'custom';
@@ -24,12 +24,30 @@ interface HomeScreenProps {
   selectedRoom: string;
   onSelectRoom: (room: string) => void;
   onStartPresence: () => void;
+  /** Rooms the server confirms this signed-in user is already presenting, if any — drives the
+   * rejoin/end card in place of the normal room-selector + Start Broadcasting flow. */
+  myActiveRooms: LiveRoomState[];
+  onRejoinMyRoom: (room: LiveRoomState) => void;
+  onEndMyRoom: (room: LiveRoomState) => void;
+  /** What's actually running right now, which is not always the same as `role` — a session keeps
+   * running while you navigate away, and the __DEV__ role switcher can change `role` underneath a
+   * live one. This is how Home knows to show "still presenting/attending" instead of Start
+   * Broadcasting / Begin Detection, which would restart (and interrupt) the live session. */
+  activePresence: {
+    role: ParticipantRole;
+    roomId: string;
+    sessionId: string;
+    /** Attendee only: a room is actually verified, rather than detection merely running. */
+    confirmed: boolean;
+  } | null;
+  /** Whether detection has already confirmed a room for the active attendee session — decides
+   * whether "Go to Room" resumes straight into the confirmed view or back into discovery/search. */
+  hasDetectedRoom: boolean;
 }
 
 export const HomeScreen: React.FC<HomeScreenProps> = ({
   displayName,
   role,
-  onSelectRole,
   onNavigate,
   serverConnected,
   serverEnv,
@@ -37,6 +55,11 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   selectedRoom,
   onSelectRoom,
   onStartPresence,
+  myActiveRooms,
+  onRejoinMyRoom,
+  onEndMyRoom,
+  activePresence,
+  hasDetectedRoom,
 }) => {
   const { colors, theme } = useTheme();
   const isDark = theme === 'dark';
@@ -191,44 +214,22 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         </View>
       </View>
 
-      {/* Role Switcher Tabs */}
-      <View style={[styles.roleTabContainer, { backgroundColor: isDark ? '#131C2E' : '#F1F5F9' }]}>
-        {(['attendee', 'presenter', 'admin'] as const).map(r => (
-          <TouchableOpacity
-            key={r}
-            onPress={() => onSelectRole(r)}
-            style={[
-              styles.roleTabButton,
-              role === r && {
-                backgroundColor: colors.card,
-                shadowColor: '#000',
-                shadowOffset: { width: 0, height: 1 },
-                shadowOpacity: 0.1,
-                shadowRadius: 2,
-                elevation: 2,
-              },
-            ]}
-          >
-            <Text
-              style={[
-                styles.roleTabText,
-                {
-                  color: role === r ? palette.mintPresence : colors.muted,
-                  fontWeight: role === r ? '800' : '600',
-                },
-              ]}
-            >
-              {r === 'attendee' ? 'Attendee' : r === 'presenter' ? 'Presenter' : 'Admin'}
-            </Text>
-          </TouchableOpacity>
-        ))}
+      {/* Role indicator — read-only. Role is chosen at sign-in and fixed until sign-out, so this
+          states which mode the app is in rather than offering a switch. */}
+      <View style={[styles.roleBanner, { backgroundColor: isDark ? '#131C2E' : '#F1F5F9' }]}>
+        <Text style={[styles.roleBannerText, { color: palette.mintPresence }]}>
+          {role === 'attendee' ? 'ATTENDEE' : role === 'presenter' ? 'PRESENTER' : 'ADMIN'}
+        </Text>
+        <Text style={[styles.roleBannerHint, { color: colors.muted }]}>
+          Signed in as
+        </Text>
       </View>
 
       {/* Presence Core Orb — purely decorative status display, never interactive. The pulsing
           rings scale up to 1.7x mid-animation (130px -> ~221px). orbBounds is sized to that max
           extent with overflow:hidden, so the animation is physically clipped at its own box
-          instead of relying only on pointerEvents to stop it swallowing taps meant for the role
-          tabs above — a future tweak to scale/opacity can't silently reopen that bug. */}
+          instead of relying only on pointerEvents to stop it swallowing taps meant for the
+          controls around it — a future tweak to scale/opacity can't silently reopen that bug. */}
       <View style={styles.orbSection} pointerEvents="none">
         <View style={styles.orbBounds}>
           <View style={styles.orbContainer}>
@@ -305,48 +306,76 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               </View>
               <View>
                 <Text style={[styles.actionCardTitle, { color: colors.txt }]}>
-                  Find My Room
+                  {activePresence?.role !== 'attendee'
+                    ? 'Find My Room'
+                    : activePresence.confirmed
+                    ? 'Still Checked In'
+                    : 'Looking for Your Room'}
                 </Text>
                 <Text style={[styles.actionCardSub, { color: colors.muted }]}>
-                  Zero-touch automatic detection
+                  {activePresence?.role !== 'attendee'
+                    ? 'Zero-touch automatic detection'
+                    : activePresence.confirmed
+                    ? `Checked into ${activePresence.roomId}`
+                    : 'Detection running · no room verified yet'}
                 </Text>
               </View>
             </View>
 
-            {/* Quad-Sensor Active Box */}
-            <View style={[styles.quadSensorBox, { backgroundColor: isDark ? '#162338' : '#F0F9FF' }]}>
-              <View style={styles.miniRadarWrapper}>
-                <Animated.View
-                  style={[
-                    styles.miniRadarPulse,
-                    {
-                      transform: [{ scale: miniScale }],
-                      opacity: miniOpacity,
-                    },
-                  ]}
-                />
-                <View style={styles.miniRadarCore}>
-                  <View style={styles.miniRadarDot} />
+            {activePresence?.role === 'attendee' ? (
+              // Detection is already running in the background — resume the in-progress screen
+              // instead of offering Begin Detection again, which
+              // would restart it (see the comment on `activePresence` in App.tsx). Only claim a
+              // room when one is actually confirmed; otherwise this is still just scanning.
+              <TouchableOpacity
+                activeOpacity={0.85}
+                onPress={() =>
+                  onNavigate(activePresence.confirmed && hasDetectedRoom ? 'attendeeConfirmed' : 'attendeeDiscovery')
+                }
+                style={styles.primaryActionButton}
+              >
+                <Text style={styles.primaryActionText}>
+                  {activePresence.confirmed ? 'Go to Room' : 'View Detection'}
+                </Text>
+              </TouchableOpacity>
+            ) : (
+              <>
+                {/* Quad-Sensor Active Box */}
+                <View style={[styles.quadSensorBox, { backgroundColor: isDark ? '#162338' : '#F0F9FF' }]}>
+                  <View style={styles.miniRadarWrapper}>
+                    <Animated.View
+                      style={[
+                        styles.miniRadarPulse,
+                        {
+                          transform: [{ scale: miniScale }],
+                          opacity: miniOpacity,
+                        },
+                      ]}
+                    />
+                    <View style={styles.miniRadarCore}>
+                      <View style={styles.miniRadarDot} />
+                    </View>
+                  </View>
+                  <View>
+                    <Text style={styles.quadTitle}>Quad-sensor active</Text>
+                    <Text style={[styles.quadSub, { color: colors.muted }]}>
+                      BLE · Ultrasonic · Wi-Fi · IMU
+                    </Text>
+                  </View>
                 </View>
-              </View>
-              <View>
-                <Text style={styles.quadTitle}>Quad-sensor active</Text>
-                <Text style={[styles.quadSub, { color: colors.muted }]}>
-                  BLE · Ultrasonic · Wi-Fi · IMU
-                </Text>
-              </View>
-            </View>
 
-            <TouchableOpacity
-              activeOpacity={0.85}
-              onPress={() => {
-                onStartPresence();
-                onNavigate('attendeeDiscovery');
-              }}
-              style={styles.primaryActionButton}
-            >
-              <Text style={styles.primaryActionText}>Begin Detection</Text>
-            </TouchableOpacity>
+                <TouchableOpacity
+                  activeOpacity={0.85}
+                  onPress={() => {
+                    onStartPresence();
+                    onNavigate('attendeeDiscovery');
+                  }}
+                  style={styles.primaryActionButton}
+                >
+                  <Text style={styles.primaryActionText}>Begin Detection</Text>
+                </TouchableOpacity>
+              </>
+            )}
           </View>
         )}
 
@@ -388,64 +417,122 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               </View>
               <View>
                 <Text style={[styles.actionCardTitle, { color: colors.txt }]}>
-                  Host / Anchor Room
+                  {activePresence?.role === 'presenter'
+                    ? 'Currently Presenting'
+                    : myActiveRooms.length > 0
+                    ? 'Already Hosting'
+                    : 'Host / Anchor Room'}
                 </Text>
                 <Text style={[styles.actionCardSub, { color: colors.muted }]}>
-                  Broadcast presence gate
+                  {activePresence?.role === 'presenter'
+                    ? `Broadcasting is running for ${activePresence.roomId}`
+                    : myActiveRooms.length > 0
+                    ? 'The server shows a room still open under your account'
+                    : 'Broadcast presence gate'}
                 </Text>
               </View>
             </View>
 
-            {/* Room selector chips */}
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.roomChipsScroll}
-            >
-              {rooms.map(r => (
-                <TouchableOpacity
-                  key={r}
-                  onPress={() => onSelectRoom(r)}
+            {activePresence?.role === 'presenter' ? (
+              // Broadcasting is already running in the background — jump back to the dashboard
+              // instead of offering Start Broadcasting again, which
+              // would interrupt and restart the live room (see `activePresence` in App.tsx).
+              <TouchableOpacity
+                activeOpacity={0.85}
+                onPress={() => onNavigate('presenterDashboard')}
+                style={styles.primaryActionButton}
+              >
+                <Text style={styles.primaryActionText}>Go to Dashboard</Text>
+              </TouchableOpacity>
+            ) : myActiveRooms.length > 0 ? (
+              // Server-truth check found a room this account is still presenting (possibly from
+              // another device, or before a force-close/reinstall) — offer to resume or end it
+              // instead of the normal room-selector, so a presenter can never abandon it by
+              // accident while starting a new one.
+              myActiveRooms.map(r => (
+                <View
+                  key={`${r.sessionId}::${r.roomId}`}
                   style={[
-                    styles.roomChip,
-                    {
-                      backgroundColor:
-                        selectedRoom === r
-                          ? 'rgba(51,209,172,0.15)'
-                          : isDark
-                          ? '#1A2638'
-                          : '#F1F5F9',
-                      borderColor:
-                        selectedRoom === r
-                          ? palette.mintPresence
-                          : colors.border,
-                    },
+                    styles.hostedRoomCard,
+                    { backgroundColor: isDark ? '#162338' : '#F0F9FF', borderColor: colors.border },
                   ]}
                 >
-                  <Text
-                    style={[
-                      styles.roomChipText,
-                      {
-                        color:
-                          selectedRoom === r
-                            ? palette.mintPresence
-                            : colors.sub,
-                      },
-                    ]}
-                  >
-                    {r.toUpperCase()}
+                  <Text style={[styles.hostedRoomName, { color: colors.txt }]}>{r.roomId}</Text>
+                  <Text style={[styles.hostedRoomMeta, { color: colors.muted }]}>
+                    Session {r.sessionId} · {r.members?.length ?? r.estimatedMemberDeviceIds.length} live
                   </Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
+                  <View style={styles.hostedRoomButtonRow}>
+                    <TouchableOpacity
+                      activeOpacity={0.85}
+                      onPress={() => onRejoinMyRoom(r)}
+                      style={[styles.primaryActionButton, styles.hostedRoomButton]}
+                    >
+                      <Text style={styles.primaryActionText}>Rejoin as Host</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      activeOpacity={0.85}
+                      onPress={() => onEndMyRoom(r)}
+                      style={[styles.hostedRoomButton, styles.hostedRoomEndButton, { borderColor: colors.border }]}
+                    >
+                      <Text style={[styles.hostedRoomEndText, { color: colors.muted }]}>End Room</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))
+            ) : (
+              <>
+                {/* Room selector chips */}
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.roomChipsScroll}
+                >
+                  {rooms.map(r => (
+                    <TouchableOpacity
+                      key={r}
+                      onPress={() => onSelectRoom(r)}
+                      style={[
+                        styles.roomChip,
+                        {
+                          backgroundColor:
+                            selectedRoom === r
+                              ? 'rgba(51,209,172,0.15)'
+                              : isDark
+                              ? '#1A2638'
+                              : '#F1F5F9',
+                          borderColor:
+                            selectedRoom === r
+                              ? palette.mintPresence
+                              : colors.border,
+                        },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.roomChipText,
+                          {
+                            color:
+                              selectedRoom === r
+                                ? palette.mintPresence
+                                : colors.sub,
+                          },
+                        ]}
+                      >
+                        {r.toUpperCase()}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
 
-            <TouchableOpacity
-              activeOpacity={0.85}
-              onPress={() => onNavigate('presenterSetup')}
-              style={styles.primaryActionButton}
-            >
-              <Text style={styles.primaryActionText}>Start Broadcasting</Text>
-            </TouchableOpacity>
+                <TouchableOpacity
+                  activeOpacity={0.85}
+                  onPress={() => onNavigate('presenterSetup')}
+                  style={styles.primaryActionButton}
+                >
+                  <Text style={styles.primaryActionText}>Start Broadcasting</Text>
+                </TouchableOpacity>
+              </>
+            )}
           </View>
         )}
 
@@ -650,22 +737,25 @@ const styles = StyleSheet.create({
     color: palette.mintPresence,
     letterSpacing: 0.5,
   },
-  roleTabContainer: {
-    flexDirection: 'row',
+  roleBanner: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
     marginHorizontal: 20,
     marginTop: 6,
     marginBottom: 10,
-    padding: 3,
+    paddingVertical: 8,
     borderRadius: 12,
   },
-  roleTabButton: {
-    flex: 1,
-    paddingVertical: 7,
-    alignItems: 'center',
-    borderRadius: 9,
-  },
-  roleTabText: {
+  roleBannerText: {
     fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  roleBannerHint: {
+    fontSize: 11,
+    fontWeight: '600',
   },
   orbSection: {
     alignItems: 'center',
@@ -834,6 +924,40 @@ const styles = StyleSheet.create({
     color: '#0F2F2C',
     fontSize: 14,
     fontWeight: '800',
+  },
+  hostedRoomCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    padding: 14,
+    marginBottom: 14,
+  },
+  hostedRoomName: {
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  hostedRoomMeta: {
+    fontSize: 12,
+    marginTop: 2,
+    marginBottom: 12,
+  },
+  hostedRoomButtonRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  hostedRoomButton: {
+    flex: 1,
+    paddingVertical: 12,
+  },
+  hostedRoomEndButton: {
+    backgroundColor: 'transparent',
+    borderRadius: 14,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  hostedRoomEndText: {
+    fontSize: 14,
+    fontWeight: '700',
   },
   recentSection: {
     marginTop: 18,

@@ -15,6 +15,11 @@ interface DevScreenSwitcherProps {
 // Deliberately just the three roles, not a full screen list — most other screens expect state
 // (selected room, fetched members, etc.) that only a real navigation flow sets up, so jumping
 // straight to them renders broken/empty. Role + Home is the one jump that's always safe.
+//
+// Diagnostics is the one screen jump here, for the same reason: it reads only `status` and
+// `deviceId`, which App.tsx passes whatever the role is, so it renders correctly from a cold
+// jump. It lives here because Diagnostics is only in the admin bottom nav — this is how you
+// reach it while testing as a presenter or attendee.
 export const DevScreenSwitcher: React.FC<DevScreenSwitcherProps> = ({ currentRole, onSelectRole, onNavigate }) => {
   return (
     <View style={styles.bar}>
@@ -33,6 +38,12 @@ export const DevScreenSwitcher: React.FC<DevScreenSwitcherProps> = ({ currentRol
           </TouchableOpacity>
         );
       })}
+
+      <View style={styles.divider} />
+
+      <TouchableOpacity onPress={() => onNavigate('diagnostics')} style={[styles.chip, styles.chipAlt]}>
+        <Text style={[styles.chipText, styles.chipAltText]}>diagnostics</Text>
+      </TouchableOpacity>
     </View>
   );
 };
@@ -52,6 +63,20 @@ const styles = StyleSheet.create({
   },
   chipActive: {
     backgroundColor: '#33D1AC',
+  },
+  // Outlined rather than filled, so a screen jump never reads as the "currently selected role".
+  chipAlt: {
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  chipAltText: {
+    color: '#CBD5E1',
+  },
+  divider: {
+    width: 1,
+    alignSelf: 'stretch',
+    backgroundColor: '#334155',
+    marginHorizontal: 2,
   },
   chipText: {
     fontSize: 11,

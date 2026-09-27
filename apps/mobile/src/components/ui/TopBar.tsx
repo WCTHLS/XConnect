@@ -7,7 +7,6 @@ interface TopBarProps {
   title: string;
   subtitle?: string;
   onBack?: () => void;
-  onSettings?: () => void;
   onToggleTheme?: () => void;
 }
 
@@ -15,7 +14,6 @@ export const TopBar: React.FC<TopBarProps> = ({
   title,
   subtitle,
   onBack,
-  onSettings,
   onToggleTheme,
 }) => {
   const { colors, theme } = useTheme();
@@ -70,7 +68,6 @@ export const TopBar: React.FC<TopBarProps> = ({
                 backgroundColor: isDark
                   ? 'rgba(34,49,71,0.5)'
                   : 'rgba(226,232,240,0.7)',
-                marginRight: onSettings ? 8 : 0,
               },
             ]}
           >
@@ -81,32 +78,6 @@ export const TopBar: React.FC<TopBarProps> = ({
                 stroke={colors.sub}
                 strokeWidth={2}
                 strokeLinecap="round"
-              />
-            </Svg>
-          </TouchableOpacity>
-        )}
-
-        {onSettings && (
-          <TouchableOpacity
-            activeOpacity={0.7}
-            onPress={onSettings}
-            style={[
-              styles.iconButton,
-              {
-                backgroundColor: isDark
-                  ? 'rgba(34,49,71,0.5)'
-                  : 'rgba(226,232,240,0.7)',
-              },
-            ]}
-          >
-            <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
-              <Circle cx={12} cy={12} r={3} stroke={colors.sub} strokeWidth={2} />
-              <Path
-                d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"
-                stroke={colors.sub}
-                strokeWidth={2}
-                strokeLinecap="round"
-                strokeLinejoin="round"
               />
             </Svg>
           </TouchableOpacity>

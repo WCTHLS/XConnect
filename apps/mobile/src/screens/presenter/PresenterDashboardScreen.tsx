@@ -16,6 +16,7 @@ import { LiveBadge } from '../../components/ui/LiveBadge';
 import { SensorPill } from '../../components/ui/SensorPill';
 import { ParticipantCard } from '../../components/ui/ParticipantCard';
 import { MobileScreen } from '../../components/navigation/BottomNav';
+import { AppAlert } from '../../components/ui/AppAlert';
 
 interface PresenterDashboardScreenProps {
   roomId: string;
@@ -50,8 +51,21 @@ export const PresenterDashboardScreen: React.FC<PresenterDashboardScreenProps> =
   };
 
   const handleEndSession = () => {
-    onStopBroadcast();
-    onNavigate('sessionEnd');
+    AppAlert.alert(
+      'End Session',
+      `End ${roomId.toUpperCase()} now? This disconnects everyone currently in it — you and all ${attendeeCount} attendee${attendeeCount === 1 ? '' : 's'} — and records their attendance as ended.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'End Session',
+          style: 'destructive',
+          onPress: () => {
+            onStopBroadcast();
+            onNavigate('sessionEnd');
+          },
+        },
+      ]
+    );
   };
 
   return (
@@ -59,7 +73,6 @@ export const PresenterDashboardScreen: React.FC<PresenterDashboardScreenProps> =
       <TopBar
         title={roomId.toUpperCase()}
         subtitle={`Session: ${sessionId}`}
-        onSettings={() => onNavigate('diagnostics')}
       />
 
       <ScrollView

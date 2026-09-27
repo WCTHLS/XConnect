@@ -23,14 +23,23 @@ import {
   signInWithGoogle,
   signInWithMicrosoft,
 } from '../../services/auth';
-import { MobileScreen } from '../../components/navigation/BottomNav';
+import { MobileScreen, Role } from '../../components/navigation/BottomNav';
+import { RolePicker } from '../../components/ui/RolePicker';
 
 interface LoginScreenProps {
+  role: Role;
+  /** Applied only once sign-in actually succeeds — see the comment in `run`. */
+  onSelectRole: (role: Role) => void;
   onNavigate: (screen: MobileScreen) => void;
   onSuccess?: () => void;
 }
 
-export const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigate, onSuccess }) => {
+export const LoginScreen: React.FC<LoginScreenProps> = ({
+  role,
+  onSelectRole,
+  onNavigate,
+  onSuccess,
+}) => {
   const { colors, theme } = useTheme();
   const isDark = theme === 'dark';
 
@@ -39,8 +48,16 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigate, onSuccess 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  // Held locally until sign-in succeeds, so a failed attempt (or backing out to Create Account)
+  // doesn't leave the app committed to a role nobody ended up signing in under.
+  const [pickedRole, setPickedRole] = useState<Role>(role);
 
-  const run = async (action: () => Promise<{ ok: boolean; error?: string }>) => {
+  /** `entersApp` is false for actions that succeed without signing anyone in (password reset),
+   * which must not commit the picked role or navigate away from this screen. */
+  const run = async (
+    action: () => Promise<{ ok: boolean; error?: string }>,
+    entersApp: boolean = true
+  ) => {
     setBusy(true);
     setError(null);
     setInfo(null);
@@ -48,7 +65,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigate, onSuccess 
       const result = await action();
       if (!result.ok && result.error) {
         setError(result.error);
-      } else if (result.ok) {
+      } else if (result.ok && entersApp) {
+        onSelectRole(pickedRole);
         onSuccess?.();
         onNavigate('home');
       }
@@ -73,7 +91,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigate, onSuccess 
       setError('Enter your email above first.');
       return;
     }
-    const res = await run(() => sendPasswordReset(email.trim()));
+    const res = await run(() => sendPasswordReset(email.trim()), false);
     if (res?.ok) setInfo('Password reset email sent.');
   };
 
@@ -121,6 +139,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onNavigate, onSuccess 
             <Text style={styles.infoText}>{info}</Text>
           </View>
         ) : null}
+
+        {/* Role — picked before any sign-in method, since all of them commit it on success */}
+        <View style={styles.roleSection}>
+          <RolePicker value={pickedRole} onChange={setPickedRole} disabled={busy} />
+        </View>
 
         {/* OAuth Buttons */}
         <View style={styles.oauthSection}>
@@ -307,6 +330,9 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     textAlign: 'center',
+  },
+  roleSection: {
+    marginBottom: 22,
   },
   oauthSection: {
     gap: 12,

@@ -21,7 +21,7 @@ interface PresenterSetupScreenProps {
   onSelectRoom: (room: string) => void;
   sessionId: string;
   onSetSessionId: (id: string) => void;
-  onStartBroadcast: (roomId: string, sessionId: string) => void;
+  onStartBroadcast: (roomId: string, sessionId: string) => Promise<boolean>;
   onNavigate: (screen: MobileScreen) => void;
 }
 
@@ -41,9 +41,12 @@ export const PresenterSetupScreen: React.FC<PresenterSetupScreenProps> = ({
   const effectiveRoom = showCustom && customRoom.trim() ? customRoom.trim() : selectedRoom;
   const acousticToken = getAcousticTokenForRoom(effectiveRoom);
 
-  const handleStart = () => {
-    onStartBroadcast(effectiveRoom, sessionId);
-    onNavigate('presenterDashboard');
+  // Only navigate once the join is actually confirmed — the server can reject this (409, room
+  // already has a live presenter), and navigating optimistically made that rejection invisible:
+  // the alert would show, but the screen had already moved to the dashboard as if it had worked.
+  const handleStart = async () => {
+    const ok = await onStartBroadcast(effectiveRoom, sessionId);
+    if (ok) onNavigate('presenterDashboard');
   };
 
   return (

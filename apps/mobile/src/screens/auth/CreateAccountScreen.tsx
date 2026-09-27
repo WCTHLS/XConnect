@@ -13,14 +13,20 @@ import {
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
 import { signUpWithEmail } from '../../services/auth';
-import { MobileScreen } from '../../components/navigation/BottomNav';
+import { MobileScreen, Role } from '../../components/navigation/BottomNav';
+import { RolePicker } from '../../components/ui/RolePicker';
 
 interface CreateAccountScreenProps {
+  role: Role;
+  /** Applied only once the account is actually created, same as on the login screen. */
+  onSelectRole: (role: Role) => void;
   onNavigate: (screen: MobileScreen) => void;
   onSuccess?: () => void;
 }
 
 export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
+  role,
+  onSelectRole,
   onNavigate,
   onSuccess,
 }) => {
@@ -32,6 +38,7 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
   const [confirmPassword, setConfirmPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pickedRole, setPickedRole] = useState<Role>(role);
 
   const handleCreate = async () => {
     if (!name.trim()) {
@@ -58,6 +65,7 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
       if (!res.ok && res.error) {
         setError(res.error);
       } else if (res.ok) {
+        onSelectRole(pickedRole);
         onSuccess?.();
         onNavigate('home');
       }
@@ -170,6 +178,8 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
               onChangeText={setConfirmPassword}
             />
           </View>
+
+          <RolePicker value={pickedRole} onChange={setPickedRole} disabled={busy} />
 
           <TouchableOpacity
             activeOpacity={0.8}

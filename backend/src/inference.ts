@@ -110,6 +110,14 @@ type ActiveRoomRecord = {
   sessionLabel: string;
   startedAt: number;
   lastActivityAt: number;
+  /**
+   * Signed-in person currently hosting this occurrence, refreshed on every presenter join/ingest
+   * so a takeover moves ownership with it. Held on the room rather than inferred from the live
+   * presenter's device record, because that record is reaped after ~90s of silence while the room
+   * itself stays alive for ROOM_AUTO_EXPIRY_MS — without this, a presenter who force-quit could
+   * not be offered their own still-open room back.
+   */
+  ownerUserId?: string;
 };
 
 type RoomMembershipRecord = {
@@ -168,17 +176,27 @@ export class PocInferenceEngine {
    * ended, or quiet for longer than ROOM_AUTO_EXPIRY_MS). Only participating devices call this
    * (presenter join/ingest, and membership tracking) — read-only views never create rooms.
    */
-  private resolveRoom(sessionLabel: string, roomCode: string, now: number = Date.now()): string {
+  private resolveRoom(sessionLabel: string, roomCode: string, now: number = Date.now(), presenterUserId?: string): string {
     const key = PocInferenceEngine.roomKey(sessionLabel, roomCode);
     const existing = this.activeRoomsByKey.get(key);
     if (existing && now - existing.lastActivityAt < ROOM_AUTO_EXPIRY_MS) {
       existing.lastActivityAt = now;
+      // Keep ownership pointed at whoever is currently hosting, so a takeover transfers it and a
+      // signed-out/anonymous report doesn't wipe a known owner.
+      if (presenterUserId) existing.ownerUserId = presenterUserId;
       return existing.roomId;
     }
 
     const safeCode = roomCode.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40) || "room";
     const roomId = `${safeCode}__${now.toString(36)}`;
-    this.activeRoomsByKey.set(key, { roomId, code: roomCode, sessionLabel, startedAt: now, lastActivityAt: now });
+    this.activeRoomsByKey.set(key, {
+      roomId,
+      code: roomCode,
+      sessionLabel,
+      startedAt: now,
+      lastActivityAt: now,
+      ownerUserId: presenterUserId
+    });
 
     if (this.db) {
       const write = this.upsertRoomInternal(roomId, roomCode, sessionLabel, now)
@@ -219,6 +237,31 @@ export class PocInferenceEngine {
   }
 
   /**
+   * Self-service room-end for the presenter rejoin flow: only succeeds if userId actually owns
+   * this room, so one signed-in user can never end a room that belongs to someone else just by
+   * guessing its sessionLabel/roomCode.
+   *
+   * Ownership is read the same way myActiveRooms reads it — off the room record, falling back to
+   * a live presenter device record only when the room has no recorded owner. Checking solely for
+   * a live device record would make a room un-endable exactly when ending it matters most: after
+   * the host force-quit, leaving it open with nobody reporting into it.
+   */
+  endRoomIfOwner(sessionLabel: string, roomCode: string, userId: string): boolean {
+    const key = PocInferenceEngine.roomKey(sessionLabel, roomCode);
+    const room = this.activeRoomsByKey.get(key);
+    if (!room) return false;
+    const owns =
+      room.ownerUserId === userId ||
+      (!room.ownerUserId &&
+        [...this.devices.values()].some(
+          (d) => d.role === "presenter" && d.roomId === roomCode && d.sessionLabel === sessionLabel && d.userId === userId
+        ));
+    if (!owns) return false;
+    this.endRoomOccurrence(key, room);
+    return true;
+  }
+
+  /**
    * Ends one active room occurrence: flushes all its open stays right away (otherwise devices
    * still sending batches would carry their open stays into the next occurrence) and stamps
    * rooms.ended_at.
@@ -245,13 +288,21 @@ export class PocInferenceEngine {
         this.roomMembership.delete(membershipKey);
       }
     }
-    // Devices keep running until their next poll tells them the room ended. Drop this room's
-    // presenter records now so nothing (roster polls, the admin overview) keeps computing for
-    // it, and so a new occurrence can't be started by leftover state.
+    // Devices keep running until their next poll tells them the room ended. Notify every device
+    // still associated with this room via its OWN record, not just whichever ones happened to
+    // have a currently-live BLE-cluster membership above — an attendee's Bluetooth link can be
+    // briefly flaky right at the instant the room ends, which would otherwise mean they never
+    // get a matching roomMembership row here and so never receive the notice at all, leaving
+    // their client's "still in this room" state (and its duration counter) running forever.
+    // A device's own roomId/sessionLabel is refreshed on every batch upload independent of BLE
+    // health, so this is the reliable channel; the roomMembership loop above is only additionally
+    // needed for its DB duration bookkeeping. Presenter records are also dropped outright so
+    // nothing (roster polls, the admin overview) keeps computing for this room, and so a new
+    // occurrence can't be started by leftover state.
     for (const [deviceId, d] of [...this.devices.entries()]) {
-      if (d.role === "presenter" && d.roomId === room.code && d.sessionLabel === room.sessionLabel) {
+      if (d.roomId === room.code && d.sessionLabel === room.sessionLabel) {
         this.roomEndedNotices.set(deviceId, { roomCode: room.code, endedAt: now });
-        this.devices.delete(deviceId);
+        if (d.role === "presenter") this.devices.delete(deviceId);
       }
     }
     this.endRoomInternal(room.roomId, now).catch((err) => console.error("[db] failed to mark room ended:", err));
@@ -330,7 +381,7 @@ export class PocInferenceEngine {
           }
         }
       }
-      this.resolveRoom(sessionLabel, roomId, now);
+      this.resolveRoom(sessionLabel, roomId, now, userId);
     }
   }
 
@@ -439,7 +490,9 @@ export class PocInferenceEngine {
     });
     this.upsertDevice(batch.deviceId, batch.displayName || current?.displayName, now);
     const ingestRoomCode = batch.roomId ?? current?.roomId;
-    if (batch.role === "presenter" && ingestRoomCode) this.resolveRoom(batch.sessionId, ingestRoomCode, now);
+    if (batch.role === "presenter" && ingestRoomCode) {
+      this.resolveRoom(batch.sessionId, ingestRoomCode, now, userId ?? current?.userId);
+    }
     this.batches.push(batch);
     this.trim();
     return true;
@@ -540,6 +593,17 @@ export class PocInferenceEngine {
         continue;
       }
 
+      // Physical proximity alone does NOT make someone a member. Being in this presenter's BLE
+      // cluster only means "near enough to plausibly be here" — an attendee still has to have
+      // actually joined THIS room, which is what their own device record claiming this room and
+      // session means (set by join/ingest when they confirm a detected room). Without this, any
+      // nearby device running the app gets swept into the roster and recorded as attendance,
+      // including one that never confirmed anything and never saw that it had "joined" at all.
+      // The sensors' job is verifying a claim is genuine, not manufacturing the claim.
+      if (rec?.roomId !== roomId || rec?.sessionLabel !== sessionLabel) {
+        continue;
+      }
+
       // Check Multi-Room Affinity: Is this attendee physically closer to another presenter?
       let assignedToThisRoom = true;
       if (!isAcousticMatch && otherPresenters.length > 0) {
@@ -613,6 +677,42 @@ export class PocInferenceEngine {
     };
   }
 
+  /**
+   * Every currently-active room hosted by userId, across every session label and room, so a
+   * rejoining presenter's Home screen can find a hosted room server-side rather than trusting a
+   * local device snapshot (which can't survive a reinstall, a different device, or a force-close
+   * older than its own 45s window).
+   *
+   * Ownership comes from the room record, not from a live presenter device record: a device that
+   * stops reporting is reaped after ~90s, but the room occurrence itself survives for
+   * ROOM_AUTO_EXPIRY_MS (15 min). Keying off the device record meant a presenter who force-quit
+   * hit a dead zone — their room was still open and still closeable, yet nothing offered it back
+   * to them, which is precisely the case this whole flow exists to handle.
+   */
+  myActiveRooms(userId: string): LiveRoomState[] {
+    const now = Date.now();
+    const results: LiveRoomState[] = [];
+    for (const room of this.activeRoomsByKey.values()) {
+      if (now - room.lastActivityAt >= ROOM_AUTO_EXPIRY_MS) continue;
+
+      const ownsRoom =
+        room.ownerUserId === userId ||
+        // Fallback for a room whose owner was never recorded (started while signed out, or before
+        // ownership tracking): fall back to whoever is currently live in it.
+        (!room.ownerUserId &&
+          [...this.devices.values()].some(
+            (d) =>
+              d.role === "presenter" &&
+              d.roomId === room.code &&
+              d.sessionLabel === room.sessionLabel &&
+              d.userId === userId
+          ));
+
+      if (ownsRoom) results.push(this.roomState(room.sessionLabel, room.code));
+    }
+    return results;
+  }
+
   deviceRoomState(sessionLabel: string, deviceId: string): LiveRoomState {
     const sessionId = sessionLabel;
     this.trim();
@@ -624,11 +724,18 @@ export class PocInferenceEngine {
       return this.roomState(sessionId, currentDevice.roomId);
     }
 
-    // For Attendees: Find which active presenter's room cluster has highest affinity
+    // For Attendees: Find which active presenter's room cluster has highest affinity.
+    //
+    // Deliberately NOT scoped to the asking device's own session label. An attendee has no way to
+    // know a session code — that's a presenter/admin concept — so scoping detection to whatever
+    // label the device happens to be carrying just means a stale or arbitrary value silently makes
+    // every room undetectable. Detection answers "which active room are you physically in", across
+    // all of them, and the answer carries that room's real session label back so the client can
+    // adopt it rather than assert one of its own.
     const activePresenters = [...this.devices.values()]
-      .filter((d) => d.role === "presenter" && d.roomId && d.sessionLabel === sessionLabel && now - d.updatedAt < WINDOW_MS * 2);
+      .filter((d) => d.role === "presenter" && d.roomId && d.sessionLabel && now - d.updatedAt < WINDOW_MS * 2);
 
-    let bestRoomId: string | undefined;
+    let bestMatch: { roomCode: string; sessionLabel: string } | undefined;
     let highestAffinity = -1;
 
     // Check Acoustic Gate first: If attendee physically heard an active presenter's ultrasonic token
@@ -637,13 +744,13 @@ export class PocInferenceEngine {
       for (const presenter of activePresenters) {
         const expectedToken = (presenter.ultrasonicEmittedToken || presenter.roomId || "").trim().toUpperCase();
         if (expectedToken && isUltrasonicTokenMatch(heardToken, expectedToken)) {
-          bestRoomId = presenter.roomId;
+          bestMatch = { roomCode: presenter.roomId!, sessionLabel: presenter.sessionLabel! };
           break;
         }
       }
     }
 
-    if (!bestRoomId) {
+    if (!bestMatch) {
       for (const presenter of activePresenters) {
         const cluster = this.componentFrom(presenter.deviceId, graph);
         if (cluster.has(deviceId)) {
@@ -655,14 +762,14 @@ export class PocInferenceEngine {
 
           if (affinity > highestAffinity) {
             highestAffinity = affinity;
-            bestRoomId = presenter.roomId;
+            bestMatch = { roomCode: presenter.roomId!, sessionLabel: presenter.sessionLabel! };
           }
         }
       }
     }
 
-    if (bestRoomId) {
-      return this.roomState(sessionId, bestRoomId);
+    if (bestMatch) {
+      return this.roomState(bestMatch.sessionLabel, bestMatch.roomCode);
     }
 
     return {

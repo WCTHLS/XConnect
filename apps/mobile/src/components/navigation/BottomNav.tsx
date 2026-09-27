@@ -21,6 +21,7 @@ export type MobileScreen =
   | 'attendeeOutOfRange'
   | 'adminOverview'
   | 'adminRoomDetail'
+  | 'adminHistory'
   | 'adminNotify'
   | 'diagnostics'
   | 'edgeState';
@@ -217,6 +218,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
 
   const adminTabs: NavTab[] = [
     { label: 'Monitor', target: 'adminOverview', icon: monitorIcon },
+    { label: 'History', target: 'adminHistory', icon: clockIcon },
     { label: 'Notify', target: 'adminNotify', icon: bellIcon },
     { label: 'Diagnostics', target: 'diagnostics', icon: chartIcon },
     { label: 'Profile', target: 'profile', icon: profileIcon },
