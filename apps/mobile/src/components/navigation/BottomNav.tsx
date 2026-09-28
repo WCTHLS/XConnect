@@ -23,6 +23,7 @@ export type MobileScreen =
   | 'adminRoomDetail'
   | 'adminHistory'
   | 'adminNotify'
+  | 'adminCheckIn'
   | 'diagnostics'
   | 'edgeState';
 
@@ -246,6 +247,8 @@ export const BottomNav: React.FC<BottomNavProps> = ({
       (currentScreen === 'adminRoomDetail' || currentScreen === 'edgeState')
     )
       return true;
+    // Check-in is reached from the Notify tab, so that tab stays lit while you're in it.
+    if (target === 'adminNotify' && currentScreen === 'adminCheckIn') return true;
     return false;
   };
 

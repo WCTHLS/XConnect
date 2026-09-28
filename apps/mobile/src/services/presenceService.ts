@@ -15,6 +15,8 @@ const MOTION_SAMPLE_INTERVAL_MS = 200; // ~5Hz, coarse activity level, not gestu
 // silently point "Cloud" at a local dev URL with no indication in the UI.
 const DEFAULT_API_URL = "https://xconnect-api.onrender.com";
 const BATCH_INTERVAL_MS = 10_000;
+/** Ceiling on how long leaving is allowed to block the UI before giving up on a clean goodbye. */
+const LEAVE_TIMEOUT_MS = 4_000;
 // How long a heard ultrasonic token stays valid before we treat it as stale and stop
 // resending it. Must be well under the server's freshness window (45s) so the gate can
 // actually expire client-side once the presenter stops broadcasting, instead of getting
@@ -278,8 +280,14 @@ export class PresenceService {
       }
     }
 
+    // Awaited, not fire-and-forget. The server removes the device the moment this lands, so
+    // anything that asks "is this device still in a room?" right after stop() — the attendee
+    // resume check, the presenter's my-active-rooms poll — would otherwise race the request and
+    // get a stale "yes". Bounded by a timeout so an unreachable server delays leaving by a few
+    // seconds at most instead of hanging the UI: the server reaps an unreporting device anyway,
+    // so a failed leave is slow, not wrong.
     if (this.config) {
-      this.leaveSession(this.config).catch(() => {});
+      await this.leaveSession(this.config);
     }
 
     try {
@@ -504,15 +512,23 @@ export class PresenceService {
 
   private async leaveSession(config: StartConfig) {
     const targetUrl = config.apiUrl || DEFAULT_API_URL;
+    // Callers await this, so it must always settle. A dead or unreachable server would otherwise
+    // leave the caller (and the "Leaving..." overlay) waiting on the platform's default socket
+    // timeout, which can be tens of seconds.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), LEAVE_TIMEOUT_MS);
     try {
       await authFetch(`${targetUrl}/api/session/leave`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ deviceId: config.deviceId })
+        body: JSON.stringify({ deviceId: config.deviceId }),
+        signal: controller.signal
       });
       AppLogger.log("API", "Session left");
     } catch {
-      // Ignore
+      AppLogger.log("API", "Leave request failed or timed out; the server will reap this device instead");
+    } finally {
+      clearTimeout(timeout);
     }
   }
 }

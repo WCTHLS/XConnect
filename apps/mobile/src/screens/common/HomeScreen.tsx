@@ -12,7 +12,25 @@ import Svg, { Path, Circle, Rect } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
 import { MobileScreen, Role } from '../../components/navigation/BottomNav';
-import type { LiveRoomState, ParticipantRole } from '@confpresence/shared';
+import type { LiveRoomState, MyInvite, ParticipantRole } from '@confpresence/shared';
+import { InviteCard } from '../../components/ui/InviteCard';
+import { InviteDetailSheet } from '../../components/ui/InviteDetailSheet';
+
+/**
+ * Date and time down to the minute. The components are listed explicitly rather than using
+ * `toLocaleString()`, which appends seconds on most locales — meaningless for a scheduled event,
+ * and it pushes the line past the width these rows have.
+ */
+function formatEventWhen(iso: string): string {
+  return new Date(iso).toLocaleString([], {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
 
 interface HomeScreenProps {
   displayName: string;
@@ -43,6 +61,10 @@ interface HomeScreenProps {
   /** Whether detection has already confirmed a room for the active attendee session — decides
    * whether "Go to Room" resumes straight into the confirmed view or back into discovery/search. */
   hasDetectedRoom: boolean;
+  /** Unanswered check-in invitations for this account. An RSVP prompt, not attendance. */
+  invites: MyInvite[];
+  /** Resolves to whether the reply saved, so the edit sheet stays open on a failure. */
+  onRespondToInvite: (inviteId: number, response: 'accepted' | 'declined') => Promise<boolean>;
 }
 
 export const HomeScreen: React.FC<HomeScreenProps> = ({
@@ -60,6 +82,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   onEndMyRoom,
   activePresence,
   hasDetectedRoom,
+  invites,
+  onRespondToInvite,
 }) => {
   const { colors, theme } = useTheme();
   const isDark = theme === 'dark';
@@ -163,12 +187,15 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
     outputRange: [0.6, 0.3, 0],
   });
 
-  const attendeeHistory = [
-    { room: 'Hall A', date: 'Sep 11', dwell: '38m', status: 'Verified' },
-    { room: 'Workshop 1', date: 'Sep 10', dwell: '52m', status: 'Verified' },
-    { room: 'Auditorium', date: 'Sep 9', dwell: '1h 14m', status: 'Verified' },
-    { room: 'Hall A', date: 'Sep 8', dwell: '29m', status: 'Verified' },
-  ];
+  // Invites still waiting on an answer become action cards; the rest become the reply history
+  // that replaces the old placeholder "recent sessions" list for attendees.
+  const pendingInvites = invites.filter(i => i.status === 'pending');
+  const answeredInvites = invites.filter(i => i.status !== 'pending');
+
+  // Held by id rather than by value so the sheet re-reads the invite from props — otherwise a
+  // changed reply would leave the open sheet showing the answer it had when it was opened.
+  const [openInviteId, setOpenInviteId] = useState<number | null>(null);
+  const openInvite = answeredInvites.find(i => i.id === openInviteId) ?? null;
 
   const presenterHistory = [
     { room: 'Hall A', date: 'Sep 11', dwell: '38m', count: 24 },
@@ -202,7 +229,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             </Svg>
           </View>
           <Text style={[styles.brandTitle, { color: isDark ? '#FFFFFF' : '#0F2F2C' }]}>
-            XConnect
+            Connect
           </Text>
         </View>
 
@@ -224,6 +251,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           Signed in as
         </Text>
       </View>
+
+      {/* Outstanding check-in invites, above everything else because they are the one thing on
+          this screen that is waiting on the person rather than the other way round. */}
+      {pendingInvites.map(invite => (
+        <InviteCard key={invite.id} invite={invite} onRespond={onRespondToInvite} />
+      ))}
 
       {/* Presence Core Orb — purely decorative status display, never interactive. The pulsing
           rings scale up to 1.7x mid-animation (130px -> ~221px). orbBounds is sized to that max
@@ -616,7 +649,100 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         )}
       </View>
 
-      {/* Recent Sessions Carousel */}
+      {/* Attendees see what they replied to past check-in invites — real data, unlike the
+          presenter carousel below it, which is still placeholder content. */}
+      {role === 'attendee' ? (
+        <View style={styles.recentSection}>
+          <Text style={[styles.recentTitle, { color: colors.sub }]}>YOUR INVITE REPLIES</Text>
+
+          {answeredInvites.length === 0 ? (
+            <View
+              style={[
+                styles.inviteHistoryEmpty,
+                { backgroundColor: colors.card, borderColor: colors.border },
+              ]}
+            >
+              <Text style={[styles.inviteHistoryEmptyText, { color: colors.muted }]}>
+                {pendingInvites.length > 0
+                  ? 'Answer the invite above and your reply will be listed here.'
+                  : "You haven't been asked to check in to anything yet."}
+              </Text>
+            </View>
+          ) : (
+            answeredInvites.map(invite => {
+              const accepted = invite.status === 'accepted';
+              const tone = accepted ? palette.mintPresence : palette.roseError;
+              return (
+                <TouchableOpacity
+                  key={invite.id}
+                  activeOpacity={0.8}
+                  onPress={() => setOpenInviteId(invite.id)}
+                  style={[
+                    styles.inviteHistoryRow,
+                    { backgroundColor: colors.card, borderColor: colors.border },
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.inviteHistoryIcon,
+                      { backgroundColor: accepted ? 'rgba(51,209,172,0.15)' : 'rgba(239,68,68,0.15)' },
+                    ]}
+                  >
+                    <Svg width={14} height={14} viewBox="0 0 24 24" fill="none">
+                      <Path
+                        d={accepted ? 'M5 13l4 4L19 7' : 'M6 6l12 12M18 6L6 18'}
+                        stroke={tone}
+                        strokeWidth={2.5}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </Svg>
+                  </View>
+
+                  <View style={styles.inviteHistoryBody}>
+                    <Text style={[styles.inviteHistorySession, { color: colors.txt }]} numberOfLines={1}>
+                      {invite.sessionId}
+                    </Text>
+                    {/* The event's own date/time is what the person actually cares about; when
+                        they happened to tap reply is only a fallback for invites with no
+                        schedule set. */}
+                    <Text style={[styles.inviteHistoryMeta, { color: colors.muted }]} numberOfLines={1}>
+                      {invite.eventAt
+                        ? formatEventWhen(invite.eventAt)
+                        : invite.respondedAt
+                        ? `Replied ${new Date(invite.respondedAt).toLocaleDateString()}`
+                        : 'Replied'}
+                    </Text>
+                    <Text style={[styles.inviteHistoryStatus, { color: tone }]}>
+                      {accepted ? 'GOING' : 'NOT GOING'}
+                    </Text>
+                  </View>
+
+                  <TouchableOpacity
+                    activeOpacity={0.7}
+                    onPress={() => setOpenInviteId(invite.id)}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    style={[
+                      styles.inviteHistoryEditButton,
+                      { backgroundColor: colors.cardSecondary, borderColor: colors.border },
+                    ]}
+                  >
+                    <Svg width={15} height={15} viewBox="0 0 24 24" fill="none">
+                      <Path
+                        d="M4 20h4l10-10a2.1 2.1 0 0 0-3-3L5 17v3z"
+                        stroke={colors.sub}
+                        strokeWidth={2}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </Svg>
+                  </TouchableOpacity>
+                </TouchableOpacity>
+              );
+            })
+          )}
+        </View>
+      ) : (
       <View style={styles.recentSection}>
         <Text style={[styles.recentTitle, { color: colors.sub }]}>
           RECENT SESSIONS
@@ -627,8 +753,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.recentScroll}
         >
-          {(role === 'presenter' ? presenterHistory : attendeeHistory).map(
-            (s: any, i) => (
+          {presenterHistory.map(
+            (s: any, i: number) => (
               <View
                 key={i}
                 style={[
@@ -677,6 +803,13 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           )}
         </ScrollView>
       </View>
+      )}
+
+      <InviteDetailSheet
+        invite={openInvite}
+        onClose={() => setOpenInviteId(null)}
+        onRespond={onRespondToInvite}
+      />
     </ScrollView>
   );
 };
@@ -968,6 +1101,61 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 0.8,
     marginBottom: 10,
+  },
+  inviteHistoryEmpty: {
+    borderRadius: 14,
+    borderWidth: 1.5,
+    padding: 16,
+    alignItems: 'center',
+  },
+  inviteHistoryEmptyText: {
+    fontSize: 12,
+    lineHeight: 18,
+    textAlign: 'center',
+  },
+  inviteHistoryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 8,
+  },
+  inviteHistoryIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  inviteHistoryBody: {
+    flex: 1,
+  },
+  inviteHistorySession: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  inviteHistoryMeta: {
+    fontSize: 11,
+    marginTop: 1,
+  },
+  inviteHistoryStatus: {
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+    marginTop: 4,
+  },
+  // Matches the display-name edit control on the Profile screen, so "tap the pencil to change
+  // this one thing" reads the same way in both places.
+  inviteHistoryEditButton: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   recentScroll: {
     gap: 10,

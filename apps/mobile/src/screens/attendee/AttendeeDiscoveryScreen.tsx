@@ -21,6 +21,9 @@ interface AttendeeDiscoveryScreenProps {
   ultrasonicState?: 'broadcasting' | 'listening' | 'verified' | 'idle';
   running: boolean;
   onJoinDetectedRoom: (room: string) => Promise<boolean>;
+  /** Stops scanning entirely. Resolves once the server has been told, so the caller can leave
+   *  the screen knowing nothing is still running in the background. */
+  onStopDetection: () => Promise<boolean>;
   onNavigate: (screen: MobileScreen) => void;
 }
 
@@ -32,6 +35,7 @@ export const AttendeeDiscoveryScreen: React.FC<AttendeeDiscoveryScreenProps> = (
   ultrasonicState = 'listening',
   running,
   onJoinDetectedRoom,
+  onStopDetection,
   onNavigate,
 }) => {
   const { colors, theme } = useTheme();
@@ -157,6 +161,21 @@ export const AttendeeDiscoveryScreen: React.FC<AttendeeDiscoveryScreenProps> = (
             </Text>
           </View>
         )}
+
+        {/* Only meaningful while something is actually running. Without this the only way out of
+            a fruitless scan was the back arrow, which left detection going in the background. */}
+        {running ? (
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={async () => {
+              await onStopDetection();
+              onNavigate('home');
+            }}
+            style={styles.stopButton}
+          >
+            <Text style={styles.stopButtonText}>Stop Detection</Text>
+          </TouchableOpacity>
+        ) : null}
       </ScrollView>
     </View>
   );
@@ -220,6 +239,20 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 16,
     marginBottom: 16,
+  },
+  stopButton: {
+    marginTop: 14,
+    paddingVertical: 14,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: palette.roseError,
+    backgroundColor: 'rgba(239,68,68,0.12)',
+    alignItems: 'center',
+  },
+  stopButtonText: {
+    color: palette.roseError,
+    fontSize: 14,
+    fontWeight: '800',
   },
   joinButton: {
     backgroundColor: palette.mintPresence,

@@ -1,4 +1,4 @@
-import { bigserial, boolean, pgTable, real, text, timestamp } from "drizzle-orm/pg-core";
+import { bigserial, boolean, pgTable, real, text, timestamp, unique } from "drizzle-orm/pg-core";
 
 // A grouping label for rooms, not a lifecycle entity. New rows use the human-typed label as
 // both `id` and `code`; rows from before rooms became the primary entity keep their old
@@ -84,6 +84,43 @@ export const pushInstallations = pgTable("push_installations", {
   platform: text("platform"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
 });
+
+// An admin's check-in invitation to one person for one session label, sent ahead of time — so it
+// is keyed by `sessionCode` (a label someone typed) rather than by rooms.id, which does not exist
+// yet when the invite goes out and may never exist if nobody starts the room.
+//
+// This is an RSVP, NOT attendance. Accepting means "I plan to be there"; whether someone was
+// actually in the room still comes only from room_membership, written by sensor-verified
+// presence. Nothing here should ever be read as a presence record.
+//
+// Keyed by email because the invite is addressed before we know whether that person has an
+// account: `userId` stays null until someone signed in with that address responds.
+export const sessionInvites = pgTable(
+  "session_invites",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    sessionCode: text("session_code").notNull(),
+    // Always stored lowercased and trimmed, so lookups never depend on how it was typed.
+    email: text("email").notNull(),
+    userId: text("user_id").references(() => users.id),
+    // "pending" | "accepted" | "declined" — pending is the absence of a response, not a response.
+    status: text("status").notNull().default("pending"),
+    invitedByUserId: text("invited_by_user_id").references(() => users.id),
+    title: text("title"),
+    message: text("message"),
+    // When the event itself is scheduled for. Nullable because it is optional on the invite, and
+    // because invites created before this column existed have no value for it. Purely
+    // informational: nothing schedules or expires off the back of it yet.
+    eventAt: timestamp("event_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    respondedAt: timestamp("responded_at", { withTimezone: true })
+  },
+  table => ({
+    // Re-inviting the same address to the same session updates that invite rather than stacking
+    // duplicates, which would make the admin's responded/not-responded counts meaningless.
+    sessionEmail: unique("session_invites_session_email").on(table.sessionCode, table.email)
+  })
+);
 
 export const roomMembership = pgTable("room_membership", {
   id: bigserial("id", { mode: "number" }).primaryKey(),

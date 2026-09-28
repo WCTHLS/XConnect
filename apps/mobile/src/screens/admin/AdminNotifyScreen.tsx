@@ -135,6 +135,22 @@ export const AdminNotifyScreen: React.FC<AdminNotifyScreenProps> = ({
       </View>
 
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        {/* Invites live on their own screen because they are a tracked exchange (sent, answered,
+            ignored), not the fire-and-forget message this screen sends. */}
+        <TouchableOpacity
+          activeOpacity={0.8}
+          onPress={() => onNavigate('adminCheckIn')}
+          style={[styles.checkInLink, { backgroundColor: colors.card, borderColor: palette.mintPresence }]}
+        >
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.checkInTitle, { color: colors.txt }]}>Check-in invites</Text>
+            <Text style={[styles.checkInSub, { color: colors.muted }]}>
+              Ask attendees to confirm ahead of time, and see who replied
+            </Text>
+          </View>
+          <Text style={{ color: palette.mintPresence, fontSize: 13, fontWeight: '800' }}>→</Text>
+        </TouchableOpacity>
+
         <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <Text style={[styles.label, { color: colors.sub }]}>SELECT RECIPIENTS</Text>
           <TouchableOpacity
@@ -333,6 +349,24 @@ const styles = StyleSheet.create({
     padding: 16,
     borderRadius: 16,
     borderWidth: 1.5,
+  },
+  checkInLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    padding: 16,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    marginBottom: 12,
+  },
+  checkInTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  checkInSub: {
+    fontSize: 11,
+    lineHeight: 16,
+    marginTop: 2,
   },
   label: {
     fontSize: 10,

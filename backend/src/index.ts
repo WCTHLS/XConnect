@@ -1,5 +1,5 @@
 import cors from "cors";
-import { desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import express from "express";
 import { z } from "zod";
 import { authEnabled, authenticate, forgetCachedUser, requireAdmin } from "./auth.js";
@@ -173,6 +173,325 @@ app.get("/api/admin/users", async (_request, response) => {
     name: u.preferredName || u.displayName || (u.email as string)
   }));
   return response.json({ users });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Check-in invitations
+//
+// An invite is an RSVP to a session label, sent before any room exists. It never records
+// attendance: accepting only means "I plan to be there". Whether someone was actually present
+// still comes exclusively from room_membership, written by sensor-verified presence.
+// ---------------------------------------------------------------------------------------------
+
+const normalizeEmail = (email: string) => email.trim().toLowerCase();
+
+/** Admin-only: invite a list of addresses to a session, and push a prompt to whoever has the app. */
+app.post("/api/admin/invites", async (request, response) => {
+  if (!db) return response.status(503).json({ error: "Invites require Postgres persistence (DATABASE_URL not set)" });
+
+  const parsed = z
+    .object({
+      sessionId: z.string().min(1),
+      emails: z.array(z.string().email()).min(1),
+      title: z.string().min(1).optional(),
+      message: z.string().min(1).optional(),
+      // ISO 8601 instant for when the event is scheduled. Validated by actually parsing it
+      // rather than by pattern, so "2026-02-30T10:00:00Z" is rejected rather than silently
+      // becoming March 2nd the way `new Date` would roll it over.
+      eventAt: z
+        .string()
+        .refine((v) => !Number.isNaN(Date.parse(v)), { message: "eventAt must be a valid ISO date-time" })
+        .optional()
+        .nullable()
+    })
+    .safeParse(request.body);
+  if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
+
+  const sessionCode = parsed.data.sessionId.trim();
+  const eventAt = parsed.data.eventAt ? new Date(parsed.data.eventAt) : null;
+  const title = parsed.data.title?.trim() || "Check-in request";
+  const message = parsed.data.message?.trim() || `You've been invited to check in to ${sessionCode}.`;
+  // Dedupe case-insensitively: the same address picked from the list and typed by hand is one
+  // invite, and two rows differing only by case would both violate the unique constraint anyway.
+  const emails = [...new Set(parsed.data.emails.map(normalizeEmail))];
+
+  const now = new Date();
+  for (const email of emails) {
+    await db
+      .insert(schema.sessionInvites)
+      .values({
+        sessionCode,
+        email,
+        status: "pending",
+        invitedByUserId: request.user?.id,
+        title,
+        message,
+        eventAt,
+        createdAt: now
+      })
+      // Re-inviting resets the invite to pending and clears the old answer, which is what
+      // "ask them again" means. The alternative (keeping a stale decline) would make a re-invite
+      // silently do nothing visible.
+      .onConflictDoUpdate({
+        target: [schema.sessionInvites.sessionCode, schema.sessionInvites.email],
+        set: { status: "pending", respondedAt: null, title, message, eventAt, createdAt: now, invitedByUserId: request.user?.id }
+      });
+  }
+
+  // Link any invite to an existing account up front, so the admin roster can show a real name
+  // before the person has responded (or even opened the app).
+  const knownUsers = await db
+    .select({ id: schema.users.id, email: schema.users.email })
+    .from(schema.users)
+    .where(isNotNull(schema.users.email));
+  for (const user of knownUsers) {
+    const email = normalizeEmail(user.email as string);
+    if (!emails.includes(email)) continue;
+    await db
+      .update(schema.sessionInvites)
+      .set({ userId: user.id })
+      .where(and(eq(schema.sessionInvites.sessionCode, sessionCode), eq(schema.sessionInvites.email, email)));
+  }
+
+  // The push is a best-effort nudge, not the invite itself — the invite is the row above, and the
+  // app also polls for it. A push failure (or push not being configured at all) must not lose the
+  // invite, so it is reported back rather than thrown.
+  let pushResult: { matchedEmails: string[]; unmatchedEmails: string[] } | null = null;
+  let pushError: string | null = null;
+  if (pushEnabled) {
+    try {
+      pushResult = await sendToEmails(emails, title, message);
+    } catch (err: any) {
+      pushError = err?.message || "Push send failed";
+    }
+  } else {
+    pushError = "Push notifications are not configured on this server";
+  }
+
+  console.log(`✉️  [INVITE] ${emails.length} invite(s) to '${sessionCode}' by ${request.user?.email || "unknown"}${pushError ? ` (push: ${pushError})` : ""}`);
+
+  return response.json({
+    ok: true,
+    invited: emails.length,
+    pushed: pushResult?.matchedEmails ?? [],
+    notReachableByPush: pushResult?.unmatchedEmails ?? emails,
+    pushError
+  });
+});
+
+/** Admin-only: the response roster for a session — who accepted, declined, or hasn't answered. */
+app.get("/api/admin/invites", async (request, response) => {
+  if (!db) return response.status(503).json({ error: "Invites require Postgres persistence (DATABASE_URL not set)" });
+
+  const sessionCode = String(request.query.sessionId ?? "").trim();
+
+  const rows = await db
+    .select({
+      id: schema.sessionInvites.id,
+      sessionCode: schema.sessionInvites.sessionCode,
+      email: schema.sessionInvites.email,
+      status: schema.sessionInvites.status,
+      eventAt: schema.sessionInvites.eventAt,
+      title: schema.sessionInvites.title,
+      message: schema.sessionInvites.message,
+      createdAt: schema.sessionInvites.createdAt,
+      respondedAt: schema.sessionInvites.respondedAt,
+      userName: schema.users.displayName,
+      preferredName: schema.users.preferredName
+    })
+    .from(schema.sessionInvites)
+    .leftJoin(schema.users, eq(schema.users.id, schema.sessionInvites.userId))
+    .where(sessionCode ? eq(schema.sessionInvites.sessionCode, sessionCode) : undefined)
+    .orderBy(desc(schema.sessionInvites.createdAt));
+
+  const invites = rows.map((r) => ({
+    id: r.id,
+    sessionId: r.sessionCode,
+    email: r.email,
+    // Falls back to the address when the invite hasn't been matched to an account yet.
+    displayName: r.preferredName || r.userName || r.email,
+    status: r.status as "pending" | "accepted" | "declined",
+    eventAt: r.eventAt,
+    title: r.title,
+    message: r.message,
+    createdAt: r.createdAt,
+    respondedAt: r.respondedAt
+  }));
+
+  return response.json({
+    invites,
+    counts: {
+      total: invites.length,
+      accepted: invites.filter((i) => i.status === "accepted").length,
+      declined: invites.filter((i) => i.status === "declined").length,
+      pending: invites.filter((i) => i.status === "pending").length
+    }
+  });
+});
+
+/**
+ * Admin-only: edit a whole batch of already-sent invites, identified by its session code.
+ *
+ * The batch is the unit, not the individual invite: everyone invited to a session shares its
+ * schedule and wording, so editing one person's copy would silently desync the group.
+ *
+ * `reAsk` is the admin's explicit choice. Without it, edits only correct the details and every
+ * existing reply stands, which is what a typo fix should do. With it, replies are cleared and
+ * everyone is asked again, which is what a moved start time usually warrants.
+ */
+app.patch("/api/admin/invites", async (request, response) => {
+  if (!db) return response.status(503).json({ error: "Invites require Postgres persistence (DATABASE_URL not set)" });
+
+  const parsed = z
+    .object({
+      sessionId: z.string().min(1),
+      newSessionId: z.string().min(1).optional(),
+      title: z.string().min(1).optional(),
+      message: z.string().min(1).optional(),
+      eventAt: z
+        .string()
+        .refine((v) => !Number.isNaN(Date.parse(v)), { message: "eventAt must be a valid ISO date-time" })
+        .optional()
+        .nullable(),
+      reAsk: z.boolean().optional()
+    })
+    .safeParse(request.body);
+  if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
+
+  const from = parsed.data.sessionId.trim();
+  const to = (parsed.data.newSessionId ?? parsed.data.sessionId).trim();
+  const reAsk = parsed.data.reAsk === true;
+
+  const batch = await db
+    .select({ email: schema.sessionInvites.email })
+    .from(schema.sessionInvites)
+    .where(eq(schema.sessionInvites.sessionCode, from));
+  if (batch.length === 0) return response.status(404).json({ error: `No invites found for "${from}"` });
+
+  // Renaming the session moves every row onto a new (session_code, email) key. If the target
+  // code already has an invite for one of these people, the unique constraint would reject the
+  // whole update — so say which addresses clash rather than surfacing a raw database error.
+  if (to !== from) {
+    const emails = batch.map((b) => b.email);
+    const clashes = await db
+      .select({ email: schema.sessionInvites.email })
+      .from(schema.sessionInvites)
+      .where(and(eq(schema.sessionInvites.sessionCode, to), inArray(schema.sessionInvites.email, emails)));
+    if (clashes.length > 0) {
+      return response.status(409).json({
+        error: `"${to}" already has invites for: ${clashes.map((c) => c.email).join(", ")}`
+      });
+    }
+  }
+
+  const changes: Record<string, unknown> = {};
+  if (parsed.data.title !== undefined) changes.title = parsed.data.title.trim();
+  if (parsed.data.message !== undefined) changes.message = parsed.data.message.trim();
+  // `undefined` means "not supplied, leave it"; an explicit null means "clear the schedule".
+  if (parsed.data.eventAt !== undefined) changes.eventAt = parsed.data.eventAt ? new Date(parsed.data.eventAt) : null;
+  if (to !== from) changes.sessionCode = to;
+  if (reAsk) {
+    changes.status = "pending";
+    changes.respondedAt = null;
+  }
+  if (Object.keys(changes).length === 0) return response.json({ ok: true, updated: 0, sessionId: to, pushError: null });
+
+  const result = await db
+    .update(schema.sessionInvites)
+    .set(changes)
+    .where(eq(schema.sessionInvites.sessionCode, from));
+
+  // Only notify when replies were actually cleared — an edit that left answers alone doesn't
+  // need to buzz everyone's phone.
+  let pushError: string | null = null;
+  if (reAsk) {
+    const title = (changes.title as string | undefined) ?? "Check-in request updated";
+    const message = (changes.message as string | undefined) ?? `The details for ${to} changed. Please reply again.`;
+    if (pushEnabled) {
+      try {
+        await sendToEmails(batch.map((b) => b.email), title, message);
+      } catch (err: any) {
+        pushError = err?.message || "Push send failed";
+      }
+    } else {
+      pushError = "Push notifications are not configured on this server";
+    }
+  }
+
+  console.log(`✏️  [INVITE] '${from}'${to !== from ? ` renamed to '${to}'` : ""} edited by ${request.user?.email || "unknown"}${reAsk ? " (replies cleared, re-asked)" : ""}`);
+
+  return response.json({ ok: true, updated: result.count, sessionId: to, pushError });
+});
+
+/**
+ * The signed-in person's own invites, matched on their account's email address. Returns answered
+ * ones as well as outstanding ones: the app shows pending invites as action cards and the rest as
+ * a history of what they replied, so filtering to pending here would leave that history empty.
+ */
+app.get("/api/me/invites", async (request, response) => {
+  if (!request.user) return response.status(401).json({ error: "unauthenticated" });
+  if (!db) return response.json({ invites: [] });
+  if (!request.user.email) return response.json({ invites: [] });
+
+  const rows = await db
+    .select({
+      id: schema.sessionInvites.id,
+      sessionCode: schema.sessionInvites.sessionCode,
+      status: schema.sessionInvites.status,
+      title: schema.sessionInvites.title,
+      message: schema.sessionInvites.message,
+      eventAt: schema.sessionInvites.eventAt,
+      createdAt: schema.sessionInvites.createdAt,
+      respondedAt: schema.sessionInvites.respondedAt
+    })
+    .from(schema.sessionInvites)
+    .where(eq(schema.sessionInvites.email, normalizeEmail(request.user.email)))
+    .orderBy(desc(schema.sessionInvites.createdAt));
+
+  return response.json({
+    invites: rows.map((r) => ({
+      id: r.id,
+      sessionId: r.sessionCode,
+      title: r.title,
+      message: r.message,
+      status: r.status as "pending" | "accepted" | "declined",
+      eventAt: r.eventAt,
+      createdAt: r.createdAt,
+      respondedAt: r.respondedAt
+    }))
+  });
+});
+
+/** Accept or decline one of your own invites. */
+app.post("/api/me/invites/respond", async (request, response) => {
+  if (!request.user) return response.status(401).json({ error: "unauthenticated" });
+  if (!db) return response.status(503).json({ error: "Invites require Postgres persistence (DATABASE_URL not set)" });
+  if (!request.user.email) return response.status(400).json({ error: "This account has no email address to match an invite against" });
+
+  const parsed = z
+    .object({ inviteId: z.number().int().positive(), response: z.enum(["accepted", "declined"]) })
+    .safeParse(request.body);
+  if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
+
+  // Scoped by the caller's own email as well as the id, so an invite id can't be used to answer
+  // on someone else's behalf.
+  const result = await db
+    .update(schema.sessionInvites)
+    .set({ status: parsed.data.response, respondedAt: new Date(), userId: request.user.id })
+    .where(
+      and(
+        eq(schema.sessionInvites.id, parsed.data.inviteId),
+        eq(schema.sessionInvites.email, normalizeEmail(request.user.email))
+      )
+    );
+
+  const responded = result.count > 0;
+  console.log(responded
+    ? `📬 [INVITE] ${request.user.email} ${parsed.data.response} invite ${parsed.data.inviteId}`
+    : `⚠️  [INVITE] ${request.user.email} tried to answer invite ${parsed.data.inviteId}, which isn't theirs`);
+
+  if (!responded) return response.status(404).json({ error: "No invite found for this account" });
+  return response.json({ ok: true, status: parsed.data.response });
 });
 
 app.post("/api/session/join", (request, response) => {

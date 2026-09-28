@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import {
   View,
   Text,
@@ -22,7 +22,12 @@ interface AttendeeConfirmedScreenProps {
   wifiSimilarity?: number;
   wifiApCount?: number;
   ultrasonicVerified?: boolean;
-  sessionStartTime?: number;
+  /**
+   * How long the SERVER has counted this device as being in the room, in milliseconds. Comes
+   * from the same member record the presenter roster and the database are built from, so all
+   * three now agree. Undefined until the first poll lands.
+   */
+  dwellMs?: number;
   onLeaveRoom: () => void;
   onNavigate: (screen: MobileScreen) => void;
 }
@@ -35,33 +40,23 @@ export const AttendeeConfirmedScreen: React.FC<AttendeeConfirmedScreenProps> = (
   wifiSimilarity,
   wifiApCount,
   ultrasonicVerified = true,
-  sessionStartTime,
+  dwellMs,
   onLeaveRoom,
   onNavigate,
 }) => {
   const { colors } = useTheme();
-  const [seconds, setSeconds] = useState(() =>
-    sessionStartTime ? Math.max(0, Math.floor((Date.now() - sessionStartTime) / 1000)) : 0
-  );
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (sessionStartTime) {
-        setSeconds(Math.max(0, Math.floor((Date.now() - sessionStartTime) / 1000)));
-      } else {
-        setSeconds(prev => prev + 1);
-      }
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [sessionStartTime]);
-
-  const formatDwellTime = (totalSec: number) => {
-    const hrs = Math.floor(totalSec / 3600);
-    const mins = Math.floor((totalSec % 3600) / 60);
-    const secs = totalSec % 60;
-    return `${hrs.toString().padStart(2, '0')}:${mins
-      .toString()
-      .padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  // Whole minutes, not a ticking clock. The figure is refreshed by the 3s poll, so a running
+  // seconds display would either lag the server or have to be extrapolated locally — and the
+  // local extrapolation is exactly the drift that made this number disagree with the presenter's.
+  // Rounded down, so it never claims more time than the server has recorded.
+  const formatDwell = (ms?: number) => {
+    if (ms === undefined) return '--';
+    const totalMinutes = Math.floor(ms / 60000);
+    if (totalMinutes < 1) return 'Under a minute';
+    const hrs = Math.floor(totalMinutes / 60);
+    const mins = totalMinutes % 60;
+    if (hrs > 0) return `${hrs}h ${mins}m`;
+    return `${mins} min`;
   };
 
   const handleLeave = () => {
@@ -98,10 +93,10 @@ export const AttendeeConfirmedScreen: React.FC<AttendeeConfirmedScreenProps> = (
 
           <View style={styles.dwellWrapper}>
             <Text style={[styles.dwellTimer, { color: colors.txt }]}>
-              {formatDwellTime(seconds)}
+              {formatDwell(dwellMs)}
             </Text>
             <Text style={[styles.dwellLabel, { color: colors.muted }]}>
-              CONTINUOUS IN-ROOM DWELL TIME
+              TIME IN ROOM
             </Text>
           </View>
 
@@ -158,20 +153,6 @@ export const AttendeeConfirmedScreen: React.FC<AttendeeConfirmedScreenProps> = (
             </Text>
           </View>
         </View>
-
-        {/* Simulation Test Button */}
-        <TouchableOpacity
-          activeOpacity={0.7}
-          onPress={() => onNavigate('attendeeOutOfRange')}
-          style={[
-            styles.testButton,
-            { backgroundColor: colors.card, borderColor: colors.border },
-          ]}
-        >
-          <Text style={[styles.testButtonText, { color: colors.sub }]}>
-            Test "Step Out of Room" Grace Period →
-          </Text>
-        </TouchableOpacity>
 
         {/* Leave Room Button */}
         <TouchableOpacity
@@ -246,17 +227,6 @@ const styles = StyleSheet.create({
   },
   detailValue: {
     fontSize: 13,
-    fontWeight: '600',
-  },
-  testButton: {
-    paddingVertical: 12,
-    borderRadius: 12,
-    borderWidth: 1,
-    alignItems: 'center',
-    marginBottom: 14,
-  },
-  testButtonText: {
-    fontSize: 12,
     fontWeight: '600',
   },
   leaveButton: {

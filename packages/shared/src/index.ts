@@ -67,6 +67,46 @@ export interface RoomMemberInfo {
   durationMs?: number;
 }
 
+/**
+ * An admin's check-in invitation to one person for one session label.
+ *
+ * This is an RSVP, never an attendance record. "accepted" means someone said they plan to be
+ * there; whether they actually were still comes only from sensor-verified room membership.
+ */
+export type InviteStatus = "pending" | "accepted" | "declined";
+
+/** One row of the admin's response roster. */
+export interface SessionInvite {
+  id: number;
+  sessionId: string;
+  email: string;
+  /** The person's account name, falling back to their email when they have never signed in. */
+  displayName: string;
+  status: InviteStatus;
+  /** When the event is scheduled for, if the admin set one. Informational only. */
+  eventAt: string | null;
+  /** Shared by every invite in the same session batch; returned so the admin edit form can
+   *  prefill without a second request. */
+  title?: string | null;
+  message?: string | null;
+  createdAt: string;
+  respondedAt: string | null;
+}
+
+/** An invitation as the invited person sees it. Pending ones are shown as a prompt to answer;
+ *  answered ones become their reply history. */
+export interface MyInvite {
+  id: number;
+  sessionId: string;
+  title?: string | null;
+  message?: string | null;
+  status: InviteStatus;
+  /** When the event is scheduled for, if the admin set one. */
+  eventAt: string | null;
+  createdAt: string;
+  respondedAt: string | null;
+}
+
 export interface LiveRoomState {
   sessionId: string;
   roomId: string;

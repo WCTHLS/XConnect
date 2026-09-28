@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import {
   View,
   Text,
@@ -13,33 +13,27 @@ import { TopBar } from '../../components/ui/TopBar';
 import { MobileScreen } from '../../components/navigation/BottomNav';
 
 interface AttendeeOutOfRangeScreenProps {
+  /** The room actually detected by the server, not a locally-selected one. */
   roomId: string;
-  onRejoin: () => void;
   onLeave: () => void;
   onNavigate: (screen: MobileScreen) => void;
 }
 
+/**
+ * Shown while the server has stopped seeing this device in the room it was checked into.
+ *
+ * There is deliberately no "rejoin" action. Getting back in is physical: walk into the room, and
+ * the 3s live poll notices the membership again and returns to the confirmed screen on its own.
+ * The button that used to sit here called togglePresence(true), which (since attendees no longer
+ * assert a room) started a blank scan — and, because start() tears down any running session
+ * first, told the server this device had LEFT the room it was offering to restore.
+ */
 export const AttendeeOutOfRangeScreen: React.FC<AttendeeOutOfRangeScreenProps> = ({
   roomId,
-  onRejoin,
   onLeave,
   onNavigate,
 }) => {
   const { colors } = useTheme();
-  const [countdown, setCountdown] = useState(30);
-
-  useEffect(() => {
-    if (countdown <= 0) return;
-    const timer = setInterval(() => {
-      setCountdown(prev => prev - 1);
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [countdown]);
-
-  const handleRejoin = () => {
-    onRejoin();
-    onNavigate('attendeeConfirmed');
-  };
 
   const handleLeave = () => {
     onLeave();
@@ -94,34 +88,24 @@ export const AttendeeOutOfRangeScreen: React.FC<AttendeeOutOfRangeScreenProps> =
           </Text>
         </View>
 
-        {/* Countdown Card */}
+        {/* What actually happens next. Previously a local 30s countdown that was not connected
+            to the server's real grace window and just ran to zero on screen. */}
         <View
           style={[
             styles.countdownCard,
             { backgroundColor: colors.card, borderColor: colors.border },
           ]}
         >
-          <Text style={[styles.countdownLabel, { color: colors.muted }]}>
-            GRACE PERIOD REMAINING
-          </Text>
-          <Text style={[styles.countdownValue, { color: palette.amberWarn }]}>
-            {countdown}s
-          </Text>
-          <Text style={[styles.countdownSub, { color: colors.muted }]}>
-            Session will auto-disconnect if signal is not restored.
+          <Text style={[styles.countdownLabel, { color: colors.muted }]}>WHAT HAPPENS NOW</Text>
+          <Text style={[styles.countdownSub, { color: colors.sub }]}>
+            Walk back into {roomId.toUpperCase()} and you will be checked back in automatically,
+            with your time in the room carrying on. Stay away and your attendance is closed out
+            at the point the signal was lost.
           </Text>
         </View>
 
         {/* Actions */}
         <View style={styles.actions}>
-          <TouchableOpacity
-            activeOpacity={0.8}
-            onPress={handleRejoin}
-            style={styles.rejoinButton}
-          >
-            <Text style={styles.rejoinButtonText}>Restore & Rejoin Room</Text>
-          </TouchableOpacity>
-
           <TouchableOpacity
             activeOpacity={0.8}
             onPress={handleLeave}
@@ -183,33 +167,12 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     marginBottom: 8,
   },
-  countdownValue: {
-    fontSize: 54,
-    fontWeight: '900',
-    letterSpacing: -2,
-    marginBottom: 4,
-  },
   countdownSub: {
     fontSize: 12,
+    lineHeight: 18,
   },
   actions: {
     gap: 12,
-  },
-  rejoinButton: {
-    backgroundColor: palette.mintPresence,
-    paddingVertical: 15,
-    borderRadius: 14,
-    alignItems: 'center',
-    shadowColor: palette.mintPresence,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 3,
-  },
-  rejoinButtonText: {
-    color: '#060B12',
-    fontSize: 15,
-    fontWeight: '800',
   },
   leaveButton: {
     paddingVertical: 14,

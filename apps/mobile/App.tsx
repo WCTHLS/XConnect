@@ -9,7 +9,7 @@ import {
 import { registerRootComponent } from 'expo';
 import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
 import * as SecureStore from 'expo-secure-store';
-import type { ParticipantRole, RoomMemberInfo, LiveRoomState } from '@confpresence/shared';
+import type { ParticipantRole, RoomMemberInfo, LiveRoomState, MyInvite } from '@confpresence/shared';
 import { getAcousticTokenForRoom } from '@confpresence/shared';
 import { PresenceService, RoomRejectedError, type PresenceStatus } from './src/services/presenceService';
 import { getOrCreateDeviceId } from './src/services/deviceIdentity';
@@ -20,6 +20,7 @@ import { ThemeProvider, useTheme } from './src/theme/useTheme';
 import { BottomNav, MobileScreen, Role } from './src/components/navigation/BottomNav';
 import { DevScreenSwitcher } from './src/components/navigation/DevScreenSwitcher';
 import { AppAlert, AppAlertHost } from './src/components/ui/AppAlert';
+import { BusyOverlay } from './src/components/ui/BusyOverlay';
 
 // Screens
 import { LaunchScreen } from './src/screens/auth/LaunchScreen';
@@ -41,6 +42,7 @@ import { AdminOverviewScreen } from './src/screens/admin/AdminOverviewScreen';
 import { AdminRoomDetailScreen } from './src/screens/admin/AdminRoomDetailScreen';
 import { AdminHistoryScreen } from './src/screens/admin/AdminHistoryScreen';
 import { AdminNotifyScreen } from './src/screens/admin/AdminNotifyScreen';
+import { AdminCheckInScreen, type InviteRoster, type InviteSendResult } from './src/screens/admin/AdminCheckInScreen';
 import { DiagnosticsScreen } from './src/screens/admin/DiagnosticsScreen';
 import { EdgeStateScreen } from './src/screens/admin/EdgeStateScreen';
 
@@ -83,6 +85,7 @@ const NAV_SCREENS: MobileScreen[] = [
   'adminRoomDetail',
   'adminHistory',
   'adminNotify',
+  'adminCheckIn',
   'diagnostics',
   'edgeState',
 ];
@@ -103,6 +106,8 @@ function MainApp() {
   // Server-truth check for "do I already have a room open anywhere" — drives the presenter
   // Home screen's Rejoin/End card instead of the old local-device rejoin snapshot.
   const [myActiveRooms, setMyActiveRooms] = useState<LiveRoomState[]>([]);
+  // Check-in invites addressed to this account that haven't been answered yet.
+  const [myInvites, setMyInvites] = useState<MyInvite[]>([]);
   // What's actually running right now, independent of the currently-selected role tab — see the
   // comment in togglePresence for why this needs to be tracked separately from `role`.
   const [activePresence, setActivePresence] = useState<{
@@ -123,6 +128,16 @@ function MainApp() {
   // ('resumed' isn't tracked separately — a successful check calls togglePresence, which flips
   // activePresence.role to 'attendee' and the normal confirmed screen takes over from there.)
   const [attendeeCheckState, setAttendeeCheckState] = useState<'checking' | 'empty'>('checking');
+  // True only while a stop is in flight. service.stop() now awaits the leave request, so this is
+  // a real wait the user would otherwise see as an unresponsive tap.
+  const [stopping, setStopping] = useState(false);
+
+  // Mirrors of state that the 3s polling callback needs to read. They are refs, not dependencies,
+  // because putting `screen` or `activePresence` in fetchLiveRoom's dep array would rebuild the
+  // callback (and tear down and restart the interval) on every navigation and every presence
+  // change — turning a steady 3s poll into a burst of requests.
+  const screenRef = useRef<MobileScreen>('launch');
+  const activePresenceRef = useRef<typeof activePresence>(null);
 
   // Backend & Session State
   const [sessionId, setSessionId] = useState(DEFAULT_SESSION);
@@ -159,8 +174,15 @@ function MainApp() {
   const savedNameRef = useRef('');
 
   const nav = useCallback((s: MobileScreen) => {
+    // Kept in step here rather than in an effect, so a poll firing in the same tick as a
+    // navigation reads where we are going, not where we were.
+    screenRef.current = s;
     setScreen(s);
   }, []);
+
+  useEffect(() => {
+    activePresenceRef.current = activePresence;
+  }, [activePresence]);
 
   const roomRejectedRef = useRef<(message: string) => void>(() => {});
   const service = useMemo(
@@ -308,6 +330,17 @@ function MainApp() {
   // "start broadcasting" (e.g. PresenterSetupScreen) can wait for that before moving to the
   // dashboard, instead of navigating optimistically and ending up there even when the server
   // rejected the join (room already has a presenter) and never actually started anything.
+  /**
+   * Set whenever presence stops for a reason the user caused or saw (tapping Leave, ending a
+   * room, being told the room ended). The attendee resume check below must not fire after one of
+   * those: stopping flips `running`, which re-runs that effect, and it would ask the server "am I
+   * still live?" while the leave request it races is still in flight — getting "yes" and putting
+   * the person straight back into the room they just left. Cleared on the next deliberate start.
+   * A ref, not state, so it never triggers a render, and it resets on reload, which is correct:
+   * a fresh launch inside the grace window SHOULD still resume.
+   */
+  const stoppedDeliberatelyRef = useRef(false);
+
   const togglePresence = async (overrideRunning?: boolean, explicitSnapshot?: ActiveSessionSnapshot): Promise<boolean> => {
     const targetRunning = overrideRunning ?? !runningRef.current;
     if (targetRunning) {
@@ -344,6 +377,8 @@ function MainApp() {
 
         runningRef.current = true;
         setRunning(true);
+        // A deliberate start re-arms the resume check for the next stop.
+        stoppedDeliberatelyRef.current = false;
         // Snapshot of what's ACTUALLY running, independent of whatever role tab you switch to
         // afterward — switching the tab only changes `role`, it doesn't stop this session, so
         // Home needs a way to know "you're still presenting/attending" no matter which tab it's
@@ -371,13 +406,19 @@ function MainApp() {
       runningRef.current = false;
       setRunning(false);
       setActivePresence(null);
-      // Clear optimistically: service.stop() fires the leave request WITHOUT awaiting it, while
-      // setRunning(false) immediately un-gates the myActiveRooms poll, whose first request goes
-      // out straight away. That poll can beat the leave to the server and get the still-live room
-      // back, briefly offering "Rejoin as Host" for the room just ended. The next poll re-populates
-      // this if some other room genuinely is still open.
+      stoppedDeliberatelyRef.current = true;
+      // Cleared here as well as by the poll: setRunning(false) un-gates the myActiveRooms poll
+      // immediately, so without this the list shows the just-ended room until the next poll
+      // returns. service.stop() now awaits the leave, so this is presentation, not a race fix.
       setMyActiveRooms([]);
-      await service.stop();
+      setStopping(true);
+      try {
+        // Awaited all the way to the server's acknowledgement (or a 4s timeout), so by the time
+        // this resolves nothing can observe this device as still being in the room.
+        await service.stop();
+      } finally {
+        setStopping(false);
+      }
       return true;
     }
   };
@@ -444,6 +485,20 @@ function MainApp() {
         }
 
         setRoomMembers(fetchedMembers);
+
+        // Range tracking for a confirmed attendee. The server is the judge: it already holds a
+        // membership open for ROOM_MEMBERSHIP_GRACE_MS after a device stops reporting, so a
+        // momentary BLE dropout does not reach this code. Dropping out of `members` therefore
+        // means genuinely out of range, not a flicker, and no extra debounce is needed here.
+        if (activePresenceRef.current?.role === 'attendee' && activePresenceRef.current.confirmed) {
+          const stillInRoom = fetchedMembers.some(m => m.deviceId === effDeviceId);
+          if (!stillInRoom && screenRef.current === 'attendeeConfirmed') {
+            nav('attendeeOutOfRange');
+          } else if (stillInRoom && screenRef.current === 'attendeeOutOfRange') {
+            // Walked back in — return them without making them tap anything.
+            nav('attendeeConfirmed');
+          }
+        }
       } else {
         setServerConnected(false);
         setServerHealth('offline');
@@ -488,32 +543,12 @@ function MainApp() {
     return () => clearInterval(interval);
   }, [running, role, roomId, sessionId, fetchLiveRoom, deviceId, displayName]);
 
-  // Attendee Live Session Discovery on Home
-  useEffect(() => {
-    if (role !== 'attendee' || running) return;
-    let cancelled = false;
-    const fetchActiveSessions = async () => {
-      try {
-        const res = await authFetch(`${serverUrl}/api/sessions/active`);
-        if (cancelled || !res.ok) return;
-        const data = await res.json().catch(() => null);
-        if (!cancelled && Array.isArray(data?.sessions) && data.sessions.length > 0) {
-          const activeRoom = data.sessions[0].roomId;
-          if (activeRoom && activeRoom !== roomId) {
-            setRoomId(activeRoom);
-          }
-        }
-      } catch {
-        // Ignore transient errors
-      }
-    };
-    void fetchActiveSessions();
-    const interval = setInterval(fetchActiveSessions, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [role, running, serverUrl, roomId]);
+  // Deliberately no attendee-side room/session discovery poll here. An attendee never asserts a
+  // room: detection is session-unscoped server-side, matching on BLE and ultrasonic proximity and
+  // returning the room along with its OWN session label. A poll that wrote `roomId` (as the old
+  // "Live Session Discovery" one did, from /api/sessions/active) picked an arbitrary first room
+  // globally and silently overwrote the shared room selection, which is exactly the
+  // attendee-asserts-a-stale-value shape that produced the ghost-attendee bug.
 
   // Admin Live Overview Polling — every active room across every session, refreshed on the same
   // 5s cadence the old single-screen admin view used. Runs whenever the admin role is selected,
@@ -599,6 +634,12 @@ function MainApp() {
   // poll: once the window has lapsed nothing will change again without the user re-detecting.
   useEffect(() => {
     if (role !== 'attendee' || running || activePresence?.role === 'attendee') return;
+    // Just left (or the room ended): settle straight on "not present" instead of asking the
+    // server, whose answer would still be racing the leave request.
+    if (stoppedDeliberatelyRef.current) {
+      setAttendeeCheckState('empty');
+      return;
+    }
     let cancelled = false;
     setAttendeeCheckState('checking');
     (async () => {
@@ -636,6 +677,69 @@ function MainApp() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [role, running, serverUrl, sessionId]);
+
+  // Outstanding check-in invites for this account. Polled slowly (30s) rather than on the 5s
+  // cadence the live screens use: an invite is sent minutes or hours ahead, so it has none of the
+  // urgency of presence data, and the push notification is what makes it feel immediate. The
+  // poll exists so an invite still arrives for someone whose device was never registered for
+  // push, or who had notifications turned off.
+  useEffect(() => {
+    if (!signedIn) {
+      setMyInvites([]);
+      return;
+    }
+    let cancelled = false;
+    const fetchInvites = async () => {
+      try {
+        const res = await authFetch(`${serverUrl}/api/me/invites`);
+        if (cancelled || !res.ok) return;
+        const data = await res.json().catch(() => null);
+        if (cancelled) return;
+        setMyInvites(Array.isArray(data?.invites) ? data.invites : []);
+      } catch {
+        // Offline or unreachable: keep whatever we last had rather than clearing the card.
+      }
+    };
+    void fetchInvites();
+    const interval = setInterval(fetchInvites, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [signedIn, serverUrl]);
+
+  /** Returns whether the reply actually saved, so callers don't dismiss their UI on a failure —
+   *  the same reason togglePresence returns a boolean rather than firing and forgetting. */
+  const handleRespondToInvite = useCallback(
+    async (inviteId: number, response: 'accepted' | 'declined'): Promise<boolean> => {
+      let res: Response;
+      try {
+        res = await authFetch(`${serverUrl}/api/me/invites/respond`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ inviteId, response }),
+        });
+      } catch (err: any) {
+        AppAlert.alert('Could not send your reply', err?.message || 'Could not reach the server.');
+        return false;
+      }
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        AppAlert.alert('Could not send your reply', data?.error ? String(data.error) : 'Please try again.');
+        return false;
+      }
+      // Update in place rather than dropping it: an answered invite stops being a prompt and
+      // becomes part of the reply history on Home, so it has to stay in the list. Applied
+      // locally so the change is instant instead of waiting up to 30s for the next poll.
+      setMyInvites(prev =>
+        prev.map(i =>
+          i.id === inviteId ? { ...i, status: response, respondedAt: new Date().toISOString() } : i
+        )
+      );
+      return true;
+    },
+    [serverUrl]
+  );
 
   // The launch animation runs on its own fixed timer (or can be skipped early by a tap),
   // completely independent of how long SecureStore/auth-session restoration actually takes to
@@ -771,6 +875,72 @@ function MainApp() {
     [serverUrl]
   );
 
+  const handleSendInvites = useCallback(
+    async (
+      inviteSessionId: string,
+      emails: string[],
+      title: string,
+      message: string,
+      eventAt: string | null
+    ): Promise<InviteSendResult> => {
+      const res = await authFetch(`${serverUrl}/api/admin/invites`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: inviteSessionId, emails, title, message, eventAt }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(describeAdminError(res.status, data));
+      return {
+        invited: data.invited ?? 0,
+        pushed: data.pushed ?? [],
+        notReachableByPush: data.notReachableByPush ?? [],
+        pushError: data.pushError ?? null,
+      };
+    },
+    [serverUrl]
+  );
+
+  const handleEditInvites = useCallback(
+    async (edit: {
+      sessionId: string;
+      newSessionId?: string;
+      title?: string;
+      message?: string;
+      eventAt?: string | null;
+      reAsk?: boolean;
+    }): Promise<{ updated: number; sessionId: string; pushError: string | null }> => {
+      const res = await authFetch(`${serverUrl}/api/admin/invites`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(edit),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(describeAdminError(res.status, data));
+      return {
+        updated: data.updated ?? 0,
+        sessionId: data.sessionId ?? edit.sessionId,
+        pushError: data.pushError ?? null,
+      };
+    },
+    [serverUrl]
+  );
+
+  const handleFetchInvites = useCallback(
+    async (inviteSessionId: string): Promise<InviteRoster> => {
+      const url = inviteSessionId
+        ? `${serverUrl}/api/admin/invites?sessionId=${encodeURIComponent(inviteSessionId)}`
+        : `${serverUrl}/api/admin/invites`;
+      const res = await authFetch(url);
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(describeAdminError(res.status, data));
+      return {
+        invites: data.invites ?? [],
+        counts: data.counts ?? { total: 0, accepted: 0, declined: 0, pending: 0 },
+      };
+    },
+    [serverUrl]
+  );
+
   // Every known account with an email, for the Notify screen's recipient picker — fetched once
   // when that screen mounts, not polled, since the user list doesn't change fast enough to need it.
   const handleFetchUsers = async () => {
@@ -800,6 +970,8 @@ function MainApp() {
       onEndMyRoom={handleEndMyRoom}
       activePresence={activePresence}
       hasDetectedRoom={Boolean(detectedRoom)}
+      invites={myInvites}
+      onRespondToInvite={handleRespondToInvite}
     />
   );
 
@@ -934,6 +1106,7 @@ function MainApp() {
             wifiApCount={status.wifiApCount}
             ultrasonicState={status.ultrasonicState}
             running={running}
+            onStopDetection={() => togglePresence(false)}
             onJoinDetectedRoom={r => {
               // Adopt the detected room AND the session the server said it belongs to, rather
               // than joining under whatever local sessionId this device happened to carry — that
@@ -986,7 +1159,9 @@ function MainApp() {
             wifiSimilarity={roomMembers.find(m => m.deviceId === deviceId)?.wifiSimilarity}
             wifiApCount={status.wifiApCount}
             ultrasonicVerified={status.ultrasonicState === 'verified' || Boolean(roomMembers.find(m => m.deviceId === deviceId)?.ultrasonicVerified)}
-            sessionStartTime={sessionStartTime}
+            // The server's own figure for this device, the same one the presenter roster and the
+            // persisted room_membership row are built from — so all three agree.
+            dwellMs={roomMembers.find(m => m.deviceId === deviceId)?.durationMs}
             onLeaveRoom={() => void togglePresence(false)}
             onNavigate={nav}
           />
@@ -994,8 +1169,10 @@ function MainApp() {
       case 'attendeeOutOfRange':
         return (
           <AttendeeOutOfRangeScreen
-            roomId={roomId}
-            onRejoin={() => void togglePresence(true)}
+            // The room the server actually matched, not the presenter-authored `roomId` this
+            // screen used to show — an attendee's local roomId has nothing to do with the room
+            // they were checked into.
+            roomId={detectedRoom || activePresence?.roomId || ''}
             onLeave={() => void togglePresence(false)}
             onNavigate={nav}
           />
@@ -1044,6 +1221,17 @@ function MainApp() {
             onNavigate={nav}
           />
         );
+      case 'adminCheckIn':
+        return (
+          <AdminCheckInScreen
+            defaultSessionId={sessionId}
+            onFetchUsers={handleFetchUsers}
+            onSendInvites={handleSendInvites}
+            onFetchInvites={handleFetchInvites}
+            onEditInvites={handleEditInvites}
+            onNavigate={nav}
+          />
+        );
       case 'adminNotify':
         return (
           <AdminNotifyScreen
@@ -1088,6 +1276,7 @@ function MainApp() {
         <BottomNav currentScreen={screen} onNavigate={nav} role={role} />
       )}
       <AppAlertHost />
+      <BusyOverlay visible={stopping} label="Leaving session…" />
     </SafeAreaView>
   );
 }
