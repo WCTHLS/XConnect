@@ -65,6 +65,8 @@ export interface RoomMemberInfo {
   ultrasonicVerified?: boolean;
   /** Milliseconds this device has been continuously assigned to this room. Resets if the device drops out of the room's cluster for longer than the grace period. */
   durationMs?: number;
+  startedAt?: string;
+  endedAt?: string | null;
 }
 
 /**

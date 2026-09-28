@@ -8,6 +8,7 @@ interface ParticipantCardProps {
   name: string;
   role: 'Host' | 'Attendee';
   dwell: string;
+  joinedAt?: string;
   ultraVerified?: boolean;
   wifiMatch?: string;
   bleActive?: boolean;
@@ -18,6 +19,7 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
   name,
   role,
   dwell,
+  joinedAt,
   ultraVerified = true,
   wifiMatch,
   bleActive = true,
@@ -101,7 +103,9 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
                 strokeLinecap="round"
               />
             </Svg>
-            <Text style={[styles.dwellText, { color: colors.muted }]}>{dwell}</Text>
+            <Text style={[styles.dwellText, { color: colors.muted }]}>
+              {joinedAt ? `Joined ${joinedAt} · ` : ''}{dwell}
+            </Text>
           </View>
         </View>
 

@@ -122,9 +122,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
               <Circle cx={512} cy={512} r={24} fill="#FFFFFF" />
             </Svg>
           </View>
-          <Text style={[styles.title, { color: colors.txt }]}>Welcome to XConnect</Text>
+          <Text style={[styles.title, { color: colors.txt }]}>XConnect</Text>
           <Text style={[styles.subtitle, { color: colors.sub }]}>
-            Sign in to join in-room sessions and verify your presence
+            ENTERPRISE PRESENCE PLATFORM
           </Text>
         </View>
 
@@ -147,26 +147,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
 
         {/* OAuth Buttons */}
         <View style={styles.oauthSection}>
-          {microsoftSignInAvailable && (
-            <TouchableOpacity
-              activeOpacity={0.8}
-              style={[
-                styles.oauthButton,
-                {
-                  backgroundColor: colors.card,
-                  borderColor: colors.border,
-                },
-              ]}
-              onPress={() => void run(signInWithMicrosoft)}
-              disabled={busy}
-            >
-              <MicrosoftLogo size={20} />
-              <Text style={[styles.oauthText, { color: colors.txt }]}>
-                Continue with Microsoft
-              </Text>
-            </TouchableOpacity>
-          )}
-
           {googleSignInAvailable && (
             <TouchableOpacity
               activeOpacity={0.8}
@@ -183,6 +163,26 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
               <GoogleLogo size={20} />
               <Text style={[styles.oauthText, { color: colors.txt }]}>
                 Continue with Google
+              </Text>
+            </TouchableOpacity>
+          )}
+
+          {microsoftSignInAvailable && (
+            <TouchableOpacity
+              activeOpacity={0.8}
+              style={[
+                styles.oauthButton,
+                {
+                  backgroundColor: colors.card,
+                  borderColor: colors.border,
+                },
+              ]}
+              onPress={() => void run(signInWithMicrosoft)}
+              disabled={busy}
+            >
+              <MicrosoftLogo size={20} />
+              <Text style={[styles.oauthText, { color: colors.txt }]}>
+                Continue with Microsoft 365
               </Text>
             </TouchableOpacity>
           )}
@@ -209,7 +209,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                   color: colors.txt,
                 },
               ]}
-              placeholder="name@company.com"
+              placeholder="Enter your email"
               placeholderTextColor={colors.muted}
               autoCapitalize="none"
               keyboardType="email-address"
@@ -236,7 +236,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                   color: colors.txt,
                 },
               ]}
-              placeholder="••••••••"
+              placeholder="Enter your password"
               placeholderTextColor={colors.muted}
               secureTextEntry
               value={password}
@@ -277,7 +277,7 @@ const styles = StyleSheet.create({
   container: {
     paddingHorizontal: 24,
     paddingTop: 36,
-    paddingBottom: 24,
+    paddingBottom: 56,
   },
   header: {
     alignItems: 'center',

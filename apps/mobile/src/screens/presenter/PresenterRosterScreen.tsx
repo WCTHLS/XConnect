@@ -87,6 +87,11 @@ export const PresenterRosterScreen: React.FC<PresenterRosterScreenProps> = ({
               name={m.displayName || `Attendee ${idx + 1}`}
               role={m.role === 'presenter' ? 'Host' : 'Attendee'}
               dwell={formatMemberDwell(m.durationMs)}
+              joinedAt={
+                m.startedAt
+                  ? new Date(m.startedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })
+                  : undefined
+              }
               ultraVerified={m.ultrasonicVerified ?? false}
               wifiMatch={
                 m.wifiSimilarity ? `${Math.round(m.wifiSimilarity * 100)}%` : 'Active'

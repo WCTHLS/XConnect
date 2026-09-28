@@ -1196,6 +1196,8 @@ function MainApp() {
             isLive={isLive}
             totalAttendees={attendeesOnly.length}
             durationMs={durationMsForDisplay}
+            startedAt={new Date(sessionStartTime).toISOString()}
+            endedAt={isLive ? null : new Date(sessionStartTime + sessionDurationMs).toISOString()}
             acousticMatchPercent={acousticPct}
             wifiSimilarityPercent={avgWifi}
             onNavigate={nav}
@@ -1267,6 +1269,7 @@ function MainApp() {
             // The server's own figure for this device, the same one the presenter roster and the
             // persisted room_membership row are built from — so all three agree.
             dwellMs={roomMembers.find(m => m.deviceId === deviceId)?.durationMs}
+            startedAt={roomMembers.find(m => m.deviceId === deviceId)?.startedAt}
             onLeaveRoom={() => void togglePresence(false)}
             onNavigate={nav}
           />

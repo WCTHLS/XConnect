@@ -59,6 +59,8 @@ export type AggregatedAttendee = {
   hasOpenStay: boolean;
   everUltrasonicVerified: boolean;
   everMotionAnomaly: boolean;
+  firstStartedAt?: string;
+  lastEndedAt?: string | null;
 };
 
 /**
@@ -145,10 +147,23 @@ export function aggregateAttendees(members: HistoryMember[]): AggregatedAttendee
   }
   // Merge overlapping stays (a person rejoining from a new phone can overlap the old one for a
   // few seconds) so their time is never counted twice.
-  return [...byPerson.values()].map(({ attendee, stays }) => ({
-    ...attendee,
-    totalDurationMs: computeOccupiedDurationMs(stays).durationMs,
-  }));
+  return [...byPerson.values()].map(({ attendee, stays }) => {
+    const firstStartedAt = stays.length
+      ? stays.reduce((earliest, s) => (new Date(s.startedAt) < new Date(earliest) ? s.startedAt : earliest), stays[0].startedAt)
+      : undefined;
+    const lastEndedAt = stays.some(s => !s.endedAt)
+      ? null
+      : stays.length
+      ? stays.reduce((latest, s) => (s.endedAt && (!latest || new Date(s.endedAt) > new Date(latest)) ? s.endedAt : latest), stays[0].endedAt)
+      : null;
+
+    return {
+      ...attendee,
+      firstStartedAt,
+      lastEndedAt,
+      totalDurationMs: computeOccupiedDurationMs(stays).durationMs,
+    };
+  });
 }
 
 function escapeHtml(value: string): string {

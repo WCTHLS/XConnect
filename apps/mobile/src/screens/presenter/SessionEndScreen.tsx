@@ -22,6 +22,8 @@ interface SessionEndScreenProps {
   isLive: boolean;
   totalAttendees?: number;
   durationMs?: number;
+  startedAt?: string;
+  endedAt?: string | null;
   acousticMatchPercent?: number;
   wifiSimilarityPercent?: number;
   onNavigate: (screen: MobileScreen) => void;
@@ -33,6 +35,8 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
   isLive,
   totalAttendees = 0,
   durationMs = 0,
+  startedAt,
+  endedAt,
   acousticMatchPercent = 99.2,
   wifiSimilarityPercent = 98.5,
   onNavigate,
@@ -120,6 +124,30 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
             </View>
           </View>
         )}
+
+        {/* Timeline banner */}
+        {startedAt ? (
+          <View
+            style={[
+              styles.timelineCard,
+              { backgroundColor: colors.card, borderColor: colors.border },
+            ]}
+          >
+            <View style={styles.timelineRow}>
+              <Text style={[styles.timelineLabel, { color: colors.muted }]}>STARTED</Text>
+              <Text style={[styles.timelineValue, { color: colors.txt }]}>
+                {new Date(startedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })}
+              </Text>
+            </View>
+            <View style={[styles.timelineDivider, { backgroundColor: colors.border }]} />
+            <View style={styles.timelineRow}>
+              <Text style={[styles.timelineLabel, { color: colors.muted }]}>STATUS</Text>
+              <Text style={[styles.timelineValue, { color: isLive ? palette.mintPresence : colors.sub }]}>
+                {isLive ? 'Ongoing' : endedAt ? new Date(endedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true }) : 'Ended'}
+              </Text>
+            </View>
+          </View>
+        ) : null}
 
         {/* Analytics 2x2 Grid */}
         <View style={styles.grid}>
@@ -316,5 +344,32 @@ const styles = StyleSheet.create({
   homeButtonText: {
     fontSize: 14,
     fontWeight: '700',
+  },
+  timelineCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    padding: 14,
+    borderRadius: 14,
+    borderWidth: 1,
+    marginBottom: 20,
+  },
+  timelineRow: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  timelineLabel: {
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    marginBottom: 3,
+  },
+  timelineValue: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  timelineDivider: {
+    width: 1,
+    height: 24,
   },
 });

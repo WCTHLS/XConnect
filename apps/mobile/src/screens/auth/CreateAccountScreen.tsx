@@ -90,9 +90,9 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
           <View style={styles.logoBadge}>
             <Text style={styles.logoX}>X</Text>
           </View>
-          <Text style={[styles.title, { color: colors.txt }]}>Create Account</Text>
+          <Text style={[styles.title, { color: colors.txt }]}>XConnect</Text>
           <Text style={[styles.subtitle, { color: colors.sub }]}>
-            Join the Enterprise Presence Platform
+            ENTERPRISE PRESENCE PLATFORM
           </Text>
         </View>
 
@@ -114,7 +114,7 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
                   color: colors.txt,
                 },
               ]}
-              placeholder="e.g. Alex Morgan"
+              placeholder="Enter your full name"
               placeholderTextColor={colors.muted}
               value={name}
               onChangeText={setName}
@@ -132,7 +132,7 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
                   color: colors.txt,
                 },
               ]}
-              placeholder="alex@company.com"
+              placeholder="Enter your email"
               placeholderTextColor={colors.muted}
               autoCapitalize="none"
               keyboardType="email-address"
@@ -152,7 +152,7 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
                   color: colors.txt,
                 },
               ]}
-              placeholder="At least 6 characters"
+              placeholder="Enter your password"
               placeholderTextColor={colors.muted}
               secureTextEntry
               value={password}
@@ -171,7 +171,7 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
                   color: colors.txt,
                 },
               ]}
-              placeholder="Re-enter password"
+              placeholder="Confirm your password"
               placeholderTextColor={colors.muted}
               secureTextEntry
               value={confirmPassword}
@@ -214,7 +214,7 @@ const styles = StyleSheet.create({
   container: {
     paddingHorizontal: 24,
     paddingTop: 36,
-    paddingBottom: 24,
+    paddingBottom: 56,
   },
   header: {
     alignItems: 'center',

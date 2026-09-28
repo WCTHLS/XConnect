@@ -327,6 +327,11 @@ export const AdminHistoryScreen: React.FC<AdminHistoryScreenProps> = ({
                                 {a.email}
                               </Text>
                             ) : null}
+                            {a.firstStartedAt ? (
+                              <Text style={[styles.attendeeEmail, { color: colors.muted, fontSize: 10, marginTop: 1 }]} numberOfLines={1}>
+                                Joined {new Date(a.firstStartedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })}
+                              </Text>
+                            ) : null}
                             <View style={styles.flagRow}>
                               {a.role === 'presenter' && (
                                 <View style={[styles.flag, { backgroundColor: palette.skySubtle }]}>

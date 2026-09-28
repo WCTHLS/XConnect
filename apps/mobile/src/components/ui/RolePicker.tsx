@@ -10,120 +10,164 @@ interface RolePickerProps {
   disabled?: boolean;
 }
 
-const OPTIONS: { role: Role; label: string; blurb: string }[] = [
-  { role: 'attendee', label: 'Attendee', blurb: 'Check into the room you are in' },
-  { role: 'presenter', label: 'Presenter', blurb: 'Host a room and see who is present' },
-  { role: 'admin', label: 'Admin', blurb: 'Monitor every room and pull reports' },
+const ROLES: { role: Role; label: string }[] = [
+  { role: 'attendee', label: 'Attendee' },
+  { role: 'presenter', label: 'Presenter' },
+  { role: 'admin', label: 'Admin' },
 ];
 
-/**
- * Chosen at sign-in and fixed for the session — there is no in-app role switch, so this is the
- * only place it gets picked. Admin is offered to everyone because the server, not the app, is
- * what actually enforces it: picking Admin without an admin account just means the admin screens
- * report "This account is not an admin."
- */
+const ROLE_BANNERS: Record<
+  Role,
+  { label: string; bgLight: string; bgDark: string; borderLight: string; borderDark: string; textLight: string; textDark: string }
+> = {
+  attendee: {
+    label: 'Privacy-first · Auto-detect room presence',
+    bgLight: '#E0F2FE',
+    bgDark: 'rgba(2, 132, 199, 0.15)',
+    borderLight: 'rgba(2, 132, 199, 0.3)',
+    borderDark: 'rgba(56, 189, 248, 0.3)',
+    textLight: '#0284C7',
+    textDark: '#38BDF8',
+  },
+  presenter: {
+    label: 'Full room control · Broadcast presence gate',
+    bgLight: '#E6F4EA',
+    bgDark: 'rgba(5, 150, 105, 0.15)',
+    borderLight: 'rgba(5, 150, 105, 0.3)',
+    borderDark: 'rgba(52, 211, 153, 0.3)',
+    textLight: '#059669',
+    textDark: '#34D399',
+  },
+  admin: {
+    label: 'System monitoring · Enterprise administration',
+    bgLight: '#F3E8FF',
+    bgDark: 'rgba(124, 58, 237, 0.15)',
+    borderLight: 'rgba(124, 58, 237, 0.3)',
+    borderDark: 'rgba(167, 139, 250, 0.3)',
+    textLight: '#7C3AED',
+    textDark: '#A78BFA',
+  },
+};
+
 export const RolePicker: React.FC<RolePickerProps> = ({ value, onChange, disabled }) => {
-  const { colors } = useTheme();
+  const { theme } = useTheme();
+  const isDark = theme === 'dark';
+  const banner = ROLE_BANNERS[value];
 
   return (
     <View style={styles.container}>
-      <Text style={[styles.label, { color: colors.sub }]}>SIGN IN AS</Text>
-      <View style={styles.options}>
-        {OPTIONS.map(opt => {
-          const selected = opt.role === value;
+      {/* 3-way Segmented Pill Control */}
+      <View
+        style={[
+          styles.segmentedContainer,
+          {
+            backgroundColor: isDark ? '#141D2B' : '#F1F5F9',
+            borderColor: isDark ? '#1E293B' : '#E2E8F0',
+          },
+        ]}
+      >
+        {ROLES.map(tab => {
+          const active = tab.role === value;
           return (
             <TouchableOpacity
-              key={opt.role}
-              activeOpacity={0.85}
+              key={tab.role}
+              activeOpacity={0.8}
               disabled={disabled}
-              onPress={() => onChange(opt.role)}
+              onPress={() => onChange(tab.role)}
               style={[
-                styles.option,
-                {
-                  backgroundColor: selected ? 'rgba(51,209,172,0.12)' : colors.card,
-                  borderColor: selected ? palette.mintPresence : colors.border,
-                  opacity: disabled ? 0.6 : 1,
-                },
+                styles.segmentTab,
+                active && [
+                  styles.segmentTabActive,
+                  {
+                    backgroundColor: isDark ? '#1E293B' : '#FFFFFF',
+                  },
+                ],
               ]}
             >
-              <View
+              <Text
                 style={[
-                  styles.radio,
-                  { borderColor: selected ? palette.mintPresence : colors.border },
+                  styles.segmentText,
+                  {
+                    color: active
+                      ? isDark
+                        ? '#FFFFFF'
+                        : '#0F172A'
+                      : isDark
+                      ? '#94A3B8'
+                      : '#64748B',
+                    fontWeight: active ? '700' : '500',
+                  },
                 ]}
               >
-                {selected && <View style={styles.radioDot} />}
-              </View>
-              <View style={styles.optionText}>
-                <Text
-                  style={[
-                    styles.optionLabel,
-                    { color: selected ? palette.mintPresence : colors.txt },
-                  ]}
-                >
-                  {opt.label}
-                </Text>
-                <Text style={[styles.optionBlurb, { color: colors.muted }]}>{opt.blurb}</Text>
-              </View>
+                {tab.label}
+              </Text>
             </TouchableOpacity>
           );
         })}
       </View>
-      <Text style={[styles.note, { color: colors.muted }]}>
-        You can only change this by signing out.
-      </Text>
+
+      {/* Dynamic Contextual Pill Banner */}
+      <View
+        style={[
+          styles.contextBanner,
+          {
+            backgroundColor: isDark ? banner.bgDark : banner.bgLight,
+            borderColor: isDark ? banner.borderDark : banner.borderLight,
+          },
+        ]}
+      >
+        <Text
+          style={[
+            styles.contextBannerText,
+            { color: isDark ? banner.textDark : banner.textLight },
+          ]}
+        >
+          {banner.label}
+        </Text>
+      </View>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
-    gap: 6,
+    gap: 12,
   },
-  label: {
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 0.8,
-  },
-  options: {
-    gap: 8,
-  },
-  option: {
+  segmentedContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderRadius: 14,
-    borderWidth: 1.5,
+    padding: 4,
+    borderRadius: 16,
+    borderWidth: 1,
   },
-  radio: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    borderWidth: 2,
+  segmentTab: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 12,
+  },
+  segmentTabActive: {
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  segmentText: {
+    fontSize: 13,
+  },
+  contextBanner: {
+    paddingVertical: 11,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  radioDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: palette.mintPresence,
-  },
-  optionText: {
-    flex: 1,
-  },
-  optionLabel: {
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  optionBlurb: {
-    fontSize: 11,
-    marginTop: 1,
-  },
-  note: {
-    fontSize: 11,
-    marginTop: 2,
+  contextBannerText: {
+    fontSize: 12,
+    fontWeight: '600',
   },
 });
+

@@ -28,6 +28,7 @@ interface AttendeeConfirmedScreenProps {
    * three now agree. Undefined until the first poll lands.
    */
   dwellMs?: number;
+  startedAt?: string;
   onLeaveRoom: () => void;
   onNavigate: (screen: MobileScreen) => void;
 }
@@ -41,6 +42,7 @@ export const AttendeeConfirmedScreen: React.FC<AttendeeConfirmedScreenProps> = (
   wifiApCount,
   ultrasonicVerified = true,
   dwellMs,
+  startedAt,
   onLeaveRoom,
   onNavigate,
 }) => {
@@ -58,6 +60,12 @@ export const AttendeeConfirmedScreen: React.FC<AttendeeConfirmedScreenProps> = (
     if (hrs > 0) return `${hrs}h ${mins}m`;
     return `${mins} min`;
   };
+
+  const joinTimeFormatted = startedAt
+    ? new Date(startedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })
+    : dwellMs !== undefined && dwellMs > 0
+    ? new Date(Date.now() - dwellMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })
+    : 'Just now';
 
   const handleLeave = () => {
     onLeaveRoom();
@@ -141,6 +149,13 @@ export const AttendeeConfirmedScreen: React.FC<AttendeeConfirmedScreenProps> = (
             <Text style={[styles.detailLabel, { color: colors.muted }]}>Host</Text>
             <Text style={[styles.detailValue, { color: colors.txt }]}>
               {hostName}
+            </Text>
+          </View>
+
+          <View style={styles.detailRow}>
+            <Text style={[styles.detailLabel, { color: colors.muted }]}>Checked In At</Text>
+            <Text style={[styles.detailValue, { color: colors.txt }]}>
+              {joinTimeFormatted}
             </Text>
           </View>
 

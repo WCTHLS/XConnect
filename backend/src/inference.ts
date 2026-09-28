@@ -563,6 +563,11 @@ export class PocInferenceEngine {
 
       if (isPresenter) {
         estimatedMemberDeviceIds.push(memberId);
+        const membership = this.trackRoomMembership(sessionId, roomId, memberId, "presenter", now, {
+          confidence: 1.0,
+          ultrasonicVerified: true,
+          motionAnomalyFlag
+        });
         membersInfo.push({
           deviceId: memberId,
           displayName: rec?.displayName || memberId,
@@ -573,11 +578,8 @@ export class PocInferenceEngine {
           uwbDiscoveryToken,
           motionAnomalyFlag,
           ultrasonicVerified: true,
-          durationMs: this.trackRoomMembership(sessionId, roomId, memberId, "presenter", now, {
-            confidence: 1.0,
-            ultrasonicVerified: true,
-            motionAnomalyFlag
-          })
+          durationMs: membership.durationMs,
+          startedAt: membership.startedAt
         });
         continue;
       }
@@ -647,6 +649,12 @@ export class PocInferenceEngine {
       }
 
       estimatedMemberDeviceIds.push(memberId);
+      const membership = this.trackRoomMembership(sessionId, roomId, memberId, rec?.role || "attendee", now, {
+        confidence,
+        wifiSimilarity,
+        ultrasonicVerified: isAcousticMatch,
+        motionAnomalyFlag
+      });
       membersInfo.push({
         deviceId: memberId,
         displayName: rec?.displayName || memberId,
@@ -657,12 +665,8 @@ export class PocInferenceEngine {
         uwbDiscoveryToken,
         motionAnomalyFlag,
         ultrasonicVerified: isAcousticMatch,
-        durationMs: this.trackRoomMembership(sessionId, roomId, memberId, rec?.role || "attendee", now, {
-          confidence,
-          wifiSimilarity,
-          ultrasonicVerified: isAcousticMatch,
-          motionAnomalyFlag
-        })
+        durationMs: membership.durationMs,
+        startedAt: membership.startedAt
       });
     }
 
@@ -895,14 +899,15 @@ export class PocInferenceEngine {
     role: "presenter" | "attendee",
     now: number,
     latest: { confidence?: number; wifiSimilarity?: number; ultrasonicVerified?: boolean; motionAnomalyFlag?: boolean }
-  ): number {
+  ): { durationMs: number; startedAt: string } {
     // Never creates a room: only a presenter's join/ingest may. A stray roster calculation for a
     // room that was just ended must not start a new occurrence.
     const roomId = this.activeRoomId(sessionLabel, roomCode, now);
-    if (!roomId) return 0;
+    if (!roomId) return { durationMs: 0, startedAt: new Date(now).toISOString() };
     const key = `${roomId}::${deviceId}`;
     const existing = this.roomMembership.get(key);
     let durationMs: number;
+    let startedAtMs: number;
     if (existing) {
       // Heartbeat fields (confidence, wifiSimilarity) are never persisted — only meaningful
       // boolean transitions are, and only when the value actually changes.
@@ -917,6 +922,7 @@ export class PocInferenceEngine {
       existing.ultrasonicVerified = latest.ultrasonicVerified;
       existing.motionAnomalyFlag = latest.motionAnomalyFlag;
       durationMs = now - existing.startedAt;
+      startedAtMs = existing.startedAt;
     } else {
       // A brand-new membership entry is itself the "connected" transition.
       this.recordStateChange(roomId, deviceId, "connected", true, now);
@@ -933,8 +939,9 @@ export class PocInferenceEngine {
         motionAnomalyFlag: latest.motionAnomalyFlag
       });
       durationMs = 0;
+      startedAtMs = now;
     }
-    return durationMs;
+    return { durationMs, startedAt: new Date(startedAtMs).toISOString() };
   }
 
   /**

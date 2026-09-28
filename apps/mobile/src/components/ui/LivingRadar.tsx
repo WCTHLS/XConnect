@@ -33,27 +33,45 @@ export const LivingRadar: React.FC<LivingRadarProps> = ({
   const spinAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    const createPulseAnim = (anim: Animated.Value, delay: number) => {
-      return Animated.loop(
-        Animated.sequence([
-          Animated.delay(delay),
-          Animated.timing(anim, {
-            toValue: 1,
-            duration: 2400,
-            easing: Easing.out(Easing.ease),
-            useNativeDriver: true,
-          }),
-        ])
-      );
+    const startPulse = (anim: Animated.Value, initialDelay: number) => {
+      let timeoutId: any;
+      let loopAnim: Animated.CompositeAnimation | null = null;
+
+      const run = () => {
+        anim.setValue(0);
+        loopAnim = Animated.loop(
+          Animated.sequence([
+            Animated.timing(anim, {
+              toValue: 1,
+              duration: 2400,
+              easing: Easing.out(Easing.ease),
+              useNativeDriver: true,
+            }),
+            Animated.timing(anim, {
+              toValue: 0,
+              duration: 0,
+              useNativeDriver: true,
+            }),
+          ])
+        );
+        loopAnim.start();
+      };
+
+      if (initialDelay > 0) {
+        timeoutId = setTimeout(run, initialDelay);
+      } else {
+        run();
+      }
+
+      return () => {
+        if (timeoutId) clearTimeout(timeoutId);
+        if (loopAnim) loopAnim.stop();
+      };
     };
 
-    const p1 = createPulseAnim(pulse1, 0);
-    const p2 = createPulseAnim(pulse2, 800);
-    const p3 = createPulseAnim(pulse3, 1600);
-
-    p1.start();
-    p2.start();
-    p3.start();
+    const stopP1 = startPulse(pulse1, 0);
+    const stopP2 = startPulse(pulse2, 800);
+    const stopP3 = startPulse(pulse3, 1600);
 
     const spin = Animated.loop(
       Animated.timing(spinAnim, {
@@ -70,9 +88,9 @@ export const LivingRadar: React.FC<LivingRadarProps> = ({
     }
 
     return () => {
-      p1.stop();
-      p2.stop();
-      p3.stop();
+      stopP1();
+      stopP2();
+      stopP3();
       spin.stop();
     };
   }, [scanning, pulse1, pulse2, pulse3, spinAnim]);

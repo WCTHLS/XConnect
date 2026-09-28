@@ -121,24 +121,44 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
     pulseAnim.start();
 
     // Orb ring waves
-    const createRing = (anim: Animated.Value, delay: number) => {
-      return Animated.loop(
-        Animated.sequence([
-          Animated.delay(delay),
-          Animated.timing(anim, {
-            toValue: 1,
-            duration: 2400,
-            easing: Easing.out(Easing.ease),
-            useNativeDriver: true,
-          }),
-        ])
-      );
+    const startRing = (anim: Animated.Value, initialDelay: number) => {
+      let timeoutId: any;
+      let loopAnim: Animated.CompositeAnimation | null = null;
+
+      const run = () => {
+        anim.setValue(0);
+        loopAnim = Animated.loop(
+          Animated.sequence([
+            Animated.timing(anim, {
+              toValue: 1,
+              duration: 2400,
+              easing: Easing.out(Easing.ease),
+              useNativeDriver: true,
+            }),
+            Animated.timing(anim, {
+              toValue: 0,
+              duration: 0,
+              useNativeDriver: true,
+            }),
+          ])
+        );
+        loopAnim.start();
+      };
+
+      if (initialDelay > 0) {
+        timeoutId = setTimeout(run, initialDelay);
+      } else {
+        run();
+      }
+
+      return () => {
+        if (timeoutId) clearTimeout(timeoutId);
+        if (loopAnim) loopAnim.stop();
+      };
     };
 
-    const r1 = createRing(ring1, 0);
-    const r2 = createRing(ring2, 800);
-    r1.start();
-    r2.start();
+    const stopR1 = startRing(ring1, 0);
+    const stopR2 = startRing(ring2, 800);
 
     // Mini radar
     const mini = Animated.loop(
@@ -153,8 +173,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
     return () => {
       pulseAnim.stop();
-      r1.stop();
-      r2.stop();
+      stopR1();
+      stopR2();
       mini.stop();
     };
   }, [orbScale, ring1, ring2, miniPulse]);
