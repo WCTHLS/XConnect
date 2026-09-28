@@ -1,5 +1,5 @@
 import cors from "cors";
-import { and, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, or } from "drizzle-orm";
 import express from "express";
 import { z } from "zod";
 import { authEnabled, authenticate, forgetCachedUser, requireAdmin } from "./auth.js";
@@ -185,6 +185,30 @@ app.get("/api/admin/users", async (_request, response) => {
 
 const normalizeEmail = (email: string) => email.trim().toLowerCase();
 
+/**
+ * Flips any invite past its own scheduled time from pending to expired, in place. Lazy rather
+ * than a background job: there is no process that ticks on its own here, so "expired" only
+ * becomes true the next time something actually looks — which is fine, since nothing needs to
+ * react to an expiry the instant it happens, only before it matters (an admin viewing the roster,
+ * someone trying to respond).
+ *
+ * Deliberately does NOT touch already-accepted or already-declined invites. An accepted
+ * assignment staying live past its scheduled time is normal (sessions run late) — see the
+ * respond route below for the actual point where a stale reply is blocked, at the moment someone
+ * tries to act on it, not by silently rewriting their answer.
+ */
+async function expireStaleInvites(scope: { sessionCode?: string; email?: string }) {
+  if (!db) return;
+  const conditions = [
+    eq(schema.sessionInvites.status, "pending"),
+    isNotNull(schema.sessionInvites.eventAt),
+    lt(schema.sessionInvites.eventAt, new Date())
+  ];
+  if (scope.sessionCode) conditions.push(eq(schema.sessionInvites.sessionCode, scope.sessionCode));
+  if (scope.email) conditions.push(eq(schema.sessionInvites.email, scope.email));
+  await db.update(schema.sessionInvites).set({ status: "expired" }).where(and(...conditions));
+}
+
 /** Admin-only: invite a list of addresses to a session, and push a prompt to whoever has the app. */
 app.post("/api/admin/invites", async (request, response) => {
   if (!db) return response.status(503).json({ error: "Invites require Postgres persistence (DATABASE_URL not set)" });
@@ -204,7 +228,10 @@ app.post("/api/admin/invites", async (request, response) => {
         .optional()
         .nullable(),
       inviteRole: z.enum(["attendee", "presenter"]).optional(),
-      roomCode: z.string().min(1).optional()
+      // Nullable as well as optional: the client sends an explicit `roomCode: null` for an
+      // attendee invite (mirroring how eventAt: null means "no schedule set"), and a bare
+      // `.optional()` rejects null outright rather than treating it as absent.
+      roomCode: z.string().min(1).optional().nullable()
     })
     .refine((v) => v.inviteRole !== "presenter" || Boolean(v.roomCode?.trim()), {
       message: "A presenter invite must name the room they are assigned to",
@@ -300,6 +327,7 @@ app.get("/api/admin/invites", async (request, response) => {
   if (!db) return response.status(503).json({ error: "Invites require Postgres persistence (DATABASE_URL not set)" });
 
   const sessionCode = String(request.query.sessionId ?? "").trim();
+  await expireStaleInvites(sessionCode ? { sessionCode } : {});
 
   const rows = await db
     .select({
@@ -328,7 +356,7 @@ app.get("/api/admin/invites", async (request, response) => {
     email: r.email,
     // Falls back to the address when the invite hasn't been matched to an account yet.
     displayName: r.preferredName || r.userName || r.email,
-    status: r.status as "pending" | "accepted" | "declined",
+    status: r.status as "pending" | "accepted" | "declined" | "expired",
     eventAt: r.eventAt,
     title: r.title,
     message: r.message,
@@ -344,7 +372,8 @@ app.get("/api/admin/invites", async (request, response) => {
       total: invites.length,
       accepted: invites.filter((i) => i.status === "accepted").length,
       declined: invites.filter((i) => i.status === "declined").length,
-      pending: invites.filter((i) => i.status === "pending").length
+      pending: invites.filter((i) => i.status === "pending").length,
+      expired: invites.filter((i) => i.status === "expired").length
     }
   });
 });
@@ -438,6 +467,21 @@ app.patch("/api/admin/invites", async (request, response) => {
       .where(and(eq(schema.sessionInvites.sessionCode, to), eq(schema.sessionInvites.inviteRole, "presenter")));
   }
 
+  // Pushing the schedule out (or clearing it) un-expires anything that lazily expired under the
+  // OLD time — only "expired" rows, never "accepted"/"declined": those are real answers, and
+  // moving the date must not silently erase someone's actual reply. reAsk already forces every
+  // status to pending, so this only fires when the admin extended the deadline without asking
+  // everyone again — e.g. fixing a typo'd date that made everything expire prematurely.
+  if (!reAsk && parsed.data.eventAt !== undefined) {
+    const newEventAt = changes.eventAt as Date | null;
+    if (!newEventAt || newEventAt >= new Date()) {
+      await db
+        .update(schema.sessionInvites)
+        .set({ status: "pending" })
+        .where(and(eq(schema.sessionInvites.sessionCode, to), eq(schema.sessionInvites.status, "expired")));
+    }
+  }
+
   // Only notify when replies were actually cleared — an edit that left answers alone doesn't
   // need to buzz everyone's phone.
   let pushError: string | null = null;
@@ -470,6 +514,9 @@ app.get("/api/me/invites", async (request, response) => {
   if (!db) return response.json({ invites: [] });
   if (!request.user.email) return response.json({ invites: [] });
 
+  const email = normalizeEmail(request.user.email);
+  await expireStaleInvites({ email });
+
   const rows = await db
     .select({
       id: schema.sessionInvites.id,
@@ -484,7 +531,7 @@ app.get("/api/me/invites", async (request, response) => {
       respondedAt: schema.sessionInvites.respondedAt
     })
     .from(schema.sessionInvites)
-    .where(eq(schema.sessionInvites.email, normalizeEmail(request.user.email)))
+    .where(eq(schema.sessionInvites.email, email))
     .orderBy(desc(schema.sessionInvites.createdAt));
 
   return response.json({
@@ -493,7 +540,7 @@ app.get("/api/me/invites", async (request, response) => {
       sessionId: r.sessionCode,
       title: r.title,
       message: r.message,
-      status: r.status as "pending" | "accepted" | "declined",
+      status: r.status as "pending" | "accepted" | "declined" | "expired",
       eventAt: r.eventAt,
       inviteRole: r.inviteRole as "attendee" | "presenter",
       roomCode: r.roomCode,
@@ -514,25 +561,38 @@ app.post("/api/me/invites/respond", async (request, response) => {
     .safeParse(request.body);
   if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
 
+  const email = normalizeEmail(request.user.email);
+  await expireStaleInvites({ email });
+
   // Scoped by the caller's own email as well as the id, so an invite id can't be used to answer
-  // on someone else's behalf.
+  // on someone else's behalf. Also requires the event, if scheduled, not to have already passed —
+  // this covers both a first response AND changing a prior one (InviteDetailSheet's "Change to…"
+  // hits this same route), so someone can't flip an accept to a decline, or the reverse, for an
+  // event that already happened.
+  const notPastEvent = or(isNull(schema.sessionInvites.eventAt), gte(schema.sessionInvites.eventAt, new Date()));
   const result = await db
     .update(schema.sessionInvites)
     .set({ status: parsed.data.response, respondedAt: new Date(), userId: request.user.id })
-    .where(
-      and(
-        eq(schema.sessionInvites.id, parsed.data.inviteId),
-        eq(schema.sessionInvites.email, normalizeEmail(request.user.email))
-      )
-    );
+    .where(and(eq(schema.sessionInvites.id, parsed.data.inviteId), eq(schema.sessionInvites.email, email), notPastEvent));
 
-  const responded = result.count > 0;
-  console.log(responded
-    ? `📬 [INVITE] ${request.user.email} ${parsed.data.response} invite ${parsed.data.inviteId}`
-    : `⚠️  [INVITE] ${request.user.email} tried to answer invite ${parsed.data.inviteId}, which isn't theirs`);
+  if (result.count > 0) {
+    console.log(`📬 [INVITE] ${request.user.email} ${parsed.data.response} invite ${parsed.data.inviteId}`);
+    return response.json({ ok: true, status: parsed.data.response });
+  }
 
-  if (!responded) return response.status(404).json({ error: "No invite found for this account" });
-  return response.json({ ok: true, status: parsed.data.response });
+  // Zero rows updated is ambiguous (wrong id/email vs. an expired one) — the two need different
+  // messages, so look up which it actually was rather than guessing.
+  const [existing] = await db
+    .select({ id: schema.sessionInvites.id })
+    .from(schema.sessionInvites)
+    .where(and(eq(schema.sessionInvites.id, parsed.data.inviteId), eq(schema.sessionInvites.email, email)));
+
+  if (existing) {
+    console.log(`⚠️  [INVITE] ${request.user.email} tried to answer expired invite ${parsed.data.inviteId}`);
+    return response.status(409).json({ error: "This invite has expired and can no longer be answered." });
+  }
+  console.log(`⚠️  [INVITE] ${request.user.email} tried to answer invite ${parsed.data.inviteId}, which isn't theirs`);
+  return response.status(404).json({ error: "No invite found for this account" });
 });
 
 app.post("/api/session/join", (request, response) => {

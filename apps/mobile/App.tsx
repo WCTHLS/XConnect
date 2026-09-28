@@ -66,6 +66,25 @@ type ActiveSessionSnapshot = {
 /** Turns an admin endpoint's failure into something an admin can act on. 403 is the common one
  * (signed in, but not an admin account); 503 is the server telling us history needs Postgres,
  * which its own `error` string already explains better than a status code would. */
+/** Room codes are free-typed text throughout this app ("Hall A" vs "hall a"), so anywhere two
+ * room names are compared for identity, whitespace and case must not cause a false mismatch. */
+function sameRoomName(a?: string, b?: string): boolean {
+  return Boolean(a) && Boolean(b) && a!.trim().toLowerCase() === b!.trim().toLowerCase();
+}
+
+/** Wraps AppAlert's callback-style buttons in a Promise, so a caller can `await` the person's
+ * choice instead of continuing inside an onPress handler. Resolves false for either button
+ * styled "cancel" and for the hardware back button (AppAlert only dismisses on backdrop tap when
+ * a cancel button exists, and routes that tap through the cancel button itself). */
+function confirmAsync(title: string, message: string, confirmLabel: string): Promise<boolean> {
+  return new Promise(resolve => {
+    AppAlert.alert(title, message, [
+      { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+      { text: confirmLabel, style: 'destructive', onPress: () => resolve(true) },
+    ]);
+  });
+}
+
 function describeAdminError(status: number, data: any): string {
   if (status === 403) return 'This account is not an admin.';
   if (typeof data?.error === 'string') return data.error;
@@ -373,6 +392,55 @@ function MainApp() {
           setDetectedRoom('');
           setDetectedSession('');
           setRoomMembers([]);
+        }
+
+        // Close out any OTHER room this account is still presenting before starting this one.
+        // presenceService.start() already leaves a room this device thinks it's running — but
+        // that local "am I running" flag resets on every fresh app process, so it does nothing
+        // after a force-close: the old room's device record is simply abandoned, live on the
+        // server (and visible to attendees/admin) until its 15-minute auto-expiry. Asking the
+        // server directly closes that gap regardless of what this device remembers.
+        if (activeRole === 'presenter') {
+          try {
+            const res = await authFetch(`${serverUrl}/api/me/active-rooms`);
+            if (res.ok) {
+              const data = await res.json().catch(() => null);
+              const liveElsewhere: LiveRoomState[] = (Array.isArray(data?.rooms) ? data.rooms : []).filter(
+                (r: LiveRoomState) => !(sameRoomName(r.roomId, activeRoom) && sameRoomName(r.sessionId, activeSession))
+              );
+              if (liveElsewhere.length > 0) {
+                // A found room might genuinely still have people in it — closing it is a real
+                // action, not housekeeping, so it's confirmed rather than done silently. Naming
+                // each room and its live attendee count so the choice is informed, not a guess.
+                const roomList = liveElsewhere
+                  .map(r => {
+                    const attendeeCount = (r.members ?? []).filter(m => m.role === 'attendee').length;
+                    return `${r.roomId.toUpperCase()} (${attendeeCount} attendee${attendeeCount === 1 ? '' : 's'})`;
+                  })
+                  .join(', ');
+                const proceed = await confirmAsync(
+                  'Still Hosting Another Room',
+                  `You're still hosting ${roomList}. Starting ${activeRoom?.toUpperCase()} will end ${
+                    liveElsewhere.length === 1 ? 'it' : 'them'
+                  } and disconnect anyone still there.`,
+                  `End & Start ${activeRoom?.toUpperCase()}`
+                );
+                if (!proceed) return false;
+                await Promise.all(
+                  liveElsewhere.map(r =>
+                    authFetch(`${serverUrl}/api/me/rooms/end`, {
+                      method: 'POST',
+                      headers: { 'content-type': 'application/json' },
+                      body: JSON.stringify({ sessionId: r.sessionId, roomId: r.roomId }),
+                    }).catch(() => {})
+                  )
+                );
+              }
+            }
+          } catch {
+            // Offline or unreachable — proceed with starting the new room regardless; there's
+            // nothing actionable to confirm if the check itself couldn't be made.
+          }
         }
 
         await service.start({
@@ -971,7 +1039,7 @@ function MainApp() {
       if (!res.ok) throw new Error(describeAdminError(res.status, data));
       return {
         invites: data.invites ?? [],
-        counts: data.counts ?? { total: 0, accepted: 0, declined: 0, pending: 0 },
+        counts: data.counts ?? { total: 0, accepted: 0, declined: 0, pending: 0, expired: 0 },
       };
     },
     [serverUrl]

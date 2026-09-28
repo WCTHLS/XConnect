@@ -29,7 +29,7 @@ export interface InviteSendResult {
 
 export interface InviteRoster {
   invites: SessionInvite[];
-  counts: { total: number; accepted: number; declined: number; pending: number };
+  counts: { total: number; accepted: number; declined: number; pending: number; expired: number };
 }
 
 interface AdminCheckInScreenProps {
@@ -75,6 +75,10 @@ const STATUS_META: Record<SessionInvite['status'], { label: string; color: strin
   accepted: { label: 'ACCEPTED', color: palette.mintPresence, tint: 'rgba(51,209,172,0.15)' },
   declined: { label: 'DECLINED', color: palette.roseError, tint: 'rgba(239,68,68,0.15)' },
   pending: { label: 'NO REPLY', color: palette.amberWarn, tint: 'rgba(245,158,11,0.15)' },
+  // Set server-side once eventAt has passed while still pending — a no-reply that came too late
+  // to still act on, distinct from one the admin can still chase. A plain neutral rather than a
+  // theme color: this map is a static module-level constant with no access to the theme context.
+  expired: { label: 'EXPIRED', color: '#94A3B8', tint: 'rgba(148,163,184,0.15)' },
 };
 
 export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
@@ -197,6 +201,7 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
       accepted: visibleInvites.filter(i => i.status === 'accepted').length,
       declined: visibleInvites.filter(i => i.status === 'declined').length,
       pending: visibleInvites.filter(i => i.status === 'pending').length,
+      expired: visibleInvites.filter(i => i.status === 'expired').length,
     }),
     [visibleInvites]
   );
@@ -691,6 +696,14 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
                       </Text>
                       <Text style={[styles.countLabel, { color: colors.muted }]}>NO REPLY</Text>
                     </View>
+                    {visibleCounts.expired > 0 ? (
+                      <View style={styles.countBlock}>
+                        <Text style={[styles.countValue, { color: '#94A3B8' }]}>
+                          {visibleCounts.expired}
+                        </Text>
+                        <Text style={[styles.countLabel, { color: colors.muted }]}>EXPIRED</Text>
+                      </View>
+                    ) : null}
                   </View>
                   <View style={styles.rosterActions}>
                     <TouchableOpacity

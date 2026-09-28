@@ -197,9 +197,26 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const answeredInvites = invites.filter(i => i.status !== 'pending');
   // Rooms this person agreed to host. Shown only in the presenter role: the card's whole purpose
   // is the start-broadcasting shortcut, which is meaningless to an attendee.
+  //
+  // Excludes any assignment that is already live under this account, whether that is the room
+  // currently being broadcast (activePresence) or one the server-truth rejoin poll found open on
+  // another device (myActiveRooms) — otherwise a force-close/reopen while hosting an assigned
+  // room shows this "Start Broadcasting" card stacked on top of the "Already Hosting" rejoin
+  // card for the exact same room, offering two ways to do the same thing.
+  const sameRoom = (a?: string, b?: string) => Boolean(a) && Boolean(b) && a!.trim().toLowerCase() === b!.trim().toLowerCase();
   const acceptedAssignments =
     role === 'presenter'
-      ? invites.filter(i => i.inviteRole === 'presenter' && i.status === 'accepted' && i.roomCode)
+      ? invites.filter(i => {
+          if (i.inviteRole !== 'presenter' || i.status !== 'accepted' || !i.roomCode) return false;
+          const currentlyBroadcastingThis =
+            activePresence?.role === 'presenter' &&
+            sameRoom(activePresence.roomId, i.roomCode) &&
+            sameRoom(activePresence.sessionId, i.sessionId);
+          const alreadyLiveElsewhere = myActiveRooms.some(
+            r => sameRoom(r.roomId, i.roomCode!) && sameRoom(r.sessionId, i.sessionId)
+          );
+          return !currentlyBroadcastingThis && !alreadyLiveElsewhere;
+        })
       : [];
 
   // Held by id rather than by value so the sheet re-reads the invite from props — otherwise a
@@ -663,9 +680,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         )}
       </View>
 
-      {/* Attendees see what they replied to past check-in invites — real data, unlike the
-          presenter carousel below it, which is still placeholder content. */}
-      {role === 'attendee' ? (
+      {/* Attendees and presenters both see what they replied to past invites — real data,
+          unlike the admin's carousel below, which is still placeholder content. */}
+      {role === 'attendee' || role === 'presenter' ? (
         <View style={styles.recentSection}>
           <Text style={[styles.recentTitle, { color: colors.sub }]}>YOUR INVITE REPLIES</Text>
 
@@ -679,17 +696,39 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               <Text style={[styles.inviteHistoryEmptyText, { color: colors.muted }]}>
                 {pendingInvites.length > 0
                   ? 'Answer the invite above and your reply will be listed here.'
+                  : role === 'presenter'
+                  ? "You haven't been invited to host anything yet."
                   : "You haven't been asked to check in to anything yet."}
               </Text>
             </View>
           ) : (
             answeredInvites.map(invite => {
+              const isHostingInvite = invite.inviteRole === 'presenter';
+              const isExpired = invite.status === 'expired';
               const accepted = invite.status === 'accepted';
-              const tone = accepted ? palette.mintPresence : palette.roseError;
+              // Expired always means "never got an answer, and now it's too late" — the server
+              // only ever flips a still-pending invite to expired, so there is no prior reply to
+              // show or to let someone change. Muted grey rather than the accept/decline colors,
+              // and not tappable: opening the edit sheet would offer a "change your reply" action
+              // that the server will now refuse.
+              const tone = isExpired ? '#94A3B8' : accepted ? palette.mintPresence : palette.roseError;
+              // Wording follows the INVITE's own role, not the viewer's current role — a
+              // presenter account could in principle hold an old attendee-type reply too, and
+              // "GOING" would misdescribe an accepted room assignment.
+              const statusLabel = isExpired
+                ? 'EXPIRED'
+                : isHostingInvite
+                ? accepted
+                  ? 'HOSTING'
+                  : 'DECLINED'
+                : accepted
+                ? 'GOING'
+                : 'NOT GOING';
               return (
                 <TouchableOpacity
                   key={invite.id}
-                  activeOpacity={0.8}
+                  activeOpacity={isExpired ? 1 : 0.8}
+                  disabled={isExpired}
                   onPress={() => setOpenInviteId(invite.id)}
                   style={[
                     styles.inviteHistoryRow,
@@ -699,23 +738,40 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                   <View
                     style={[
                       styles.inviteHistoryIcon,
-                      { backgroundColor: accepted ? 'rgba(51,209,172,0.15)' : 'rgba(239,68,68,0.15)' },
+                      {
+                        backgroundColor: isExpired
+                          ? 'rgba(148,163,184,0.15)'
+                          : accepted
+                          ? 'rgba(51,209,172,0.15)'
+                          : 'rgba(239,68,68,0.15)',
+                      },
                     ]}
                   >
                     <Svg width={14} height={14} viewBox="0 0 24 24" fill="none">
-                      <Path
-                        d={accepted ? 'M5 13l4 4L19 7' : 'M6 6l12 12M18 6L6 18'}
-                        stroke={tone}
-                        strokeWidth={2.5}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
+                      {isExpired ? (
+                        <>
+                          <Circle cx={12} cy={12} r={9} stroke={tone} strokeWidth={2} />
+                          <Path d="M12 7v5l3 2" stroke={tone} strokeWidth={2} strokeLinecap="round" />
+                        </>
+                      ) : (
+                        <Path
+                          d={accepted ? 'M5 13l4 4L19 7' : 'M6 6l12 12M18 6L6 18'}
+                          stroke={tone}
+                          strokeWidth={2.5}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      )}
                     </Svg>
                   </View>
 
                   <View style={styles.inviteHistoryBody}>
                     <Text style={[styles.inviteHistorySession, { color: colors.txt }]} numberOfLines={1}>
-                      {invite.sessionId}
+                      {/* A hosting invite is about the ROOM; the session is secondary context,
+                          same lead-with-the-room rule the pending InviteCard uses. */}
+                      {isHostingInvite
+                        ? `${(invite.roomCode ?? '').toUpperCase()} · ${invite.sessionId}`
+                        : invite.sessionId}
                     </Text>
                     {/* The event's own date/time is what the person actually cares about; when
                         they happened to tap reply is only a fallback for invites with no
@@ -727,30 +783,33 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                         ? `Replied ${new Date(invite.respondedAt).toLocaleDateString()}`
                         : 'Replied'}
                     </Text>
-                    <Text style={[styles.inviteHistoryStatus, { color: tone }]}>
-                      {accepted ? 'GOING' : 'NOT GOING'}
-                    </Text>
+                    <Text style={[styles.inviteHistoryStatus, { color: tone }]}>{statusLabel}</Text>
                   </View>
 
-                  <TouchableOpacity
-                    activeOpacity={0.7}
-                    onPress={() => setOpenInviteId(invite.id)}
-                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                    style={[
-                      styles.inviteHistoryEditButton,
-                      { backgroundColor: colors.cardSecondary, borderColor: colors.border },
-                    ]}
-                  >
-                    <Svg width={15} height={15} viewBox="0 0 24 24" fill="none">
-                      <Path
-                        d="M4 20h4l10-10a2.1 2.1 0 0 0-3-3L5 17v3z"
-                        stroke={colors.sub}
-                        strokeWidth={2}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </Svg>
-                  </TouchableOpacity>
+                  {/* Nothing to change on an expired invite that was never answered — omitted
+                      rather than shown-but-disabled, since a pencil that does nothing invites a
+                      confused tap. */}
+                  {!isExpired && (
+                    <TouchableOpacity
+                      activeOpacity={0.7}
+                      onPress={() => setOpenInviteId(invite.id)}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                      style={[
+                        styles.inviteHistoryEditButton,
+                        { backgroundColor: colors.cardSecondary, borderColor: colors.border },
+                      ]}
+                    >
+                      <Svg width={15} height={15} viewBox="0 0 24 24" fill="none">
+                        <Path
+                          d="M4 20h4l10-10a2.1 2.1 0 0 0-3-3L5 17v3z"
+                          stroke={colors.sub}
+                          strokeWidth={2}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </Svg>
+                    </TouchableOpacity>
+                  )}
                 </TouchableOpacity>
               );
             })

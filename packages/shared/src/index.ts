@@ -72,8 +72,13 @@ export interface RoomMemberInfo {
  *
  * This is an RSVP, never an attendance record. "accepted" means someone said they plan to be
  * there; whether they actually were still comes only from sensor-verified room membership.
+ *
+ * "expired" is lazily computed server-side once an invite's `eventAt` has passed while it was
+ * still "pending" — it can no longer be accepted, declined, or (if already answered before
+ * expiring) changed. An accepted/declined invite is never auto-expired: a session running late
+ * shouldn't erase someone's real answer.
  */
-export type InviteStatus = "pending" | "accepted" | "declined";
+export type InviteStatus = "pending" | "accepted" | "declined" | "expired";
 
 /**
  * What an invite asks of someone. An attendee invite asks them to confirm they will be there; a
