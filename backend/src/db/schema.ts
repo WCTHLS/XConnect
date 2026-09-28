@@ -112,6 +112,13 @@ export const sessionInvites = pgTable(
     // because invites created before this column existed have no value for it. Purely
     // informational: nothing schedules or expires off the back of it yet.
     eventAt: timestamp("event_at", { withTimezone: true }),
+    // "attendee" (default) or "presenter". A presenter invite is a room assignment: it carries
+    // `roomCode`, and accepting it lets them start broadcasting that room without retyping it.
+    inviteRole: text("invite_role").notNull().default("attendee"),
+    // Only meaningful for a presenter invite. Deliberately a plain typed room name, matching how
+    // rooms work everywhere else here: it names a room that need not exist yet, since the whole
+    // point is assigning it before anyone starts broadcasting.
+    roomCode: text("room_code"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     respondedAt: timestamp("responded_at", { withTimezone: true })
   },

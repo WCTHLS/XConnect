@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
-import type { SessionInvite } from '@confpresence/shared';
+import type { InviteRole, SessionInvite } from '@confpresence/shared';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
 import { TopBar } from '../../components/ui/TopBar';
@@ -42,7 +42,10 @@ interface AdminCheckInScreenProps {
     title: string,
     message: string,
     /** ISO instant for when the event is scheduled, or null when the admin left it blank. */
-    eventAt: string | null
+    eventAt: string | null,
+    inviteRole: InviteRole,
+    /** Required for a presenter invite, null for an attendee one. */
+    roomCode: string | null
   ) => Promise<InviteSendResult>;
   onFetchInvites: (sessionId: string) => Promise<InviteRoster>;
   /** Edits a whole already-sent batch. Omitted fields are left as they are; `eventAt: null`
@@ -53,6 +56,7 @@ interface AdminCheckInScreenProps {
     title?: string;
     message?: string;
     eventAt?: string | null;
+    roomCode?: string;
     reAsk?: boolean;
   }) => Promise<{ updated: number; sessionId: string; pushError: string | null }>;
   onNavigate: (screen: MobileScreen) => void;
@@ -94,6 +98,8 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
   const [message, setMessage] = useState('');
   // One Date holds the whole schedule; the two pickers each edit their half of it. null means
   // the admin hasn't set a time, which is a valid invite.
+  const [inviteRole, setInviteRole] = useState<InviteRole>('attendee');
+  const [roomCode, setRoomCode] = useState('');
   const [eventAt, setEventAt] = useState<Date | null>(null);
   const [picking, setPicking] = useState<'date' | 'time' | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -306,6 +312,9 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
     const emails = recipientList();
     if (!sessionId.trim()) return setSendError('Enter the session code these invites are for.');
     if (emails.length === 0) return setSendError('Select or enter at least one email address.');
+    if (inviteRole === 'presenter' && !roomCode.trim()) {
+      return setSendError('Name the room this presenter is assigned to.');
+    }
 
     setSending(true);
     setSendError(null);
@@ -316,7 +325,9 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
         emails,
         title.trim() || 'Check-in request',
         message.trim() || `You've been invited to check in to ${sessionId.trim()}.`,
-        eventAt ? eventAt.toISOString() : null
+        eventAt ? eventAt.toISOString() : null,
+        inviteRole,
+        inviteRole === 'presenter' ? roomCode.trim() : null
       );
       setSendResult(result);
       setSelectedEmails(new Set());
@@ -374,7 +385,39 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
         {tab === 'invite' ? (
           <>
             <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-              <Text style={[styles.label, { color: colors.sub }]}>SESSION CODE</Text>
+              <Text style={[styles.label, { color: colors.sub }]}>INVITING</Text>
+              <View style={styles.roleRow}>
+                {(['attendee', 'presenter'] as const).map(r => {
+                  const active = inviteRole === r;
+                  return (
+                    <TouchableOpacity
+                      key={r}
+                      activeOpacity={0.85}
+                      onPress={() => setInviteRole(r)}
+                      style={[
+                        styles.roleChip,
+                        {
+                          backgroundColor: active ? 'rgba(51,209,172,0.18)' : colors.bg,
+                          borderColor: active ? palette.mintPresence : colors.border,
+                        },
+                      ]}
+                    >
+                      <Text
+                        style={[styles.roleChipText, { color: active ? palette.mintPresence : colors.muted }]}
+                      >
+                        {r === 'attendee' ? 'Attendees' : 'A presenter'}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <Text style={[styles.hint, { color: colors.muted }]}>
+                {inviteRole === 'presenter'
+                  ? 'A presenter invite assigns a room. Accepting lets them start broadcasting it without retyping anything.'
+                  : 'An attendee invite asks them to confirm they will be there.'}
+              </Text>
+
+              <Text style={[styles.label, { color: colors.sub, marginTop: 18 }]}>SESSION CODE</Text>
               <TextInput
                 style={[styles.input, { backgroundColor: colors.bg, borderColor: colors.border, color: colors.txt }]}
                 value={sessionId}
@@ -384,9 +427,31 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
                 autoCapitalize="none"
               />
               <Text style={[styles.hint, { color: colors.muted }]}>
-                Invites are addressed to a session code, not a room. The room itself does not have
-                to exist yet.
+                {inviteRole === 'presenter'
+                  ? 'The session this room belongs to.'
+                  : 'Invites are addressed to a session code, not a room. The room itself does not have to exist yet.'}
               </Text>
+
+              {inviteRole === 'presenter' ? (
+                <>
+                  <Text style={[styles.label, { color: colors.sub, marginTop: 18 }]}>ASSIGN ROOM</Text>
+                  <TextInput
+                    style={[
+                      styles.input,
+                      { backgroundColor: colors.bg, borderColor: colors.border, color: colors.txt },
+                    ]}
+                    value={roomCode}
+                    onChangeText={setRoomCode}
+                    placeholder="e.g. Hall A"
+                    placeholderTextColor={colors.muted}
+                    autoCapitalize="words"
+                  />
+                  <Text style={[styles.hint, { color: colors.muted }]}>
+                    Typed, not picked from live rooms: the room does not exist until they start
+                    broadcasting it.
+                  </Text>
+                </>
+              ) : null}
 
               <Text style={[styles.label, { color: colors.sub, marginTop: 18 }]}>
                 WHEN IS IT? (OPTIONAL)
@@ -685,6 +750,11 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
                           {invite.displayName !== invite.email ? (
                             <Text style={[styles.inviteEmail, { color: colors.muted }]} numberOfLines={1}>
                               {invite.email}
+                            </Text>
+                          ) : null}
+                          {invite.inviteRole === 'presenter' ? (
+                            <Text style={[styles.hostTag, { color: palette.skyMesh }]}>
+                              HOSTING {(invite.roomCode ?? '').toUpperCase()}
                             </Text>
                           ) : null}
                           <Text style={[styles.inviteMeta, { color: colors.muted }]}>
@@ -1022,6 +1092,15 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   multiline: { minHeight: 72, textAlignVertical: 'top' },
+  roleRow: { flexDirection: 'row', gap: 8 },
+  roleChip: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    alignItems: 'center',
+  },
+  roleChipText: { fontSize: 13, fontWeight: '800' },
   dateTimeRow: { flexDirection: 'row', gap: 8 },
   dateInput: { flex: 1.4 },
   timeInput: { flex: 1 },
@@ -1089,6 +1168,7 @@ const styles = StyleSheet.create({
   inviteName: { fontSize: 14, fontWeight: '700' },
   inviteEmail: { fontSize: 11, marginTop: 1 },
   inviteMeta: { fontSize: 10, marginTop: 4 },
+  hostTag: { fontSize: 9, fontWeight: '800', letterSpacing: 0.5, marginTop: 3 },
   statusPill: { paddingHorizontal: 9, paddingVertical: 4, borderRadius: 999 },
   statusPillText: { fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
   footnote: { fontSize: 11, lineHeight: 17, marginTop: 4, paddingHorizontal: 2 },

@@ -15,6 +15,7 @@ import { MobileScreen, Role } from '../../components/navigation/BottomNav';
 import type { LiveRoomState, MyInvite, ParticipantRole } from '@confpresence/shared';
 import { InviteCard } from '../../components/ui/InviteCard';
 import { InviteDetailSheet } from '../../components/ui/InviteDetailSheet';
+import { AssignmentCard } from '../../components/ui/AssignmentCard';
 
 /**
  * Date and time down to the minute. The components are listed explicitly rather than using
@@ -65,6 +66,8 @@ interface HomeScreenProps {
   invites: MyInvite[];
   /** Resolves to whether the reply saved, so the edit sheet stays open on a failure. */
   onRespondToInvite: (inviteId: number, response: 'accepted' | 'declined') => Promise<boolean>;
+  /** Starts an accepted presenter assignment: the assigned room under its assigned session. */
+  onStartAssignedRoom: (roomCode: string, sessionId: string) => void;
 }
 
 export const HomeScreen: React.FC<HomeScreenProps> = ({
@@ -84,6 +87,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   hasDetectedRoom,
   invites,
   onRespondToInvite,
+  onStartAssignedRoom,
 }) => {
   const { colors, theme } = useTheme();
   const isDark = theme === 'dark';
@@ -191,6 +195,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   // that replaces the old placeholder "recent sessions" list for attendees.
   const pendingInvites = invites.filter(i => i.status === 'pending');
   const answeredInvites = invites.filter(i => i.status !== 'pending');
+  // Rooms this person agreed to host. Shown only in the presenter role: the card's whole purpose
+  // is the start-broadcasting shortcut, which is meaningless to an attendee.
+  const acceptedAssignments =
+    role === 'presenter'
+      ? invites.filter(i => i.inviteRole === 'presenter' && i.status === 'accepted' && i.roomCode)
+      : [];
 
   // Held by id rather than by value so the sheet re-reads the invite from props — otherwise a
   // changed reply would leave the open sheet showing the answer it had when it was opened.
@@ -256,6 +266,10 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           this screen that is waiting on the person rather than the other way round. */}
       {pendingInvites.map(invite => (
         <InviteCard key={invite.id} invite={invite} onRespond={onRespondToInvite} />
+      ))}
+
+      {acceptedAssignments.map(invite => (
+        <AssignmentCard key={invite.id} invite={invite} onStart={onStartAssignedRoom} />
       ))}
 
       {/* Presence Core Orb — purely decorative status display, never interactive. The pulsing

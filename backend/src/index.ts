@@ -202,15 +202,29 @@ app.post("/api/admin/invites", async (request, response) => {
         .string()
         .refine((v) => !Number.isNaN(Date.parse(v)), { message: "eventAt must be a valid ISO date-time" })
         .optional()
-        .nullable()
+        .nullable(),
+      inviteRole: z.enum(["attendee", "presenter"]).optional(),
+      roomCode: z.string().min(1).optional()
+    })
+    .refine((v) => v.inviteRole !== "presenter" || Boolean(v.roomCode?.trim()), {
+      message: "A presenter invite must name the room they are assigned to",
+      path: ["roomCode"]
     })
     .safeParse(request.body);
   if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
 
   const sessionCode = parsed.data.sessionId.trim();
   const eventAt = parsed.data.eventAt ? new Date(parsed.data.eventAt) : null;
+  const inviteRole = parsed.data.inviteRole ?? "attendee";
+  // Only a presenter invite carries a room; storing one on an attendee invite would imply an
+  // assignment that nothing honours.
+  const roomCode = inviteRole === "presenter" ? parsed.data.roomCode!.trim() : null;
   const title = parsed.data.title?.trim() || "Check-in request";
-  const message = parsed.data.message?.trim() || `You've been invited to check in to ${sessionCode}.`;
+  const message =
+    parsed.data.message?.trim() ||
+    (parsed.data.inviteRole === "presenter"
+      ? `You're assigned to host ${parsed.data.roomCode?.trim()} in ${sessionCode}.`
+      : `You've been invited to check in to ${sessionCode}.`);
   // Dedupe case-insensitively: the same address picked from the list and typed by hand is one
   // invite, and two rows differing only by case would both violate the unique constraint anyway.
   const emails = [...new Set(parsed.data.emails.map(normalizeEmail))];
@@ -227,6 +241,8 @@ app.post("/api/admin/invites", async (request, response) => {
         title,
         message,
         eventAt,
+        inviteRole,
+        roomCode,
         createdAt: now
       })
       // Re-inviting resets the invite to pending and clears the old answer, which is what
@@ -234,7 +250,7 @@ app.post("/api/admin/invites", async (request, response) => {
       // silently do nothing visible.
       .onConflictDoUpdate({
         target: [schema.sessionInvites.sessionCode, schema.sessionInvites.email],
-        set: { status: "pending", respondedAt: null, title, message, eventAt, createdAt: now, invitedByUserId: request.user?.id }
+        set: { status: "pending", respondedAt: null, title, message, eventAt, inviteRole, roomCode, createdAt: now, invitedByUserId: request.user?.id }
       });
   }
 
@@ -294,6 +310,8 @@ app.get("/api/admin/invites", async (request, response) => {
       eventAt: schema.sessionInvites.eventAt,
       title: schema.sessionInvites.title,
       message: schema.sessionInvites.message,
+      inviteRole: schema.sessionInvites.inviteRole,
+      roomCode: schema.sessionInvites.roomCode,
       createdAt: schema.sessionInvites.createdAt,
       respondedAt: schema.sessionInvites.respondedAt,
       userName: schema.users.displayName,
@@ -314,6 +332,8 @@ app.get("/api/admin/invites", async (request, response) => {
     eventAt: r.eventAt,
     title: r.title,
     message: r.message,
+    inviteRole: r.inviteRole as "attendee" | "presenter",
+    roomCode: r.roomCode,
     createdAt: r.createdAt,
     respondedAt: r.respondedAt
   }));
@@ -353,6 +373,8 @@ app.patch("/api/admin/invites", async (request, response) => {
         .refine((v) => !Number.isNaN(Date.parse(v)), { message: "eventAt must be a valid ISO date-time" })
         .optional()
         .nullable(),
+      /** Presenter batches only; ignored for attendee invites, which have no room. */
+      roomCode: z.string().min(1).optional(),
       reAsk: z.boolean().optional()
     })
     .safeParse(request.body);
@@ -394,12 +416,27 @@ app.patch("/api/admin/invites", async (request, response) => {
     changes.status = "pending";
     changes.respondedAt = null;
   }
-  if (Object.keys(changes).length === 0) return response.json({ ok: true, updated: 0, sessionId: to, pushError: null });
+  if (Object.keys(changes).length === 0 && parsed.data.roomCode === undefined) {
+    return response.json({ ok: true, updated: 0, sessionId: to, pushError: null });
+  }
 
-  const result = await db
-    .update(schema.sessionInvites)
-    .set(changes)
-    .where(eq(schema.sessionInvites.sessionCode, from));
+  // Skipped when only a room reassignment was asked for: an empty `.set()` is a driver error,
+  // not a no-op.
+  const result =
+    Object.keys(changes).length > 0
+      ? await db.update(schema.sessionInvites).set(changes).where(eq(schema.sessionInvites.sessionCode, from))
+      : { count: 0 };
+
+  // Room reassignment is applied separately and only to presenter rows. A batch can hold both
+  // kinds, and an attendee invite must never carry a room — it would imply an assignment that
+  // nothing honours. Runs against the destination code, since the update above may have moved
+  // these rows already.
+  if (parsed.data.roomCode !== undefined) {
+    await db
+      .update(schema.sessionInvites)
+      .set({ roomCode: parsed.data.roomCode.trim() })
+      .where(and(eq(schema.sessionInvites.sessionCode, to), eq(schema.sessionInvites.inviteRole, "presenter")));
+  }
 
   // Only notify when replies were actually cleared — an edit that left answers alone doesn't
   // need to buzz everyone's phone.
@@ -441,6 +478,8 @@ app.get("/api/me/invites", async (request, response) => {
       title: schema.sessionInvites.title,
       message: schema.sessionInvites.message,
       eventAt: schema.sessionInvites.eventAt,
+      inviteRole: schema.sessionInvites.inviteRole,
+      roomCode: schema.sessionInvites.roomCode,
       createdAt: schema.sessionInvites.createdAt,
       respondedAt: schema.sessionInvites.respondedAt
     })
@@ -456,6 +495,8 @@ app.get("/api/me/invites", async (request, response) => {
       message: r.message,
       status: r.status as "pending" | "accepted" | "declined",
       eventAt: r.eventAt,
+      inviteRole: r.inviteRole as "attendee" | "presenter",
+      roomCode: r.roomCode,
       createdAt: r.createdAt,
       respondedAt: r.respondedAt
     }))

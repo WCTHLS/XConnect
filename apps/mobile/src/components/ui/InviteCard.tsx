@@ -19,6 +19,10 @@ export const InviteCard: React.FC<InviteCardProps> = ({ invite, onRespond }) => 
   const { colors } = useTheme();
   const [busy, setBusy] = useState<'accepted' | 'declined' | null>(null);
 
+  // A presenter invite is a room assignment, so the whole card speaks differently: it names the
+  // room first, and the actions are about hosting rather than turning up.
+  const isHosting = invite.inviteRole === 'presenter';
+
   const respond = async (response: 'accepted' | 'declined') => {
     if (busy) return;
     setBusy(response);
@@ -47,10 +51,11 @@ export const InviteCard: React.FC<InviteCardProps> = ({ invite, onRespond }) => 
         </View>
         <View style={styles.headerText}>
           <Text style={[styles.title, { color: colors.txt }]} numberOfLines={2}>
-            {invite.title || 'Check-in request'}
+            {invite.title || (isHosting ? 'Room assignment' : 'Check-in request')}
           </Text>
           <Text style={[styles.session, { color: palette.mintPresence }]} numberOfLines={1}>
-            {invite.sessionId}
+            {/* A presenter is being told WHICH ROOM, so that leads; the session is context. */}
+            {isHosting ? `${(invite.roomCode ?? '').toUpperCase()} · ${invite.sessionId}` : invite.sessionId}
           </Text>
         </View>
       </View>
@@ -91,7 +96,9 @@ export const InviteCard: React.FC<InviteCardProps> = ({ invite, onRespond }) => 
           {busy === 'declined' ? (
             <ActivityIndicator size="small" color={colors.sub} />
           ) : (
-            <Text style={[styles.buttonText, { color: colors.sub }]}>Can't make it</Text>
+            <Text style={[styles.buttonText, { color: colors.sub }]}>
+              {isHosting ? "Can't host" : "Can't make it"}
+            </Text>
           )}
         </TouchableOpacity>
 
@@ -104,13 +111,17 @@ export const InviteCard: React.FC<InviteCardProps> = ({ invite, onRespond }) => 
           {busy === 'accepted' ? (
             <ActivityIndicator size="small" color="#0F2F2C" />
           ) : (
-            <Text style={[styles.buttonText, { color: '#0F2F2C' }]}>I'll be there</Text>
+            <Text style={[styles.buttonText, { color: '#0F2F2C' }]}>
+              {isHosting ? "I'll host this" : "I'll be there"}
+            </Text>
           )}
         </TouchableOpacity>
       </View>
 
       <Text style={[styles.footnote, { color: colors.muted }]}>
-        Replying just lets the organiser plan. You still check in for real when you are in the room.
+        {isHosting
+          ? 'Accepting lets you start broadcasting this room from Home without typing it in.'
+          : 'Replying just lets the organiser plan. You still check in for real when you are in the room.'}
       </Text>
     </View>
   );

@@ -75,6 +75,13 @@ export interface RoomMemberInfo {
  */
 export type InviteStatus = "pending" | "accepted" | "declined";
 
+/**
+ * What an invite asks of someone. An attendee invite asks them to confirm they will be there; a
+ * presenter invite is a room assignment, so it carries `roomCode` and accepting it lets them
+ * start broadcasting that room without retyping it.
+ */
+export type InviteRole = "attendee" | "presenter";
+
 /** One row of the admin's response roster. */
 export interface SessionInvite {
   id: number;
@@ -89,6 +96,9 @@ export interface SessionInvite {
    *  prefill without a second request. */
   title?: string | null;
   message?: string | null;
+  inviteRole: InviteRole;
+  /** The room a presenter is assigned to. Always null on an attendee invite. */
+  roomCode: string | null;
   createdAt: string;
   respondedAt: string | null;
 }
@@ -103,6 +113,9 @@ export interface MyInvite {
   status: InviteStatus;
   /** When the event is scheduled for, if the admin set one. */
   eventAt: string | null;
+  inviteRole: InviteRole;
+  /** The room this presenter is assigned to. Always null on an attendee invite. */
+  roomCode: string | null;
   createdAt: string;
   respondedAt: string | null;
 }

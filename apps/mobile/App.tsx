@@ -21,6 +21,7 @@ import { BottomNav, MobileScreen, Role } from './src/components/navigation/Botto
 import { DevScreenSwitcher } from './src/components/navigation/DevScreenSwitcher';
 import { AppAlert, AppAlertHost } from './src/components/ui/AppAlert';
 import { BusyOverlay } from './src/components/ui/BusyOverlay';
+import { AdminOnlyNotice } from './src/components/ui/AdminOnlyNotice';
 
 // Screens
 import { LaunchScreen } from './src/screens/auth/LaunchScreen';
@@ -131,6 +132,11 @@ function MainApp() {
   // True only while a stop is in flight. service.stop() now awaits the leave request, so this is
   // a real wait the user would otherwise see as an unresponsive tap.
   const [stopping, setStopping] = useState(false);
+  // Whether the signed-in account is actually an admin, per the server. null = not known yet
+  // (offline, or the first /api/me hasn't landed), which is treated as "don't block" so a slow
+  // network never locks a real admin out of their own screens. The server enforces this for
+  // real via requireAdmin; this only stops the UI offering screens that would 403.
+  const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
 
   // Mirrors of state that the 3s polling callback needs to read. They are refs, not dependencies,
   // because putting `screen` or `activePresence` in fetchLiveRoom's dep array would rebuild the
@@ -283,6 +289,9 @@ function MainApp() {
         const name = me?.name ?? fallback;
         savedNameRef.current = name;
         setDisplayName(name);
+        // Same response already carries it, so this costs no extra request. With sign-in turned
+        // off entirely the server reports isAdmin: true, keeping POC mode open.
+        setIsAdmin(typeof me?.isAdmin === 'boolean' ? me.isAdmin : null);
       })
       .catch(() => {
         if (cancelled) return;
@@ -555,6 +564,10 @@ function MainApp() {
   // not just while on the overview/detail screens, so switching between them doesn't restart it.
   useEffect(() => {
     if (role !== 'admin') return;
+    // Confirmed non-admins are shown AdminOnlyNotice instead of these screens, so polling would
+    // only collect a 403 every 5s behind a screen nobody is looking at. `null` still polls: not
+    // knowing yet must not delay a real admin's first load.
+    if (isAdmin === false) return;
     let cancelled = false;
     const fetchOverview = async () => {
       try {
@@ -588,7 +601,9 @@ function MainApp() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [role, serverUrl]);
+    // isAdmin is a dependency so the poll starts the moment /api/me confirms admin status,
+    // rather than waiting for some other state change to re-run this effect.
+  }, [role, serverUrl, isAdmin]);
 
   // Presenter Rejoin flow (server-truth) — while a presenter is idle (not currently running),
   // keep checking whether the server already has a live room open under this signed-in user.
@@ -806,6 +821,24 @@ function MainApp() {
     }
   };
 
+  /**
+   * Starts an accepted presenter assignment. Adopts the assigned room AND session wholesale
+   * rather than letting the locally-selected values leak in — the point of the assignment is
+   * that the presenter never retypes either, so a typo cannot split the room attendees are
+   * being pointed at from the one actually being broadcast.
+   */
+  const handleStartAssignedRoom = async (assignedRoom: string, assignedSession: string) => {
+    setRoomId(assignedRoom);
+    setSessionId(assignedSession);
+    const ok = await togglePresence(true, {
+      role: 'presenter',
+      roomId: assignedRoom,
+      sessionId: assignedSession,
+      updatedAt: Date.now(),
+    });
+    if (ok) nav('presenterDashboard');
+  };
+
   const handleRejoinMyRoom = async (room: LiveRoomState) => {
     setRoomId(room.roomId);
     setSessionId(room.sessionId);
@@ -881,12 +914,14 @@ function MainApp() {
       emails: string[],
       title: string,
       message: string,
-      eventAt: string | null
+      eventAt: string | null,
+      inviteRole: 'attendee' | 'presenter',
+      roomCode: string | null
     ): Promise<InviteSendResult> => {
       const res = await authFetch(`${serverUrl}/api/admin/invites`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sessionId: inviteSessionId, emails, title, message, eventAt }),
+        body: JSON.stringify({ sessionId: inviteSessionId, emails, title, message, eventAt, inviteRole, roomCode }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(describeAdminError(res.status, data));
@@ -907,6 +942,7 @@ function MainApp() {
       title?: string;
       message?: string;
       eventAt?: string | null;
+      roomCode?: string;
       reAsk?: boolean;
     }): Promise<{ updated: number; sessionId: string; pushError: string | null }> => {
       const res = await authFetch(`${serverUrl}/api/admin/invites`, {
@@ -972,6 +1008,7 @@ function MainApp() {
       hasDetectedRoom={Boolean(detectedRoom)}
       invites={myInvites}
       onRespondToInvite={handleRespondToInvite}
+      onStartAssignedRoom={handleStartAssignedRoom}
     />
   );
 
@@ -1178,6 +1215,15 @@ function MainApp() {
           />
         );
       case 'adminOverview':
+        if (isAdmin === false) {
+          return (
+            <AdminOnlyNotice
+              feature="The live room monitor"
+              userEmail={authSession?.email}
+              onNavigate={nav}
+            />
+          );
+        }
         return (
           <AdminOverviewScreen
             rooms={adminRooms}
@@ -1187,6 +1233,15 @@ function MainApp() {
           />
         );
       case 'adminRoomDetail': {
+        if (isAdmin === false) {
+          return (
+            <AdminOnlyNotice
+              feature="Room details"
+              userEmail={authSession?.email}
+              onNavigate={nav}
+            />
+          );
+        }
         // selectedAdminRoom is only the identity captured at the moment of selection — the
         // actual displayed room is looked up fresh from adminRooms every render, so the roster
         // updates on each 5s poll instead of freezing at whatever it looked like when tapped.
@@ -1214,6 +1269,15 @@ function MainApp() {
         );
       }
       case 'adminHistory':
+        if (isAdmin === false) {
+          return (
+            <AdminOnlyNotice
+              feature="Session history"
+              userEmail={authSession?.email}
+              onNavigate={nav}
+            />
+          );
+        }
         return (
           <AdminHistoryScreen
             onSearch={handleSearchHistory}
@@ -1222,6 +1286,17 @@ function MainApp() {
           />
         );
       case 'adminCheckIn':
+        // Guarded here as well as on Notify: Check-In is reached from that screen, so without
+        // this a non-admin could still land on a form whose every request would 403.
+        if (isAdmin === false) {
+          return (
+            <AdminOnlyNotice
+              feature="Check-in invites"
+              userEmail={authSession?.email}
+              onNavigate={nav}
+            />
+          );
+        }
         return (
           <AdminCheckInScreen
             defaultSessionId={sessionId}
@@ -1233,6 +1308,15 @@ function MainApp() {
           />
         );
       case 'adminNotify':
+        if (isAdmin === false) {
+          return (
+            <AdminOnlyNotice
+              feature="Sending notifications"
+              userEmail={authSession?.email}
+              onNavigate={nav}
+            />
+          );
+        }
         return (
           <AdminNotifyScreen
             onSendNotification={handleSendNotification}
