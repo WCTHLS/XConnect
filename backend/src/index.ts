@@ -3,7 +3,7 @@ import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, or } from "drizzle-
 import express from "express";
 import { z } from "zod";
 import { authEnabled, authenticate, forgetCachedUser, requireAdmin } from "./auth.js";
-import { db, schema } from "./db/index.js";
+import { db, schema, type Db } from "./db/index.js";
 import { PocInferenceEngine } from "./inference.js";
 import { pushEnabled, registerInstallation, sendToEmails } from "./notifications.js";
 
@@ -243,6 +243,24 @@ app.post("/api/admin/invites", async (request, response) => {
   const sessionCode = parsed.data.sessionId.trim();
   const eventAt = parsed.data.eventAt ? new Date(parsed.data.eventAt) : null;
   const inviteRole = parsed.data.inviteRole ?? "attendee";
+
+  // One batch per role per session. A session legitimately has both sides — the people checking in
+  // and whoever is hosting — and the invite form sends both together under one code. What it must
+  // not have is a SECOND batch of the same kind: the roster only groups by code, so a second
+  // attendee batch would be invisible alongside the first, and editing or re-asking the session
+  // would act on both at once. Changing who or what an existing batch invites goes through the
+  // Responses screen instead, which acts on the whole session deliberately.
+  const alreadyUsed = await db
+    .select({ id: schema.sessionInvites.id })
+    .from(schema.sessionInvites)
+    .where(and(eq(schema.sessionInvites.sessionCode, sessionCode), eq(schema.sessionInvites.inviteRole, inviteRole)))
+    .limit(1);
+  if (alreadyUsed.length > 0) {
+    return response.status(409).json({
+      error: `The session code "${sessionCode}" already has ${inviteRole === "presenter" ? "a presenter" : "an attendee"} invite. Change the code, or edit the details from the Responses section.`
+    });
+  }
+
   // Only a presenter invite carries a room; storing one on an attendee invite would imply an
   // assignment that nothing honours.
   const roomCode = inviteRole === "presenter" ? parsed.data.roomCode!.trim() : null;
@@ -414,23 +432,25 @@ app.patch("/api/admin/invites", async (request, response) => {
   const reAsk = parsed.data.reAsk === true;
 
   const batch = await db
-    .select({ email: schema.sessionInvites.email })
+    .select({ email: schema.sessionInvites.email, inviteRole: schema.sessionInvites.inviteRole })
     .from(schema.sessionInvites)
     .where(eq(schema.sessionInvites.sessionCode, from));
   if (batch.length === 0) return response.status(404).json({ error: `No invites found for "${from}"` });
 
-  // Renaming the session moves every row onto a new (session_code, email) key. If the target
-  // code already has an invite for one of these people, the unique constraint would reject the
-  // whole update — so say which addresses clash rather than surfacing a raw database error.
+  // Renaming moves every row under this code onto the new one, so the destination must be free of
+  // the roles being moved — one batch per role per session, the same rule Send Invites enforces.
+  // Checked per role rather than per code: moving an attendee batch onto a code that only has a
+  // presenter invite is exactly the pairing the invite form itself creates, so it is allowed.
   if (to !== from) {
-    const emails = batch.map((b) => b.email);
+    const roles = [...new Set(batch.map((b) => b.inviteRole))];
     const clashes = await db
-      .select({ email: schema.sessionInvites.email })
+      .select({ inviteRole: schema.sessionInvites.inviteRole })
       .from(schema.sessionInvites)
-      .where(and(eq(schema.sessionInvites.sessionCode, to), inArray(schema.sessionInvites.email, emails)));
+      .where(and(eq(schema.sessionInvites.sessionCode, to), inArray(schema.sessionInvites.inviteRole, roles)));
     if (clashes.length > 0) {
+      const clashing = [...new Set(clashes.map((c) => c.inviteRole))].join(" and ");
       return response.status(409).json({
-        error: `"${to}" already has invites for: ${clashes.map((c) => c.email).join(", ")}`
+        error: `"${to}" already has ${clashing} invites. Pick a code with no invites of that kind yet.`
       });
     }
   }
@@ -502,6 +522,155 @@ app.patch("/api/admin/invites", async (request, response) => {
   console.log(`✏️  [INVITE] '${from}'${to !== from ? ` renamed to '${to}'` : ""} edited by ${request.user?.email || "unknown"}${reAsk ? " (replies cleared, re-asked)" : ""}`);
 
   return response.json({ ok: true, updated: result.count, sessionId: to, pushError });
+});
+
+/**
+ * Admin-only: changes WHO a session invites, which the PATCH above deliberately never does — it
+ * only edits fields on rows that already exist. Adding and removing people is how a wrong
+ * presenter gets swapped out or a forgotten attendee gets added after the fact, which since a
+ * session code can only be sent once is otherwise impossible.
+ *
+ * Added people inherit the session's existing title, schedule and (for presenters) room, so a
+ * late addition is asked exactly what everyone else was asked.
+ */
+app.post("/api/admin/invites/recipients", async (request, response) => {
+  if (!db) return response.status(503).json({ error: "Invites require Postgres persistence (DATABASE_URL not set)" });
+
+  const parsed = z
+    .object({
+      sessionId: z.string().min(1),
+      inviteRole: z.enum(["attendee", "presenter"]),
+      add: z.array(z.string().email()).optional(),
+      remove: z.array(z.string().email()).optional(),
+      /** Only consulted when adding the session's first presenter; otherwise the existing one is
+       *  inherited so two presenter rows can never disagree about the room. */
+      roomCode: z.string().min(1).optional()
+    })
+    .safeParse(request.body);
+  if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
+
+  const sessionCode = parsed.data.sessionId.trim();
+  const inviteRole = parsed.data.inviteRole;
+  const toAdd = [...new Set((parsed.data.add ?? []).map(normalizeEmail))];
+  const toRemove = [...new Set((parsed.data.remove ?? []).map(normalizeEmail))];
+  if (toAdd.length === 0 && toRemove.length === 0) {
+    return response.status(400).json({ error: "Nothing to add or remove" });
+  }
+
+  const existing = await db
+    .select({
+      email: schema.sessionInvites.email,
+      inviteRole: schema.sessionInvites.inviteRole,
+      title: schema.sessionInvites.title,
+      message: schema.sessionInvites.message,
+      eventAt: schema.sessionInvites.eventAt,
+      roomCode: schema.sessionInvites.roomCode
+    })
+    .from(schema.sessionInvites)
+    .where(eq(schema.sessionInvites.sessionCode, sessionCode));
+  if (existing.length === 0) return response.status(404).json({ error: `No invites found for "${sessionCode}"` });
+
+  // Nobody can hold both roles in one session: the invite key is (session, email), so letting
+  // this through would silently convert their existing invite rather than adding a second one.
+  const conflicting = toAdd.filter((email) =>
+    existing.some((row) => row.email === email && row.inviteRole !== inviteRole)
+  );
+  if (conflicting.length > 0) {
+    return response.status(409).json({
+      error: `${conflicting.join(", ")} ${conflicting.length === 1 ? "is" : "are"} already invited to "${sessionCode}" as ${inviteRole === "presenter" ? "an attendee" : "a presenter"}. Remove them from that list first.`
+    });
+  }
+
+  const sameRole = existing.filter((row) => row.inviteRole === inviteRole);
+  // Already on this list, so adding them again would only reset an answer they already gave.
+  const skipped = toAdd.filter((email) => sameRole.some((row) => row.email === email));
+  const adding = toAdd.filter((email) => !skipped.includes(email));
+
+  const roomCode =
+    inviteRole === "presenter" ? sameRole.find((row) => row.roomCode)?.roomCode ?? parsed.data.roomCode?.trim() ?? null : null;
+  if (inviteRole === "presenter" && adding.length > 0 && !roomCode) {
+    return response.status(400).json({ error: "Name the room this presenter is assigned to" });
+  }
+
+  // Inherited from the session so a late addition matches what everyone else was sent. The
+  // message is taken from the same role where possible, since the two halves are worded for their
+  // own audience; falling back to this role's standard wording when it has no rows yet.
+  const title = existing[0].title ?? "Check-in request";
+  const eventAt = existing[0].eventAt ?? null;
+  const message =
+    sameRole.find((row) => row.message)?.message ??
+    (inviteRole === "presenter"
+      ? `You're assigned to host ${roomCode} in ${sessionCode}.`
+      : `You've been invited to check in to ${sessionCode}.`);
+
+  const now = new Date();
+  for (const email of adding) {
+    await db.insert(schema.sessionInvites).values({
+      sessionCode,
+      email,
+      status: "pending",
+      invitedByUserId: request.user?.id,
+      title,
+      message,
+      eventAt,
+      inviteRole,
+      roomCode,
+      createdAt: now
+    });
+  }
+
+  let removed = 0;
+  if (toRemove.length > 0) {
+    // Scoped to the role being edited, so removing "alice" from the attendee list can never take
+    // out a presenter row that happens to share the address.
+    const result = await db
+      .delete(schema.sessionInvites)
+      .where(
+        and(
+          eq(schema.sessionInvites.sessionCode, sessionCode),
+          eq(schema.sessionInvites.inviteRole, inviteRole),
+          inArray(schema.sessionInvites.email, toRemove)
+        )
+      );
+    removed = result.count;
+  }
+
+  // Same as sending: link new rows to a known account so the roster shows a real name.
+  if (adding.length > 0) {
+    const knownUsers = await db
+      .select({ id: schema.users.id, email: schema.users.email })
+      .from(schema.users)
+      .where(isNotNull(schema.users.email));
+    for (const user of knownUsers) {
+      const email = normalizeEmail(user.email as string);
+      if (!adding.includes(email)) continue;
+      await db
+        .update(schema.sessionInvites)
+        .set({ userId: user.id })
+        .where(and(eq(schema.sessionInvites.sessionCode, sessionCode), eq(schema.sessionInvites.email, email)));
+    }
+  }
+
+  // Only the newly added are notified: the people already on the list were asked when the invite
+  // first went out, and nothing about their invite changed here.
+  let pushError: string | null = null;
+  if (adding.length > 0) {
+    if (pushEnabled) {
+      try {
+        await sendToEmails(adding, title, message);
+      } catch (err: any) {
+        pushError = err?.message || "Push send failed";
+      }
+    } else {
+      pushError = "Push notifications are not configured on this server";
+    }
+  }
+
+  console.log(
+    `👥 [INVITE] '${sessionCode}' ${inviteRole} list: +${adding.length} -${removed} by ${request.user?.email || "unknown"}`
+  );
+
+  return response.json({ ok: true, added: adding.length, removed, skipped, pushError });
 });
 
 /**
@@ -637,6 +806,117 @@ app.post("/api/me/rooms/end", (request, response) => {
     : `⚠️  [SELF-END] ${request.user.email || request.user.id} tried to end '${parsed.data.roomId}' but doesn't own it`);
 
   return response.json({ ok: true, ended });
+});
+
+/**
+ * The signed-in person's own attendance totals, for the Profile card. Built from room_membership,
+ * which is sensor-verified presence — not from invites, which are only statements of intent.
+ *
+ * Rooms this person was in are counted rather than membership rows: leaving and rejoining the
+ * same room writes a second row but is still one session attended. For the same reason the time
+ * is summed over MERGED intervals per room — two of their devices in one room overlap, and
+ * counting both would inflate the total.
+ */
+app.get("/api/me/stats", async (request, response) => {
+  if (!request.user) return response.status(401).json({ error: "unauthenticated" });
+  const empty = { sessions: 0, dwellMs: 0, avgConfidence: null as number | null };
+  if (!db) return response.json(empty);
+
+  const rows = await db
+    .select({
+      roomId: schema.roomMembership.roomId,
+      startedAt: schema.roomMembership.startedAt,
+      endedAt: schema.roomMembership.endedAt,
+      lastConfidence: schema.roomMembership.lastConfidence,
+      avgConfidence: schema.roomMembership.avgConfidence
+    })
+    .from(schema.roomMembership)
+    .where(eq(schema.roomMembership.userId, request.user.id));
+  if (rows.length === 0) return response.json(empty);
+
+  const now = Date.now();
+  const byRoom = new Map<string, { start: number; end: number }[]>();
+  for (const row of rows) {
+    const start = row.startedAt.getTime();
+    // An open stay is still running, so it counts up to now rather than as zero.
+    const end = row.endedAt ? row.endedAt.getTime() : now;
+    if (end <= start) continue;
+    const list = byRoom.get(row.roomId) ?? [];
+    list.push({ start, end });
+    byRoom.set(row.roomId, list);
+  }
+
+  let dwellMs = 0;
+  for (const stays of byRoom.values()) {
+    stays.sort((a, b) => a.start - b.start);
+    let [current] = stays;
+    for (const stay of stays.slice(1)) {
+      if (stay.start <= current.end) current = { start: current.start, end: Math.max(current.end, stay.end) };
+      else {
+        dwellMs += current.end - current.start;
+        current = stay;
+      }
+    }
+    dwellMs += current.end - current.start;
+  }
+
+  // The stay's own average where it has one, falling back to its exit reading for stays recorded
+  // before that was tracked — otherwise older history would silently drop out of the figure.
+  const confidences = rows
+    .map((r) => r.avgConfidence ?? r.lastConfidence)
+    .filter((c): c is number => typeof c === "number");
+  const avgConfidence = confidences.length > 0 ? confidences.reduce((a, b) => a + b, 0) / confidences.length : null;
+
+  return response.json({ sessions: byRoom.size, dwellMs, avgConfidence });
+});
+
+/**
+ * A presenter's report for a room they hosted. The admin history route is admin-gated, but a
+ * presenter exporting the attendance for their own session is not an admin action — so this is
+ * the same document, authorised differently: you get a room back only if you have a presenter
+ * membership row in it.
+ *
+ * Identified by room code plus session label rather than occurrence id, because that is what the
+ * presenter's screen knows — the occurrence id is generated server-side and never shown. The
+ * most recent matching occurrence they presented is the one they just finished.
+ */
+app.get("/api/me/room-history", async (request, response) => {
+  if (!request.user) return response.status(401).json({ error: "unauthenticated" });
+  if (!db) return response.status(503).json({ error: "History requires Postgres persistence (DATABASE_URL not set)" });
+
+  const roomCode = String(request.query.roomId ?? "").trim();
+  const sessionLabel = String(request.query.sessionId ?? "").trim();
+  if (!roomCode) return response.status(400).json({ error: "roomId query param is required" });
+
+  // Authorisation and lookup in one step: only occurrences this account has a presenter row in
+  // are considered, so there is no way to name someone else's room and read it back.
+  const conditions = [
+    eq(schema.roomMembership.userId, request.user.id),
+    eq(schema.roomMembership.role, "presenter"),
+    eq(schema.rooms.code, roomCode)
+  ];
+  if (sessionLabel) conditions.push(eq(schema.sessions.code, sessionLabel));
+
+  const [mine] = await db
+    .select({ roomId: schema.rooms.id })
+    .from(schema.roomMembership)
+    .innerJoin(schema.rooms, eq(schema.rooms.id, schema.roomMembership.roomId))
+    .leftJoin(schema.sessions, eq(schema.sessions.id, schema.rooms.sessionId))
+    .where(and(...conditions))
+    .orderBy(desc(schema.roomMembership.startedAt))
+    .limit(1);
+
+  if (!mine) {
+    // Deliberately the same answer whether the room never existed or belongs to someone else:
+    // nothing here should confirm the existence of another presenter's room.
+    return response.status(404).json({
+      error: `No finished session found for "${roomCode}" under this account. A report is available once the room has ended and its attendance has been written.`
+    });
+  }
+
+  const history = await buildRoomHistory(db, mine.roomId);
+  if (!history) return response.status(404).json({ error: "No room found with that ID" });
+  return response.json(history);
 });
 
 app.post("/api/admin/session/end", (request, response) => {
@@ -778,13 +1058,14 @@ app.get("/api/admin/sessions", async (request, response) => {
   return response.json({ sessions });
 });
 
-app.get("/api/admin/history", async (request, response) => {
-  if (!db) return response.status(503).json({ error: "History requires Postgres persistence (DATABASE_URL not set)" });
-
-  // `roomId` is the room occurrence ID; `sessionId` is accepted as the same thing for older clients.
-  const roomOccurrenceId = String(request.query.roomId ?? request.query.sessionId ?? "").trim();
-  if (!roomOccurrenceId) return response.status(400).json({ error: "roomId query param is required" });
-
+/**
+ * The full attendance record for one room occurrence. Shared by the admin history screen and a
+ * presenter exporting their own room's report, so the two can never disagree about what happened
+ * — the presenter's copy is the same document, just reached through a different door.
+ *
+ * Returns null when the occurrence doesn't exist. Callers own authorisation.
+ */
+async function buildRoomHistory(db: Db, roomOccurrenceId: string) {
   const [room] = await db
     .select({
       id: schema.rooms.id,
@@ -796,7 +1077,7 @@ app.get("/api/admin/history", async (request, response) => {
     .from(schema.rooms)
     .leftJoin(schema.sessions, eq(schema.sessions.id, schema.rooms.sessionId))
     .where(eq(schema.rooms.id, roomOccurrenceId));
-  if (!room) return response.status(404).json({ error: "No room found with that ID" });
+  if (!room) return null;
 
   const rows = await db
     .select({
@@ -810,6 +1091,7 @@ app.get("/api/admin/history", async (request, response) => {
       startedAt: schema.roomMembership.startedAt,
       endedAt: schema.roomMembership.endedAt,
       lastConfidence: schema.roomMembership.lastConfidence,
+      avgConfidence: schema.roomMembership.avgConfidence,
       ultrasonicVerified: schema.roomMembership.ultrasonicVerified,
       motionAnomalyFlag: schema.roomMembership.motionAnomalyFlag
     })
@@ -818,6 +1100,50 @@ app.get("/api/admin/history", async (request, response) => {
     .leftJoin(schema.users, eq(schema.users.id, schema.roomMembership.userId))
     .where(eq(schema.roomMembership.roomId, roomOccurrenceId))
     .orderBy(schema.roomMembership.startedAt);
+
+  // How long each flag was actually true, from the transition log. Events are keyed only by
+  // (room, device) with no reference to a membership row, so a device that left and rejoined the
+  // same room shares one event stream across both stays — each stay therefore claims only the
+  // events inside its own window.
+  const flagEvents = await db
+    .select({
+      deviceId: schema.stateChangeEvents.deviceId,
+      field: schema.stateChangeEvents.field,
+      value: schema.stateChangeEvents.value,
+      changedAt: schema.stateChangeEvents.changedAt
+    })
+    .from(schema.stateChangeEvents)
+    .where(
+      and(
+        eq(schema.stateChangeEvents.roomId, roomOccurrenceId),
+        inArray(schema.stateChangeEvents.field, ["motion_anomaly_flag", "ultrasonic_verified"])
+      )
+    )
+    .orderBy(schema.stateChangeEvents.changedAt);
+
+  /**
+   * Total time `field` was true for one stay. Starts from "not flagged" when no opening event
+   * exists (older stays logged only changes, never the starting value) and closes anything still
+   * open at the end of the stay, since a flag stops being observable once the device leaves.
+   */
+  function flaggedMsFor(deviceId: string, field: string, startedAt: Date, endedAt: Date | null): number {
+    const stayStart = startedAt.getTime();
+    const stayEnd = endedAt ? endedAt.getTime() : Date.now();
+    let total = 0;
+    let openSince: number | null = null;
+    for (const ev of flagEvents) {
+      if (ev.deviceId !== deviceId || ev.field !== field) continue;
+      const at = ev.changedAt.getTime();
+      if (at < stayStart || at > stayEnd) continue;
+      if (ev.value && openSince === null) openSince = at;
+      else if (!ev.value && openSince !== null) {
+        total += at - openSince;
+        openSince = null;
+      }
+    }
+    if (openSince !== null) total += stayEnd - openSince;
+    return total;
+  }
 
   const members = rows.map((m) => ({
     // Group by person when there's an account, so several leaves and joins (or a new phone)
@@ -830,17 +1156,38 @@ app.get("/api/admin/history", async (request, response) => {
     endedAt: m.endedAt,
     durationMs: m.endedAt ? new Date(m.endedAt).getTime() - new Date(m.startedAt).getTime() : undefined,
     lastConfidence: m.lastConfidence,
+    // Null on stays recorded before the running average existed; the client falls back to the
+    // exit reading there rather than showing a gap.
+    avgConfidence: m.avgConfidence,
     ultrasonicVerified: m.ultrasonicVerified,
-    motionAnomalyFlag: m.motionAnomalyFlag
+    motionAnomalyFlag: m.motionAnomalyFlag,
+    motionAnomalyMs: flaggedMsFor(m.deviceId, "motion_anomaly_flag", m.startedAt, m.endedAt),
+    // Null rather than 0 for a presenter: they emit the tone instead of hearing it, so there is
+    // no verification to time. A zero would read as "never verified", which is a different and
+    // wrong claim.
+    ultrasonicVerifiedMs:
+      m.role === "presenter" ? null : flaggedMsFor(m.deviceId, "ultrasonic_verified", m.startedAt, m.endedAt)
   }));
 
-  return response.json({
+  return {
     sessionId: room.id,
     code: room.sessionLabel ?? room.roomCode,
     startedAt: room.startedAt,
     endedAt: room.endedAt,
     rooms: members.length ? [{ roomId: room.roomCode, members }] : []
-  });
+  };
+}
+
+app.get("/api/admin/history", async (request, response) => {
+  if (!db) return response.status(503).json({ error: "History requires Postgres persistence (DATABASE_URL not set)" });
+
+  // `roomId` is the room occurrence ID; `sessionId` is accepted as the same thing for older clients.
+  const roomOccurrenceId = String(request.query.roomId ?? request.query.sessionId ?? "").trim();
+  if (!roomOccurrenceId) return response.status(400).json({ error: "roomId query param is required" });
+
+  const history = await buildRoomHistory(db, roomOccurrenceId);
+  if (!history) return response.status(404).json({ error: "No room found with that ID" });
+  return response.json(history);
 });
 
 app.post("/api/session/leave", (request, response) => {

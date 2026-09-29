@@ -914,22 +914,6 @@ function MainApp() {
     if (ok) nav('presenterDashboard');
   };
 
-  // Sends a push notification to whoever's signed in under the given emails. Throws on failure
-  // (network error, non-2xx, or push not configured server-side) so AdminNotifyScreen's own
-  // try/catch can show the error inline rather than this owning that UI concern.
-  const handleSendNotification = async (emails: string[], title: string, message: string) => {
-    const res = await authFetch(`${serverUrl}/api/admin/notifications/send`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ emails, title, message }),
-    });
-    const data = await res.json().catch(() => null);
-    if (!res.ok) {
-      throw new Error(data?.error ? JSON.stringify(data.error) : `Server returned ${res.status}`);
-    }
-    return { matchedEmails: data.matchedEmails ?? [], unmatchedEmails: data.unmatchedEmails ?? [] };
-  };
-
   /**
    * Signing out has to tear down the live session too, not just the token. Two orderings matter
    * here: presence is stopped BEFORE signOut(), because service.stop() fires a leave request that
@@ -997,6 +981,65 @@ function MainApp() {
         invited: data.invited ?? 0,
         pushed: data.pushed ?? [],
         notReachableByPush: data.notReachableByPush ?? [],
+        pushError: data.pushError ?? null,
+      };
+    },
+    [serverUrl]
+  );
+
+  /** The attendance record for a room this account presented, for the presenter's own report.
+   *  Separate from the admin history fetch because that route is admin-gated. */
+  const handleFetchMyRoomHistory = useCallback(
+    async (room: string, session: string): Promise<HistoryDetail> => {
+      const res = await authFetch(
+        `${serverUrl}/api/me/room-history?roomId=${encodeURIComponent(room)}&sessionId=${encodeURIComponent(session)}`
+      );
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(describeAdminError(res.status, data));
+      return data as HistoryDetail;
+    },
+    [serverUrl]
+  );
+
+  /** This account's own attendance totals for the Profile card. Returns null on any failure so
+   *  the card can show that the figures aren't available rather than inventing them. */
+  const handleFetchMyStats = useCallback(async () => {
+    try {
+      const res = await authFetch(`${serverUrl}/api/me/stats`);
+      if (!res.ok) return null;
+      const data = await res.json().catch(() => null);
+      if (!data) return null;
+      return {
+        sessions: data.sessions ?? 0,
+        dwellMs: data.dwellMs ?? 0,
+        avgConfidence: typeof data.avgConfidence === 'number' ? data.avgConfidence : null,
+      };
+    } catch {
+      return null;
+    }
+  }, [serverUrl]);
+
+  /** Changes who a session invites, as opposed to what it says — a separate route because the
+   *  edit endpoint never adds or removes rows. */
+  const handleEditRecipients = useCallback(
+    async (edit: {
+      sessionId: string;
+      inviteRole: 'attendee' | 'presenter';
+      add?: string[];
+      remove?: string[];
+      roomCode?: string;
+    }): Promise<{ added: number; removed: number; skipped: string[]; pushError: string | null }> => {
+      const res = await authFetch(`${serverUrl}/api/admin/invites/recipients`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(edit),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(describeAdminError(res.status, data));
+      return {
+        added: data.added ?? 0,
+        removed: data.removed ?? 0,
+        skipped: data.skipped ?? [],
         pushError: data.pushError ?? null,
       };
     },
@@ -1126,6 +1169,7 @@ function MainApp() {
           <ProfileScreen
             displayName={displayName}
             onSaveDisplayName={saveDisplayName}
+            onFetchMyStats={handleFetchMyStats}
             userEmail={authSession?.email}
             role={role}
             deviceId={deviceId}
@@ -1200,6 +1244,7 @@ function MainApp() {
             endedAt={isLive ? null : new Date(sessionStartTime + sessionDurationMs).toISOString()}
             acousticMatchPercent={acousticPct}
             wifiSimilarityPercent={avgWifi}
+            onFetchRoomHistory={handleFetchMyRoomHistory}
             onNavigate={nav}
           />
         );
@@ -1373,8 +1418,6 @@ function MainApp() {
             defaultSessionId={sessionId}
             onFetchUsers={handleFetchUsers}
             onSendInvites={handleSendInvites}
-            onFetchInvites={handleFetchInvites}
-            onEditInvites={handleEditInvites}
             onNavigate={nav}
           />
         );
@@ -1390,7 +1433,9 @@ function MainApp() {
         }
         return (
           <AdminNotifyScreen
-            onSendNotification={handleSendNotification}
+            onFetchInvites={handleFetchInvites}
+            onEditInvites={handleEditInvites}
+            onEditRecipients={handleEditRecipients}
             onFetchUsers={handleFetchUsers}
             onNavigate={nav}
           />

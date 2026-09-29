@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -6,10 +6,8 @@ import {
   TouchableOpacity,
   StyleSheet,
   ScrollView,
-  ActivityIndicator,
   Modal,
   Platform,
-  Switch,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
@@ -47,18 +45,6 @@ interface AdminCheckInScreenProps {
     /** Required for a presenter invite, null for an attendee one. */
     roomCode: string | null
   ) => Promise<InviteSendResult>;
-  onFetchInvites: (sessionId: string) => Promise<InviteRoster>;
-  /** Edits a whole already-sent batch. Omitted fields are left as they are; `eventAt: null`
-   *  explicitly clears the schedule, and `reAsk` clears replies and re-notifies. */
-  onEditInvites: (edit: {
-    sessionId: string;
-    newSessionId?: string;
-    title?: string;
-    message?: string;
-    eventAt?: string | null;
-    roomCode?: string;
-    reAsk?: boolean;
-  }) => Promise<{ updated: number; sessionId: string; pushError: string | null }>;
   onNavigate: (screen: MobileScreen) => void;
 }
 
@@ -71,67 +57,36 @@ function defaultEventAt(): Date {
   return d;
 }
 
-const STATUS_META: Record<SessionInvite['status'], { label: string; color: string; tint: string }> = {
-  accepted: { label: 'ACCEPTED', color: palette.mintPresence, tint: 'rgba(51,209,172,0.15)' },
-  declined: { label: 'DECLINED', color: palette.roseError, tint: 'rgba(239,68,68,0.15)' },
-  pending: { label: 'NO REPLY', color: palette.amberWarn, tint: 'rgba(245,158,11,0.15)' },
-  // Set server-side once eventAt has passed while still pending — a no-reply that came too late
-  // to still act on, distinct from one the admin can still chase. A plain neutral rather than a
-  // theme color: this map is a static module-level constant with no access to the theme context.
-  expired: { label: 'EXPIRED', color: '#94A3B8', tint: 'rgba(148,163,184,0.15)' },
-};
-
 export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
   defaultSessionId,
   onFetchUsers,
   onSendInvites,
-  onFetchInvites,
-  onEditInvites,
   onNavigate,
 }) => {
   const { colors } = useTheme();
-  const [tab, setTab] = useState<'invite' | 'responses'>('invite');
   const [sessionId, setSessionId] = useState(defaultSessionId);
 
-  // Compose state
+  // Compose state. Both sides of a session are filled in here and sent together under one code:
+  // whoever is hosting, and whoever is being asked to check in.
   const [users, setUsers] = useState<NotifiableUser[]>([]);
   const [usersLoading, setUsersLoading] = useState(true);
-  const [selectedEmails, setSelectedEmails] = useState<Set<string>>(new Set());
-  const [typedEmails, setTypedEmails] = useState('');
+  const [selectedPresenters, setSelectedPresenters] = useState<Set<string>>(new Set());
+  const [typedPresenters, setTypedPresenters] = useState('');
+  const [selectedAttendees, setSelectedAttendees] = useState<Set<string>>(new Set());
+  const [typedAttendees, setTypedAttendees] = useState('');
   const [title, setTitle] = useState('Check-in request');
   const [message, setMessage] = useState('');
   // One Date holds the whole schedule; the two pickers each edit their half of it. null means
   // the admin hasn't set a time, which is a valid invite.
-  const [inviteRole, setInviteRole] = useState<InviteRole>('attendee');
   const [roomCode, setRoomCode] = useState('');
   const [eventAt, setEventAt] = useState<Date | null>(null);
   const [picking, setPicking] = useState<'date' | 'time' | null>(null);
-  const [pickerOpen, setPickerOpen] = useState(false);
+  // Which list the account picker is currently filling, or null while it's closed — one sheet
+  // serves both rather than two near-identical copies of it.
+  const [pickerRole, setPickerRole] = useState<InviteRole | null>(null);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sendResult, setSendResult] = useState<InviteSendResult | null>(null);
-
-  // Roster state. The whole roster is fetched unfiltered and narrowed on the client, so the
-  // session dropdown can only ever offer codes that actually have invites behind them — deriving
-  // the options from the same data being displayed means the two can't disagree.
-  const [allInvites, setAllInvites] = useState<SessionInvite[] | null>(null);
-  const [rosterLoading, setRosterLoading] = useState(false);
-  const [rosterError, setRosterError] = useState<string | null>(null);
-  // null means "every session" — a real code can never be null, so there is no sentinel to collide.
-  const [responseSession, setResponseSession] = useState<string | null>(null);
-  const [sessionPickerOpen, setSessionPickerOpen] = useState(false);
-
-  // Edit-a-sent-batch state. Seeded from the roster when the sheet opens, so the form starts
-  // from what was actually sent rather than from blank fields.
-  const [editOpen, setEditOpen] = useState(false);
-  const [editSessionId, setEditSessionId] = useState('');
-  const [editTitle, setEditTitle] = useState('');
-  const [editMessage, setEditMessage] = useState('');
-  const [editEventAt, setEditEventAt] = useState<Date | null>(null);
-  const [editPicking, setEditPicking] = useState<'date' | 'time' | null>(null);
-  const [editReAsk, setEditReAsk] = useState(false);
-  const [editSaving, setEditSaving] = useState(false);
-  const [editError, setEditError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -149,120 +104,6 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
       cancelled = true;
     };
   }, [onFetchUsers]);
-
-  // Deliberately fetches every session's invites rather than just the selected one: the dropdown
-  // needs the full set of codes to offer, and switching between them shouldn't cost a round trip.
-  const loadRoster = useCallback(async () => {
-    setRosterLoading(true);
-    setRosterError(null);
-    try {
-      const result = await onFetchInvites('');
-      setAllInvites(result.invites);
-    } catch (err: any) {
-      setRosterError(err?.message || 'Could not load responses.');
-      setAllInvites(null);
-    } finally {
-      setRosterLoading(false);
-    }
-  }, [onFetchInvites]);
-
-  useEffect(() => {
-    if (tab === 'responses') void loadRoster();
-  }, [tab, loadRoster]);
-
-  // Distinct codes, most recently invited first — `invites` arrives newest-first from the server,
-  // so first-seen order is already the order we want.
-  const sessionOptions = useMemo(() => {
-    const seen: string[] = [];
-    for (const invite of allInvites ?? []) {
-      if (!seen.includes(invite.sessionId)) seen.push(invite.sessionId);
-    }
-    return seen;
-  }, [allInvites]);
-
-  // If the selected code disappears (its invites were removed, or the list reloaded without it),
-  // fall back to showing everything rather than an empty list under a stale label.
-  useEffect(() => {
-    if (responseSession === null) return;
-    if (allInvites && !sessionOptions.includes(responseSession)) setResponseSession(null);
-  }, [allInvites, sessionOptions, responseSession]);
-
-  const visibleInvites = useMemo(
-    () =>
-      responseSession === null
-        ? allInvites ?? []
-        : (allInvites ?? []).filter(i => i.sessionId === responseSession),
-    [allInvites, responseSession]
-  );
-
-  const visibleCounts = useMemo(
-    () => ({
-      total: visibleInvites.length,
-      accepted: visibleInvites.filter(i => i.status === 'accepted').length,
-      declined: visibleInvites.filter(i => i.status === 'declined').length,
-      pending: visibleInvites.filter(i => i.status === 'pending').length,
-      expired: visibleInvites.filter(i => i.status === 'expired').length,
-    }),
-    [visibleInvites]
-  );
-
-  /** Seeds the edit form from the batch's first invite — every invite in a batch carries the
-   *  same title/message/eventAt, so any one of them is the batch's current state. */
-  const openEdit = () => {
-    if (!responseSession) return;
-    const sample = visibleInvites[0];
-    setEditSessionId(responseSession);
-    setEditTitle(sample?.title ?? '');
-    setEditMessage(sample?.message ?? '');
-    setEditEventAt(sample?.eventAt ? new Date(sample.eventAt) : null);
-    setEditReAsk(false);
-    setEditError(null);
-    setEditOpen(true);
-  };
-
-  const handleEditPickerChange = (event: DateTimePickerEvent, selected?: Date) => {
-    if (Platform.OS !== 'ios') setEditPicking(null);
-    if (event.type === 'dismissed' || !selected) {
-      setEditPicking(null);
-      return;
-    }
-    const base = editEventAt ?? defaultEventAt();
-    const merged = new Date(base);
-    if (editPicking === 'time') merged.setHours(selected.getHours(), selected.getMinutes(), 0, 0);
-    else merged.setFullYear(selected.getFullYear(), selected.getMonth(), selected.getDate());
-    setEditEventAt(merged);
-  };
-
-  const handleSaveEdit = async () => {
-    if (!responseSession) return;
-    if (!editSessionId.trim()) return setEditError('The session code cannot be empty.');
-
-    setEditSaving(true);
-    setEditError(null);
-    try {
-      const result = await onEditInvites({
-        sessionId: responseSession,
-        newSessionId: editSessionId.trim() !== responseSession ? editSessionId.trim() : undefined,
-        title: editTitle.trim() || undefined,
-        message: editMessage.trim() || undefined,
-        // Always sent, so clearing the schedule is expressible as an explicit null.
-        eventAt: editEventAt ? editEventAt.toISOString() : null,
-        reAsk: editReAsk,
-      });
-      setEditOpen(false);
-      // Follow the batch if it was renamed, otherwise the filter would point at a code that no
-      // longer exists and the list would fall back to "all sessions".
-      setResponseSession(result.sessionId);
-      await loadRoster();
-      if (result.pushError && editReAsk) {
-        setRosterError(`Details saved, but the re-ask notification failed: ${result.pushError}`);
-      }
-    } catch (err: any) {
-      setEditError(err?.message || 'Could not save the changes.');
-    } finally {
-      setEditSaving(false);
-    }
-  };
 
   const openPicker = (mode: 'date' | 'time') => {
     // Seed a value on first open so the time picker has a date to attach to (and vice versa),
@@ -294,16 +135,16 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
     setEventAt(merged);
   };
 
-  const recipientList = () => {
-    const typed = typedEmails
+  /** Case-insensitive dedupe across the picker and manual entry, so one person named both ways is
+   *  one invite rather than two rows the server then has to collapse. */
+  const recipientList = (selected: Set<string>, typed: string) => {
+    const manual = typed
       .split(/[,\n]/)
       .map(e => e.trim())
       .filter(Boolean);
-    // Case-insensitive dedupe across the picker and manual entry, so one person invited both ways
-    // is one invite rather than two rows the server then has to collapse.
     const seen = new Set<string>();
     const out: string[] = [];
-    for (const e of [...selectedEmails, ...typed]) {
+    for (const e of [...selected, ...manual]) {
       const key = e.toLowerCase();
       if (!seen.has(key)) {
         seen.add(key);
@@ -313,30 +154,59 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
     return out;
   };
 
+  const presenterEmails = recipientList(selectedPresenters, typedPresenters);
+  const attendeeEmails = recipientList(selectedAttendees, typedAttendees);
+  const recipientCount = presenterEmails.length + attendeeEmails.length;
+
   const handleSend = async () => {
-    const emails = recipientList();
     if (!sessionId.trim()) return setSendError('Enter the session code these invites are for.');
-    if (emails.length === 0) return setSendError('Select or enter at least one email address.');
-    if (inviteRole === 'presenter' && !roomCode.trim()) {
-      return setSendError('Name the room this presenter is assigned to.');
+    if (recipientCount === 0) return setSendError('Pick at least one presenter or attendee.');
+    if (presenterEmails.length > 0 && !roomCode.trim()) {
+      return setSendError('Name the room the presenter is assigned to.');
+    }
+    // The account picker already hides each side's people from the other list, but an address
+    // typed by hand can still land in both — and since an invite is keyed on (session, email),
+    // the second send would silently convert the first rather than adding to it.
+    const attendeeKeys = new Set(attendeeEmails.map(e => e.toLowerCase()));
+    const inBoth = presenterEmails.filter(e => attendeeKeys.has(e.toLowerCase()));
+    if (inBoth.length > 0) {
+      return setSendError(
+        `${inBoth.join(', ')} can't be both a presenter and an attendee in the same session. Remove them from one list.`
+      );
     }
 
     setSending(true);
     setSendError(null);
     setSendResult(null);
     try {
-      const result = await onSendInvites(
-        sessionId.trim(),
-        emails,
-        title.trim() || 'Check-in request',
-        message.trim() || `You've been invited to check in to ${sessionId.trim()}.`,
-        eventAt ? eventAt.toISOString() : null,
-        inviteRole,
-        inviteRole === 'presenter' ? roomCode.trim() : null
-      );
-      setSendResult(result);
-      setSelectedEmails(new Set());
-      setTypedEmails('');
+      const code = sessionId.trim();
+      const when = eventAt ? eventAt.toISOString() : null;
+      const sharedTitle = title.trim() || 'Check-in request';
+      // Sent as one batch per role, since a presenter invite carries a room and an attendee one
+      // must not. They share the session, schedule and title, so the two halves of a session stay
+      // described the same way. A blank message is left blank on purpose: the server then writes
+      // each side its own wording ("you're hosting X" vs "please check in").
+      const results: InviteSendResult[] = [];
+      if (presenterEmails.length > 0) {
+        results.push(
+          await onSendInvites(code, presenterEmails, sharedTitle, message.trim(), when, 'presenter', roomCode.trim())
+        );
+      }
+      if (attendeeEmails.length > 0) {
+        results.push(
+          await onSendInvites(code, attendeeEmails, sharedTitle, message.trim(), when, 'attendee', null)
+        );
+      }
+      setSendResult({
+        invited: results.reduce((n, r) => n + r.invited, 0),
+        pushed: results.flatMap(r => r.pushed),
+        notReachableByPush: results.flatMap(r => r.notReachableByPush),
+        pushError: results.find(r => r.pushError)?.pushError ?? null,
+      });
+      setSelectedPresenters(new Set());
+      setTypedPresenters('');
+      setSelectedAttendees(new Set());
+      setTypedAttendees('');
       // Date/time deliberately kept: inviting a second batch to the same event is the common
       // follow-up, and retyping the schedule each time invites a mismatch between batches.
     } catch (err: any) {
@@ -347,7 +217,8 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
   };
 
   const toggleUser = (email: string) => {
-    setSelectedEmails(prev => {
+    const setSelected = pickerRole === 'presenter' ? setSelectedPresenters : setSelectedAttendees;
+    setSelected(prev => {
       const next = new Set(prev);
       if (next.has(email)) next.delete(email);
       else next.add(email);
@@ -355,74 +226,25 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
     });
   };
 
-  const recipientCount = recipientList().length;
+  // Nobody can hold both roles in one session, so each picker offers only the accounts the other
+  // side hasn't already claimed — including ones typed by hand into the other list.
+  const takenByOtherRole = new Set(
+    (pickerRole === 'presenter' ? attendeeEmails : presenterEmails).map(e => e.toLowerCase())
+  );
+  const pickerUsers = users.filter(u => !takenByOtherRole.has(u.email.toLowerCase()));
+  const pickerSelected = pickerRole === 'presenter' ? selectedPresenters : selectedAttendees;
 
   return (
     <View style={[styles.container, { backgroundColor: colors.bg }]}>
       <TopBar
-        title="Check-In Invites"
-        subtitle="Ask attendees to confirm ahead of time"
-        onBack={() => onNavigate('adminOverview')}
+        title="Send Check-In Invites"
+        subtitle="Set up a session's presenter and attendees together"
+        onBack={() => onNavigate('adminNotify')}
       />
 
-      <View style={styles.tabRow}>
-        {(['invite', 'responses'] as const).map(t => (
-          <TouchableOpacity
-            key={t}
-            activeOpacity={0.85}
-            onPress={() => setTab(t)}
-            style={[
-              styles.tabChip,
-              {
-                backgroundColor: tab === t ? 'rgba(51,209,172,0.18)' : colors.card,
-                borderColor: tab === t ? palette.mintPresence : colors.border,
-              },
-            ]}
-          >
-            <Text style={[styles.tabChipText, { color: tab === t ? palette.mintPresence : colors.muted }]}>
-              {t === 'invite' ? 'Send Invites' : 'Responses'}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        {tab === 'invite' ? (
-          <>
             <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-              <Text style={[styles.label, { color: colors.sub }]}>INVITING</Text>
-              <View style={styles.roleRow}>
-                {(['attendee', 'presenter'] as const).map(r => {
-                  const active = inviteRole === r;
-                  return (
-                    <TouchableOpacity
-                      key={r}
-                      activeOpacity={0.85}
-                      onPress={() => setInviteRole(r)}
-                      style={[
-                        styles.roleChip,
-                        {
-                          backgroundColor: active ? 'rgba(51,209,172,0.18)' : colors.bg,
-                          borderColor: active ? palette.mintPresence : colors.border,
-                        },
-                      ]}
-                    >
-                      <Text
-                        style={[styles.roleChipText, { color: active ? palette.mintPresence : colors.muted }]}
-                      >
-                        {r === 'attendee' ? 'Attendees' : 'A presenter'}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-              <Text style={[styles.hint, { color: colors.muted }]}>
-                {inviteRole === 'presenter'
-                  ? 'A presenter invite assigns a room. Accepting lets them start broadcasting it without retyping anything.'
-                  : 'An attendee invite asks them to confirm they will be there.'}
-              </Text>
-
-              <Text style={[styles.label, { color: colors.sub, marginTop: 18 }]}>SESSION CODE</Text>
+              <Text style={[styles.label, { color: colors.sub }]}>SESSION CODE</Text>
               <TextInput
                 style={[styles.input, { backgroundColor: colors.bg, borderColor: colors.border, color: colors.txt }]}
                 value={sessionId}
@@ -432,31 +254,9 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
                 autoCapitalize="none"
               />
               <Text style={[styles.hint, { color: colors.muted }]}>
-                {inviteRole === 'presenter'
-                  ? 'The session this room belongs to.'
-                  : 'Invites are addressed to a session code, not a room. The room itself does not have to exist yet.'}
+                One code covers the whole session: the presenter hosting it and the attendees
+                checking in. A code can only be used once, so both go out together from here.
               </Text>
-
-              {inviteRole === 'presenter' ? (
-                <>
-                  <Text style={[styles.label, { color: colors.sub, marginTop: 18 }]}>ASSIGN ROOM</Text>
-                  <TextInput
-                    style={[
-                      styles.input,
-                      { backgroundColor: colors.bg, borderColor: colors.border, color: colors.txt },
-                    ]}
-                    value={roomCode}
-                    onChangeText={setRoomCode}
-                    placeholder="e.g. Hall A"
-                    placeholderTextColor={colors.muted}
-                    autoCapitalize="words"
-                  />
-                  <Text style={[styles.hint, { color: colors.muted }]}>
-                    Typed, not picked from live rooms: the room does not exist until they start
-                    broadcasting it.
-                  </Text>
-                </>
-              ) : null}
 
               <Text style={[styles.label, { color: colors.sub, marginTop: 18 }]}>
                 WHEN IS IT? (OPTIONAL)
@@ -527,48 +327,110 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
               ) : null}
             </View>
 
-            <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-              <Text style={[styles.label, { color: colors.sub }]}>RECIPIENTS</Text>
+            <View style={[styles.card, { backgroundColor: colors.card, borderColor: palette.skyMesh }]}>
+              <Text style={[styles.label, { color: palette.skyMesh }]}>PRESENTER</Text>
               <TouchableOpacity
                 activeOpacity={0.8}
-                onPress={() => setPickerOpen(true)}
+                onPress={() => setPickerRole('presenter')}
                 style={[styles.pickerTrigger, { backgroundColor: colors.bg, borderColor: colors.border }]}
               >
                 <Text
                   style={[
                     styles.pickerTriggerText,
-                    { color: selectedEmails.size > 0 ? colors.txt : colors.muted },
+                    { color: selectedPresenters.size > 0 ? colors.txt : colors.muted },
                   ]}
                   numberOfLines={1}
                 >
                   {usersLoading
                     ? 'Loading accounts…'
-                    : selectedEmails.size > 0
-                    ? `${selectedEmails.size} selected`
-                    : 'Tap to pick from known accounts'}
+                    : selectedPresenters.size > 0
+                    ? `${selectedPresenters.size} selected`
+                    : 'Tap to pick who is hosting'}
                 </Text>
                 <Svg width={14} height={14} viewBox="0 0 24 24" fill="none">
                   <Path d="M6 9l6 6 6-6" stroke={colors.muted} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
                 </Svg>
               </TouchableOpacity>
 
-              <Text style={[styles.label, { color: colors.sub, marginTop: 16 }]}>
-                OR TYPE ADDRESSES (comma or newline separated)
-              </Text>
               <TextInput
                 style={[
                   styles.input,
                   styles.multiline,
-                  { backgroundColor: colors.bg, borderColor: colors.border, color: colors.txt },
+                  { backgroundColor: colors.bg, borderColor: colors.border, color: colors.txt, marginTop: 10 },
                 ]}
-                value={typedEmails}
-                onChangeText={setTypedEmails}
-                placeholder="alice@example.com, bob@example.com"
+                value={typedPresenters}
+                onChangeText={setTypedPresenters}
+                placeholder="Or type addresses: dana@example.com"
                 placeholderTextColor={colors.muted}
                 autoCapitalize="none"
                 keyboardType="email-address"
                 multiline
               />
+
+              <Text style={[styles.label, { color: colors.sub, marginTop: 16 }]}>
+                ASSIGN ROOM{presenterEmails.length > 0 ? '' : ' (WITH A PRESENTER)'}
+              </Text>
+              <TextInput
+                style={[
+                  styles.input,
+                  { backgroundColor: colors.bg, borderColor: colors.border, color: colors.txt },
+                ]}
+                value={roomCode}
+                onChangeText={setRoomCode}
+                placeholder="e.g. Hall A"
+                placeholderTextColor={colors.muted}
+                autoCapitalize="words"
+              />
+              <Text style={[styles.hint, { color: colors.muted }]}>
+                {presenterEmails.length > 0
+                  ? 'Typed, not picked from live rooms: the room does not exist until they start broadcasting it. Accepting lets them start it without retyping anything.'
+                  : 'Only sent if someone is picked above. A whole session can be attendees-only, in which case leave both empty.'}
+              </Text>
+            </View>
+
+            <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+              <Text style={[styles.label, { color: colors.sub }]}>ATTENDEES</Text>
+              <TouchableOpacity
+                activeOpacity={0.8}
+                onPress={() => setPickerRole('attendee')}
+                style={[styles.pickerTrigger, { backgroundColor: colors.bg, borderColor: colors.border }]}
+              >
+                <Text
+                  style={[
+                    styles.pickerTriggerText,
+                    { color: selectedAttendees.size > 0 ? colors.txt : colors.muted },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {usersLoading
+                    ? 'Loading accounts…'
+                    : selectedAttendees.size > 0
+                    ? `${selectedAttendees.size} selected`
+                    : 'Tap to pick who is checking in'}
+                </Text>
+                <Svg width={14} height={14} viewBox="0 0 24 24" fill="none">
+                  <Path d="M6 9l6 6 6-6" stroke={colors.muted} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+                </Svg>
+              </TouchableOpacity>
+
+              <TextInput
+                style={[
+                  styles.input,
+                  styles.multiline,
+                  { backgroundColor: colors.bg, borderColor: colors.border, color: colors.txt, marginTop: 10 },
+                ]}
+                value={typedAttendees}
+                onChangeText={setTypedAttendees}
+                placeholder="Or type addresses: alice@example.com, bob@example.com"
+                placeholderTextColor={colors.muted}
+                autoCapitalize="none"
+                keyboardType="email-address"
+                multiline
+              />
+              <Text style={[styles.hint, { color: colors.muted }]}>
+                Asked to confirm they will be there. Anyone already picked as the presenter is left
+                out of this list.
+              </Text>
             </View>
 
             <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
@@ -590,10 +452,14 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
                 ]}
                 value={message}
                 onChangeText={setMessage}
-                placeholder={`You've been invited to check in to ${sessionId.trim() || 'this session'}.`}
+                placeholder="Leave empty to word each side automatically"
                 placeholderTextColor={colors.muted}
                 multiline
               />
+              <Text style={[styles.hint, { color: colors.muted }]}>
+                Left empty, the presenter is told which room they are hosting and attendees are
+                asked to check in. Anything typed here is sent to both.
+              </Text>
 
               <TouchableOpacity
                 activeOpacity={0.85}
@@ -631,331 +497,21 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
                 </View>
               ) : null}
             </View>
-          </>
-        ) : (
-          <>
-            <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-              <Text style={[styles.label, { color: colors.sub }]}>SESSION</Text>
-              <TouchableOpacity
-                activeOpacity={0.8}
-                disabled={sessionOptions.length === 0}
-                onPress={() => setSessionPickerOpen(true)}
-                style={[
-                  styles.pickerTrigger,
-                  {
-                    backgroundColor: colors.bg,
-                    borderColor: colors.border,
-                    opacity: sessionOptions.length === 0 ? 0.6 : 1,
-                  },
-                ]}
-              >
-                <Text style={[styles.pickerTriggerText, { color: colors.txt }]} numberOfLines={1}>
-                  {sessionOptions.length === 0
-                    ? 'No sessions with invites yet'
-                    : responseSession === null
-                    ? `All sessions (${sessionOptions.length})`
-                    : responseSession}
-                </Text>
-                <Svg width={14} height={14} viewBox="0 0 24 24" fill="none">
-                  <Path d="M6 9l6 6 6-6" stroke={colors.muted} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
-                </Svg>
-              </TouchableOpacity>
-            </View>
-
-            {rosterLoading && (
-              <View style={styles.loadingWrap}>
-                <ActivityIndicator color={palette.mintPresence} />
-              </View>
-            )}
-
-            {rosterError ? (
-              <View style={[styles.card, { backgroundColor: colors.card, borderColor: palette.roseError }]}>
-                <Text style={[styles.errorText, { color: palette.roseError, marginTop: 0 }]}>{rosterError}</Text>
-              </View>
-            ) : null}
-
-            {!rosterLoading && allInvites ? (
-              <>
-                <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-                  <View style={styles.countsRow}>
-                    <View style={styles.countBlock}>
-                      <Text style={[styles.countValue, { color: palette.mintPresence }]}>
-                        {visibleCounts.accepted}
-                      </Text>
-                      <Text style={[styles.countLabel, { color: colors.muted }]}>ACCEPTED</Text>
-                    </View>
-                    <View style={styles.countBlock}>
-                      <Text style={[styles.countValue, { color: palette.roseError }]}>
-                        {visibleCounts.declined}
-                      </Text>
-                      <Text style={[styles.countLabel, { color: colors.muted }]}>DECLINED</Text>
-                    </View>
-                    <View style={styles.countBlock}>
-                      <Text style={[styles.countValue, { color: palette.amberWarn }]}>
-                        {visibleCounts.pending}
-                      </Text>
-                      <Text style={[styles.countLabel, { color: colors.muted }]}>NO REPLY</Text>
-                    </View>
-                    {visibleCounts.expired > 0 ? (
-                      <View style={styles.countBlock}>
-                        <Text style={[styles.countValue, { color: '#94A3B8' }]}>
-                          {visibleCounts.expired}
-                        </Text>
-                        <Text style={[styles.countLabel, { color: colors.muted }]}>EXPIRED</Text>
-                      </View>
-                    ) : null}
-                  </View>
-                  <View style={styles.rosterActions}>
-                    <TouchableOpacity
-                      activeOpacity={0.8}
-                      onPress={() => void loadRoster()}
-                      style={[styles.refreshButton, { borderColor: colors.border }]}
-                    >
-                      <Text style={[styles.refreshText, { color: colors.sub }]}>Refresh</Text>
-                    </TouchableOpacity>
-
-                    {/* Editing needs a single batch to act on, so it's unavailable while the
-                        dropdown is showing every session at once. */}
-                    <TouchableOpacity
-                      activeOpacity={0.8}
-                      disabled={!responseSession}
-                      onPress={openEdit}
-                      style={[
-                        styles.refreshButton,
-                        {
-                          borderColor: responseSession ? palette.mintPresence : colors.border,
-                          opacity: responseSession ? 1 : 0.5,
-                        },
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.refreshText,
-                          { color: responseSession ? palette.mintPresence : colors.muted },
-                        ]}
-                      >
-                        Edit details
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-
-                {visibleInvites.length === 0 ? (
-                  <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-                    <Text style={[styles.hint, { color: colors.muted, marginTop: 0 }]}>
-                      {responseSession === null
-                        ? 'No invites have been sent yet.'
-                        : `No invites for "${responseSession}".`}
-                    </Text>
-                  </View>
-                ) : (
-                  visibleInvites.map(invite => {
-                    const meta = STATUS_META[invite.status];
-                    return (
-                      <View
-                        key={invite.id}
-                        style={[styles.inviteRow, { backgroundColor: colors.card, borderColor: colors.border }]}
-                      >
-                        <View style={styles.inviteLeft}>
-                          <Text style={[styles.inviteName, { color: colors.txt }]} numberOfLines={1}>
-                            {invite.displayName}
-                          </Text>
-                          {invite.displayName !== invite.email ? (
-                            <Text style={[styles.inviteEmail, { color: colors.muted }]} numberOfLines={1}>
-                              {invite.email}
-                            </Text>
-                          ) : null}
-                          {invite.inviteRole === 'presenter' ? (
-                            <Text style={[styles.hostTag, { color: palette.skyMesh }]}>
-                              HOSTING {(invite.roomCode ?? '').toUpperCase()}
-                            </Text>
-                          ) : null}
-                          <Text style={[styles.inviteMeta, { color: colors.muted }]}>
-                            {invite.eventAt
-                              ? new Date(invite.eventAt).toLocaleString()
-                              : invite.respondedAt
-                              ? `Replied ${new Date(invite.respondedAt).toLocaleString()}`
-                              : `Invited ${new Date(invite.createdAt).toLocaleString()}`}
-                          </Text>
-                        </View>
-                        <View style={[styles.statusPill, { backgroundColor: meta.tint }]}>
-                          <Text style={[styles.statusPillText, { color: meta.color }]}>{meta.label}</Text>
-                        </View>
-                      </View>
-                    );
-                  })
-                )}
-
-                <Text style={[styles.footnote, { color: colors.muted }]}>
-                  Accepting is a reply, not attendance. Who was actually in the room still comes from
-                  sensor-verified presence, shown in the Monitor and History tabs.
-                </Text>
-              </>
-            ) : null}
-          </>
-        )}
       </ScrollView>
 
-      <Modal visible={editOpen} animationType="slide" transparent onRequestClose={() => setEditOpen(false)}>
-        <TouchableOpacity activeOpacity={1} style={styles.modalBackdrop} onPress={() => setEditOpen(false)}>
-          <TouchableOpacity activeOpacity={1} style={[styles.modalSheet, { backgroundColor: colors.bg }]}>
-            <View style={styles.modalHeaderRow}>
-              <Text style={[styles.modalTitle, { color: colors.txt }]}>Edit Invite Details</Text>
-              <TouchableOpacity activeOpacity={0.7} onPress={() => setEditOpen(false)} style={styles.modalCloseButton}>
-                <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
-                  <Path d="M6 6l12 12M18 6L6 18" stroke={colors.sub} strokeWidth={2} strokeLinecap="round" />
-                </Svg>
-              </TouchableOpacity>
-            </View>
-
-            <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
-              <Text style={[styles.hint, { color: colors.muted, marginTop: 0 }]}>
-                Applies to all {visibleInvites.length} invite{visibleInvites.length === 1 ? '' : 's'} in
-                this session.
-              </Text>
-
-              <Text style={[styles.label, { color: colors.sub, marginTop: 16 }]}>SESSION CODE</Text>
-              <TextInput
-                style={[styles.input, { backgroundColor: colors.card, borderColor: colors.border, color: colors.txt }]}
-                value={editSessionId}
-                onChangeText={setEditSessionId}
-                autoCapitalize="none"
-              />
-
-              <Text style={[styles.label, { color: colors.sub, marginTop: 16 }]}>WHEN IS IT?</Text>
-              <View style={styles.dateTimeRow}>
-                <TouchableOpacity
-                  activeOpacity={0.8}
-                  onPress={() => {
-                    if (!editEventAt) setEditEventAt(defaultEventAt());
-                    setEditPicking('date');
-                  }}
-                  style={[styles.pickerTrigger, styles.dateInput, { backgroundColor: colors.card, borderColor: colors.border }]}
-                >
-                  <Text
-                    style={[styles.pickerTriggerText, { color: editEventAt ? colors.txt : colors.muted }]}
-                    numberOfLines={1}
-                  >
-                    {editEventAt ? editEventAt.toLocaleDateString() : 'Pick a date'}
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  activeOpacity={0.8}
-                  onPress={() => {
-                    if (!editEventAt) setEditEventAt(defaultEventAt());
-                    setEditPicking('time');
-                  }}
-                  style={[styles.pickerTrigger, styles.timeInput, { backgroundColor: colors.card, borderColor: colors.border }]}
-                >
-                  <Text
-                    style={[styles.pickerTriggerText, { color: editEventAt ? colors.txt : colors.muted }]}
-                    numberOfLines={1}
-                  >
-                    {editEventAt
-                      ? editEventAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })
-                      : 'Time'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-              {editEventAt ? (
-                <View style={styles.eventSummaryRow}>
-                  <Text style={[styles.hint, { color: palette.mintPresence, marginTop: 0, flex: 1 }]}>
-                    {editEventAt.toLocaleString()}
-                  </Text>
-                  <TouchableOpacity activeOpacity={0.7} onPress={() => setEditEventAt(null)}>
-                    <Text style={[styles.clearText, { color: colors.muted }]}>Clear</Text>
-                  </TouchableOpacity>
-                </View>
-              ) : (
-                <Text style={[styles.hint, { color: colors.muted }]}>No time set for this session.</Text>
-              )}
-
-              {editPicking ? (
-                <DateTimePicker
-                  value={editEventAt ?? defaultEventAt()}
-                  mode={editPicking}
-                  is24Hour={false}
-                  display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-                  onChange={handleEditPickerChange}
-                />
-              ) : null}
-
-              <Text style={[styles.label, { color: colors.sub, marginTop: 16 }]}>TITLE</Text>
-              <TextInput
-                style={[styles.input, { backgroundColor: colors.card, borderColor: colors.border, color: colors.txt }]}
-                value={editTitle}
-                onChangeText={setEditTitle}
-                placeholder="Check-in request"
-                placeholderTextColor={colors.muted}
-              />
-
-              <Text style={[styles.label, { color: colors.sub, marginTop: 16 }]}>MESSAGE</Text>
-              <TextInput
-                style={[
-                  styles.input,
-                  styles.multiline,
-                  { backgroundColor: colors.card, borderColor: colors.border, color: colors.txt },
-                ]}
-                value={editMessage}
-                onChangeText={setEditMessage}
-                multiline
-              />
-
-              <View style={[styles.reAskRow, { borderColor: colors.border }]}>
-                <View style={{ flex: 1 }}>
-                  <Text style={[styles.reAskTitle, { color: colors.txt }]}>Ask everyone again</Text>
-                  <Text style={[styles.reAskDesc, { color: colors.muted }]}>
-                    {editReAsk
-                      ? `Clears all ${visibleInvites.length} replies and re-notifies. Use this when the time moved.`
-                      : 'Replies stay as they are. Use this for a correction.'}
-                  </Text>
-                </View>
-                <Switch
-                  value={editReAsk}
-                  onValueChange={setEditReAsk}
-                  trackColor={{ false: colors.border, true: 'rgba(51,209,172,0.4)' }}
-                  thumbColor={editReAsk ? palette.mintPresence : colors.sub}
-                />
-              </View>
-
-              {editError ? (
-                <Text style={[styles.errorText, { color: palette.roseError }]}>{editError}</Text>
-              ) : null}
-
-              <TouchableOpacity
-                activeOpacity={0.85}
-                disabled={editSaving}
-                onPress={() => void handleSaveEdit()}
-                style={[styles.primaryButton, editSaving && { opacity: 0.6 }]}
-              >
-                {editSaving ? (
-                  <ActivityIndicator size="small" color="#0F2F2C" />
-                ) : (
-                  <Text style={styles.primaryButtonText}>
-                    {editReAsk ? 'Save and ask again' : 'Save changes'}
-                  </Text>
-                )}
-              </TouchableOpacity>
-            </ScrollView>
-          </TouchableOpacity>
-        </TouchableOpacity>
-      </Modal>
-
       <Modal
-        visible={sessionPickerOpen}
+        visible={pickerRole !== null}
         animationType="slide"
         transparent
-        onRequestClose={() => setSessionPickerOpen(false)}
+        onRequestClose={() => setPickerRole(null)}
       >
-        <TouchableOpacity activeOpacity={1} style={styles.modalBackdrop} onPress={() => setSessionPickerOpen(false)}>
+        <TouchableOpacity activeOpacity={1} style={styles.modalBackdrop} onPress={() => setPickerRole(null)}>
           <TouchableOpacity activeOpacity={1} style={[styles.modalSheet, { backgroundColor: colors.bg }]}>
             <View style={styles.modalHeaderRow}>
-              <Text style={[styles.modalTitle, { color: colors.txt }]}>Show Responses For</Text>
-              <TouchableOpacity
-                activeOpacity={0.7}
-                onPress={() => setSessionPickerOpen(false)}
-                style={styles.modalCloseButton}
-              >
+              <Text style={[styles.modalTitle, { color: colors.txt }]}>
+                {pickerRole === 'presenter' ? 'Who is hosting?' : 'Who is checking in?'}
+              </Text>
+              <TouchableOpacity activeOpacity={0.7} onPress={() => setPickerRole(null)} style={styles.modalCloseButton}>
                 <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
                   <Path d="M6 6l12 12M18 6L6 18" stroke={colors.sub} strokeWidth={2} strokeLinecap="round" />
                 </Svg>
@@ -963,75 +519,17 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
             </View>
 
             <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
-              {[null, ...sessionOptions].map(option => {
-                const selected = option === responseSession;
-                const count =
-                  option === null
-                    ? (allInvites ?? []).length
-                    : (allInvites ?? []).filter(i => i.sessionId === option).length;
-                return (
-                  <TouchableOpacity
-                    key={option ?? '__all__'}
-                    activeOpacity={0.8}
-                    onPress={() => {
-                      setResponseSession(option);
-                      setSessionPickerOpen(false);
-                    }}
-                    style={[styles.sessionOptionRow, { borderBottomColor: colors.border }]}
-                  >
-                    <View style={{ flex: 1 }}>
-                      <Text
-                        style={[
-                          styles.sessionOptionText,
-                          { color: selected ? palette.mintPresence : colors.txt },
-                        ]}
-                        numberOfLines={1}
-                      >
-                        {option === null ? 'All sessions' : option}
-                      </Text>
-                      <Text style={[styles.sessionOptionCount, { color: colors.muted }]}>
-                        {count} invite{count === 1 ? '' : 's'}
-                      </Text>
-                    </View>
-                    {selected && (
-                      <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
-                        <Path
-                          d="M5 13l4 4L19 7"
-                          stroke={palette.mintPresence}
-                          strokeWidth={2.5}
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      </Svg>
-                    )}
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-          </TouchableOpacity>
-        </TouchableOpacity>
-      </Modal>
-
-      <Modal visible={pickerOpen} animationType="slide" transparent onRequestClose={() => setPickerOpen(false)}>
-        <TouchableOpacity activeOpacity={1} style={styles.modalBackdrop} onPress={() => setPickerOpen(false)}>
-          <TouchableOpacity activeOpacity={1} style={[styles.modalSheet, { backgroundColor: colors.bg }]}>
-            <View style={styles.modalHeaderRow}>
-              <Text style={[styles.modalTitle, { color: colors.txt }]}>Select Recipients</Text>
-              <TouchableOpacity activeOpacity={0.7} onPress={() => setPickerOpen(false)} style={styles.modalCloseButton}>
-                <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
-                  <Path d="M6 6l12 12M18 6L6 18" stroke={colors.sub} strokeWidth={2} strokeLinecap="round" />
-                </Svg>
-              </TouchableOpacity>
-            </View>
-
-            <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
-              {users.length === 0 ? (
+              {pickerUsers.length === 0 ? (
                 <Text style={[styles.hint, { color: colors.muted }]}>
-                  No accounts found. Type addresses manually instead.
+                  {users.length === 0
+                    ? 'No accounts found. Type addresses manually instead.'
+                    : `Every known account is already on the ${
+                        pickerRole === 'presenter' ? 'attendee' : 'presenter'
+                      } list. Remove someone from it, or type an address manually.`}
                 </Text>
               ) : (
-                users.map(user => {
-                  const checked = selectedEmails.has(user.email);
+                pickerUsers.map(user => {
+                  const checked = pickerSelected.has(user.email);
                   return (
                     <TouchableOpacity
                       key={user.id}
@@ -1068,7 +566,7 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
               )}
             </ScrollView>
 
-            <TouchableOpacity activeOpacity={0.85} onPress={() => setPickerOpen(false)} style={styles.primaryButton}>
+            <TouchableOpacity activeOpacity={0.85} onPress={() => setPickerRole(null)} style={styles.primaryButton}>
               <Text style={styles.primaryButtonText}>Done</Text>
             </TouchableOpacity>
           </TouchableOpacity>
@@ -1080,20 +578,6 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  tabRow: {
-    flexDirection: 'row',
-    gap: 8,
-    paddingHorizontal: 20,
-    paddingBottom: 12,
-  },
-  tabChip: {
-    flex: 1,
-    paddingVertical: 9,
-    borderRadius: 999,
-    borderWidth: 1.5,
-    alignItems: 'center',
-  },
-  tabChipText: { fontSize: 12, fontWeight: '800' },
   content: { paddingHorizontal: 20, paddingBottom: 28, gap: 12 },
   card: { borderRadius: 16, borderWidth: 1.5, padding: 16 },
   label: { fontSize: 10, fontWeight: '800', letterSpacing: 0.8, marginBottom: 6 },
@@ -1105,15 +589,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   multiline: { minHeight: 72, textAlignVertical: 'top' },
-  roleRow: { flexDirection: 'row', gap: 8 },
-  roleChip: {
-    flex: 1,
-    paddingVertical: 10,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    alignItems: 'center',
-  },
-  roleChipText: { fontSize: 13, fontWeight: '800' },
   dateTimeRow: { flexDirection: 'row', gap: 8 },
   dateInput: { flex: 1.4 },
   timeInput: { flex: 1 },
@@ -1142,49 +617,6 @@ const styles = StyleSheet.create({
   resultBox: { marginTop: 12, padding: 12, borderRadius: 12 },
   resultText: { fontSize: 13, fontWeight: '700' },
   resultMissing: { fontSize: 11, marginTop: 6, lineHeight: 16 },
-  loadingWrap: { paddingVertical: 28 },
-  countsRow: { flexDirection: 'row', justifyContent: 'space-around' },
-  countBlock: { alignItems: 'center', gap: 2 },
-  countValue: { fontSize: 26, fontWeight: '900', letterSpacing: -0.5 },
-  countLabel: { fontSize: 9, fontWeight: '800', letterSpacing: 0.8 },
-  rosterActions: { flexDirection: 'row', gap: 8 },
-  refreshButton: {
-    flex: 1,
-    marginTop: 14,
-    borderWidth: 1.5,
-    borderRadius: 12,
-    paddingVertical: 9,
-    alignItems: 'center',
-  },
-  reAskRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    borderWidth: 1.5,
-    borderRadius: 14,
-    padding: 14,
-    marginTop: 18,
-  },
-  reAskTitle: { fontSize: 14, fontWeight: '700' },
-  reAskDesc: { fontSize: 11, lineHeight: 16, marginTop: 2 },
-  refreshText: { fontSize: 12, fontWeight: '700' },
-  inviteRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-    borderRadius: 14,
-    borderWidth: 1.5,
-    padding: 14,
-  },
-  inviteLeft: { flex: 1 },
-  inviteName: { fontSize: 14, fontWeight: '700' },
-  inviteEmail: { fontSize: 11, marginTop: 1 },
-  inviteMeta: { fontSize: 10, marginTop: 4 },
-  hostTag: { fontSize: 9, fontWeight: '800', letterSpacing: 0.5, marginTop: 3 },
-  statusPill: { paddingHorizontal: 9, paddingVertical: 4, borderRadius: 999 },
-  statusPillText: { fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
-  footnote: { fontSize: 11, lineHeight: 17, marginTop: 4, paddingHorizontal: 2 },
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   modalSheet: {
     maxHeight: '75%',
@@ -1218,13 +650,4 @@ const styles = StyleSheet.create({
   },
   userName: { fontSize: 14, fontWeight: '600' },
   userEmail: { fontSize: 11, marginTop: 1 },
-  sessionOptionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingVertical: 14,
-    borderBottomWidth: 1,
-  },
-  sessionOptionText: { fontSize: 14, fontWeight: '700' },
-  sessionOptionCount: { fontSize: 11, marginTop: 2 },
 });

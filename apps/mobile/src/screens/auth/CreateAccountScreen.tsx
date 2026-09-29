@@ -6,10 +6,9 @@ import {
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
-  ScrollView,
 } from 'react-native';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
+import Svg, { Path, Circle } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
 import { signUpWithEmail } from '../../services/auth';
@@ -77,18 +76,28 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
   };
 
   return (
-    <KeyboardAvoidingView
+    <KeyboardAwareScrollView
       style={{ flex: 1, backgroundColor: colors.bg }}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      contentContainerStyle={styles.container}
+      keyboardShouldPersistTaps="handled"
+      showsVerticalScrollIndicator={false}
+      enableOnAndroid
+      extraScrollHeight={20}
     >
-      <ScrollView
-        contentContainerStyle={styles.container}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
-      >
         <View style={styles.header}>
           <View style={styles.logoBadge}>
-            <Text style={styles.logoX}>X</Text>
+            {/* Same glyph as LoginScreen's badge (assets/icon.svg reproduced in react-native-svg,
+                since Metro has no SVG transformer configured) — one logo across both auth screens. */}
+            <Svg width={38} height={38} viewBox="0 0 1024 1024">
+              <Path d="M 284 284 L 512 512 L 740 740" fill="none" stroke="#FFFFFF" strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
+              <Path d="M 740 284 L 512 512 L 284 740" fill="none" stroke={palette.mintPresence} strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
+              <Circle cx={284} cy={284} r={102} fill="#FFFFFF" />
+              <Circle cx={740} cy={740} r={102} fill="#FFFFFF" />
+              <Circle cx={740} cy={284} r={102} fill={palette.mintPresence} />
+              <Circle cx={284} cy={740} r={102} fill={palette.mintPresence} />
+              <Circle cx={512} cy={512} r={64} fill="#102A2A" />
+              <Circle cx={512} cy={512} r={24} fill="#FFFFFF" />
+            </Svg>
           </View>
           <Text style={[styles.title, { color: colors.txt }]}>XConnect</Text>
           <Text style={[styles.subtitle, { color: colors.sub }]}>
@@ -205,8 +214,7 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
             </Text>
           </TouchableOpacity>
         </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+    </KeyboardAwareScrollView>
   );
 };
 
@@ -224,15 +232,10 @@ const styles = StyleSheet.create({
     width: 60,
     height: 60,
     borderRadius: 18,
-    backgroundColor: palette.mintPresence,
+    backgroundColor: '#102A2A',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 16,
-  },
-  logoX: {
-    fontSize: 34,
-    fontWeight: '900',
-    color: '#060B12',
   },
   title: {
     fontSize: 22,

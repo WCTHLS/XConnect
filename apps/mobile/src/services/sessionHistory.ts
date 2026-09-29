@@ -36,9 +36,19 @@ export type HistoryMember = {
   startedAt: string;
   endedAt: string | null;
   durationMs?: number;
+  /** The last reading before the stay closed — taken as the device dropped off, so it reads low
+   *  more often than not. Only used when `avgConfidence` is absent. */
   lastConfidence?: number;
+  /** Mean confidence across every heartbeat of the stay. Null on stays recorded before the
+   *  server started averaging. */
+  avgConfidence?: number | null;
   ultrasonicVerified?: boolean;
   motionAnomalyFlag?: boolean;
+  /** How long the inactivity flag was actually true during this stay. */
+  motionAnomalyMs?: number;
+  /** How long ultrasonic verification held during this stay, or null for a presenter, who emits
+   *  the tone rather than hearing it and so has no verification to time. */
+  ultrasonicVerifiedMs?: number | null;
 };
 
 /** The full attendance record for one room occurrence, from GET /api/admin/history. */
@@ -48,6 +58,19 @@ export type HistoryDetail = {
   startedAt: string;
   endedAt: string | null;
   rooms: { roomId: string; members: HistoryMember[] }[];
+};
+
+/** One join/leave pair, as shown in a person's visit breakdown. */
+export type AttendeeStay = {
+  startedAt: string;
+  endedAt: string | null;
+  /** Wall-clock length of this one visit; absent while it is still open. */
+  durationMs?: number;
+  /** This visit's score: its mean confidence, or its exit reading on stays recorded before the
+   *  server averaged them. */
+  score?: number;
+  motionAnomalyMs?: number;
+  ultrasonicVerifiedMs?: number | null;
 };
 
 export type AggregatedAttendee = {
@@ -61,6 +84,17 @@ export type AggregatedAttendee = {
   everMotionAnomaly: boolean;
   firstStartedAt?: string;
   lastEndedAt?: string | null;
+  /** Mean of each visit's score, 0–1. Undefined when no visit recorded one. Unweighted across
+   *  visits: each visit already carries its own average, and weighting those by length would
+   *  over-credit one long visit's steady signal against a short visit's. */
+  avgConfidence?: number;
+  /** Total time the inactivity flag was true, summed across visits. */
+  motionAnomalyMs: number;
+  /** Total time ultrasonic verification held, summed across visits — null for a presenter, who
+   *  emits the tone rather than hearing it, so nothing verified their presence acoustically. */
+  ultrasonicVerifiedMs: number | null;
+  /** Every visit this person made to the room, earliest first. */
+  stays: AttendeeStay[];
 };
 
 /**
@@ -118,6 +152,12 @@ export function formatTimestamp(iso?: string | number | null): string {
   return new Date(iso).toLocaleString();
 }
 
+/** Clock time alone, for join/leave columns where the date is already established by the room. */
+export function formatTime(iso?: string | number | null): string {
+  if (iso === undefined || iso === null) return '--';
+  return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+}
+
 /**
  * Collapses a room's individual entry/exit rows (one per visit) into one row per person — their
  * total time in the room across every visit, not each stay separately. Shared by the on-screen
@@ -136,6 +176,9 @@ export function aggregateAttendees(members: HistoryMember[]): AggregatedAttendee
         hasOpenStay: false,
         everUltrasonicVerified: false,
         everMotionAnomaly: false,
+        motionAnomalyMs: 0,
+        ultrasonicVerifiedMs: 0,
+        stays: [],
       },
       stays: [],
     };
@@ -157,10 +200,37 @@ export function aggregateAttendees(members: HistoryMember[]): AggregatedAttendee
       ? stays.reduce((latest, s) => (s.endedAt && (!latest || new Date(s.endedAt) > new Date(latest)) ? s.endedAt : latest), stays[0].endedAt)
       : null;
 
+    // Each stay's own average where the server recorded one, falling back to its exit reading so
+    // history from before averaging existed still contributes rather than vanishing.
+    const scoreOf = (s: HistoryMember) =>
+      typeof s.avgConfidence === 'number' ? s.avgConfidence : s.lastConfidence;
+    const confidences = stays.map(scoreOf).filter((c): c is number => typeof c === 'number');
+
     return {
       ...attendee,
       firstStartedAt,
       lastEndedAt,
+      avgConfidence:
+        confidences.length > 0 ? confidences.reduce((a, b) => a + b, 0) / confidences.length : undefined,
+      motionAnomalyMs: stays.reduce((n, s) => n + (s.motionAnomalyMs ?? 0), 0),
+      // Null across the board for a presenter — every one of their stays reports null, since
+      // there is no acoustic verification of the device that produces the tone.
+      ultrasonicVerifiedMs: stays.every(s => s.ultrasonicVerifiedMs === null)
+        ? null
+        : stays.reduce((n, s) => n + (s.ultrasonicVerifiedMs ?? 0), 0),
+      // Earliest first, so the breakdown reads as the order the visits actually happened.
+      stays: [...stays]
+        .sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime())
+        .map(s => ({
+          startedAt: s.startedAt,
+          endedAt: s.endedAt,
+          durationMs:
+            s.durationMs ??
+            (s.endedAt ? new Date(s.endedAt).getTime() - new Date(s.startedAt).getTime() : undefined),
+          score: scoreOf(s),
+          motionAnomalyMs: s.motionAnomalyMs,
+          ultrasonicVerifiedMs: s.ultrasonicVerifiedMs,
+        })),
       totalDurationMs: computeOccupiedDurationMs(stays).durationMs,
     };
   });
@@ -179,17 +249,59 @@ export function buildHistoryReportHtml(occurrence: HistoryDetail): string {
 
     const rows = attendees
       .map(a => {
-        const flags = [
-          a.everUltrasonicVerified ? 'Ultrasonic Verified' : null,
-          a.everMotionAnomaly ? 'Inactivity flag' : null,
-        ]
-          .filter(Boolean)
-          .join(', ');
+        // Durations rather than bare yes/no: "flagged" for four seconds and "flagged" for the
+        // whole hour are not the same finding, and the old badge couldn't tell them apart.
+        const verified =
+          a.ultrasonicVerifiedMs === null
+            ? 'n/a (emitter)'
+            : a.ultrasonicVerifiedMs > 0
+            ? formatDuration(a.ultrasonicVerifiedMs)
+            : 'Never';
+        const inactive = a.motionAnomalyMs > 0 ? formatDuration(a.motionAnomalyMs) : 'None';
+        // Every visit, not just the first and last: someone who left and came back three times
+        // has a different attendance story from someone who sat through it once, and the summary
+        // row alone can't tell those apart.
+        const visitRows = a.stays
+          .map(
+            (s, i) => `<tr class="visit">
+              <td class="visit-index">${i + 1}</td>
+              <td>${escapeHtml(formatTime(s.startedAt))}</td>
+              <td>${s.endedAt ? escapeHtml(formatTime(s.endedAt)) : 'Still in room'}</td>
+              <td>${s.endedAt ? formatDuration(s.durationMs) : '--'}</td>
+              <td>${s.score === undefined ? '--' : `${Math.round(s.score * 100)}%`}</td>
+              <td>${
+                s.ultrasonicVerifiedMs === null
+                  ? 'n/a'
+                  : s.ultrasonicVerifiedMs
+                  ? formatDuration(s.ultrasonicVerifiedMs)
+                  : '--'
+              }</td>
+              <td>${s.motionAnomalyMs ? formatDuration(s.motionAnomalyMs) : '--'}</td>
+            </tr>`
+          )
+          .join('');
+
         return `<tr>
           <td>${escapeHtml(a.displayName)}${a.email ? `<br/><span style="color:#5D6873">${escapeHtml(a.email)}</span>` : ''}</td>
           <td>${a.role === 'presenter' ? 'Host' : 'User'}</td>
+          <td>${escapeHtml(formatTime(a.firstStartedAt))}</td>
+          <td>${a.hasOpenStay ? 'Still in room' : escapeHtml(formatTime(a.lastEndedAt))}</td>
           <td>${formatDuration(a.totalDurationMs)}${a.hasOpenStay ? ' (ongoing)' : ''}</td>
-          <td>${escapeHtml(flags || '--')}</td>
+          <td>${a.avgConfidence === undefined ? '--' : `${Math.round(a.avgConfidence * 100)}%`}</td>
+          <td>${escapeHtml(verified)}</td>
+          <td>${escapeHtml(inactive)}</td>
+        </tr>
+        <tr class="visits-row">
+          <td colspan="9">
+            <div class="visits-label">${a.stays.length} visit${a.stays.length === 1 ? '' : 's'} to this room</div>
+            <table class="visits">
+              <thead><tr>
+                <th>#</th><th>Joined</th><th>Left</th><th>Time in room</th>
+                <th>Score</th><th>Verified</th><th>Inactive</th>
+              </tr></thead>
+              <tbody>${visitRows}</tbody>
+            </table>
+          </td>
         </tr>`;
       })
       .join('');
@@ -202,8 +314,11 @@ export function buildHistoryReportHtml(occurrence: HistoryDetail): string {
         ${stillOpen ? 'Ongoing' : formatDuration(roomDurationMs)}
       </p>
       <table>
-        <thead><tr><th>Name</th><th>Role</th><th>Duration</th><th>Flags</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="4">No attendees recorded</td></tr>`}</tbody>
+        <thead><tr>
+          <th>Name</th><th>Role</th><th>First joined</th><th>Last left</th>
+          <th>Total in room</th><th>Avg score</th><th>Verified for</th><th>Inactive for</th>
+        </tr></thead>
+        <tbody>${rows || `<tr><td colspan="8">No attendees recorded</td></tr>`}</tbody>
       </table>`;
   });
 
@@ -220,6 +335,13 @@ export function buildHistoryReportHtml(occurrence: HistoryDetail): string {
           table { width: 100%; border-collapse: collapse; font-size: 12px; }
           th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #EEF2F4; }
           th { color: #5D6873; font-weight: 600; }
+          .visits-row > td { padding: 0 8px 12px 20px; border-bottom: 1px solid #E0E6EA; }
+          .visits-label { color: #5D6873; font-size: 10px; text-transform: uppercase;
+                          letter-spacing: 0.4px; margin: 2px 0 4px; }
+          table.visits { font-size: 11px; background: #F7F9FA; }
+          table.visits th, table.visits td { padding: 4px 8px; border-bottom: 1px solid #EEF2F4; }
+          table.visits th { font-size: 10px; }
+          .visit-index { color: #5D6873; width: 24px; }
         </style>
       </head>
       <body>

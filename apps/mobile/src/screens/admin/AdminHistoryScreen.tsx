@@ -19,6 +19,7 @@ import {
   computeOccupiedDurationMs,
   exportHistoryReport,
   formatDuration,
+  formatTime,
   formatTimestamp,
   type HistoryDetail,
   type SessionOccurrence,
@@ -41,6 +42,9 @@ export const AdminHistoryScreen: React.FC<AdminHistoryScreenProps> = ({
   const [occurrences, setOccurrences] = useState<SessionOccurrence[]>([]);
   const [selected, setSelected] = useState<HistoryDetail | null>(null);
   const [expandedRooms, setExpandedRooms] = useState<Set<string>>(new Set());
+  // Per-person visit breakdowns, keyed `${roomId}::${deviceId}` so the same person in two rooms
+  // expands independently.
+  const [expandedVisits, setExpandedVisits] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -313,65 +317,171 @@ export const AdminHistoryScreen: React.FC<AdminHistoryScreenProps> = ({
                     </TouchableOpacity>
 
                     {isExpanded &&
-                      attendees.map(a => (
-                        <View
-                          key={a.deviceId}
-                          style={[styles.attendeeRow, { borderTopColor: colors.border }]}
-                        >
-                          <View style={styles.attendeeLeft}>
-                            <Text style={[styles.attendeeName, { color: colors.txt }]} numberOfLines={1}>
-                              {a.displayName}
-                            </Text>
-                            {a.email ? (
-                              <Text style={[styles.attendeeEmail, { color: colors.muted }]} numberOfLines={1}>
-                                {a.email}
-                              </Text>
-                            ) : null}
-                            {a.firstStartedAt ? (
-                              <Text style={[styles.attendeeEmail, { color: colors.muted, fontSize: 10, marginTop: 1 }]} numberOfLines={1}>
-                                Joined {new Date(a.firstStartedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })}
-                              </Text>
-                            ) : null}
-                            <View style={styles.flagRow}>
-                              {a.role === 'presenter' && (
-                                <View style={[styles.flag, { backgroundColor: palette.skySubtle }]}>
-                                  <Text style={[styles.flagText, { color: palette.skyMesh }]}>HOST</Text>
-                                </View>
-                              )}
-                              {a.everUltrasonicVerified && (
-                                <View style={[styles.flag, { backgroundColor: palette.mintSubtle }]}>
-                                  <Text style={[styles.flagText, { color: palette.mintPresence }]}>
-                                    VERIFIED
-                                  </Text>
-                                </View>
-                              )}
-                              {a.everMotionAnomaly && (
-                                <View style={[styles.flag, { backgroundColor: 'rgba(245,158,11,0.15)' }]}>
-                                  <Text style={[styles.flagText, { color: palette.amberWarn }]}>
-                                    INACTIVE
-                                  </Text>
-                                </View>
-                              )}
-                            </View>
-                          </View>
-
-                          <View style={styles.attendeeRight}>
-                            <Text style={[styles.attendeeDuration, { color: colors.txt }]}>
-                              {formatDuration(a.totalDurationMs)}
-                            </Text>
-                            {a.hasOpenStay && (
-                              <View style={styles.ongoingRow}>
-                                <Svg width={10} height={10} viewBox="0 0 24 24" fill="none">
-                                  <Circle cx={12} cy={12} r={10} fill={palette.mintPresence} />
-                                </Svg>
-                                <Text style={[styles.ongoingText, { color: palette.mintPresence }]}>
-                                  ongoing
+                      attendees.map(a => {
+                        const visitKey = `${room.roomId}::${a.deviceId}`;
+                        const visitsOpen = expandedVisits.has(visitKey);
+                        return (
+                          <View key={a.deviceId} style={[styles.attendeeRow, { borderTopColor: colors.border }]}>
+                            <View style={styles.attendeeTopRow}>
+                              <View style={styles.attendeeLeft}>
+                                <Text style={[styles.attendeeName, { color: colors.txt }]} numberOfLines={1}>
+                                  {a.displayName}
                                 </Text>
+                                {a.email ? (
+                                  <Text style={[styles.attendeeEmail, { color: colors.muted }]} numberOfLines={1}>
+                                    {a.email}
+                                  </Text>
+                                ) : null}
+                                <View style={styles.flagRow}>
+                                  {a.role === 'presenter' && (
+                                    <View style={[styles.flag, { backgroundColor: palette.skySubtle }]}>
+                                      <Text style={[styles.flagText, { color: palette.skyMesh }]}>HOST</Text>
+                                    </View>
+                                  )}
+                                  {/* How long, not just whether: flagged for four seconds and
+                                      flagged all session are very different findings. */}
+                                  {a.ultrasonicVerifiedMs === null ? (
+                                    <View style={[styles.flag, { backgroundColor: palette.skySubtle }]}>
+                                      <Text style={[styles.flagText, { color: palette.skyMesh }]}>
+                                        EMITTER
+                                      </Text>
+                                    </View>
+                                  ) : a.ultrasonicVerifiedMs > 0 ? (
+                                    <View style={[styles.flag, { backgroundColor: palette.mintSubtle }]}>
+                                      <Text style={[styles.flagText, { color: palette.mintPresence }]}>
+                                        VERIFIED {formatDuration(a.ultrasonicVerifiedMs)}
+                                      </Text>
+                                    </View>
+                                  ) : null}
+                                  {a.motionAnomalyMs > 0 && (
+                                    <View style={[styles.flag, { backgroundColor: 'rgba(245,158,11,0.15)' }]}>
+                                      <Text style={[styles.flagText, { color: palette.amberWarn }]}>
+                                        INACTIVE {formatDuration(a.motionAnomalyMs)}
+                                      </Text>
+                                    </View>
+                                  )}
+                                </View>
+                              </View>
+
+                              <View style={styles.attendeeRight}>
+                                <Text style={[styles.attendeeDuration, { color: colors.txt }]}>
+                                  {formatDuration(a.totalDurationMs)}
+                                </Text>
+                                {a.hasOpenStay && (
+                                  <View style={styles.ongoingRow}>
+                                    <Svg width={10} height={10} viewBox="0 0 24 24" fill="none">
+                                      <Circle cx={12} cy={12} r={10} fill={palette.mintPresence} />
+                                    </Svg>
+                                    <Text style={[styles.ongoingText, { color: palette.mintPresence }]}>
+                                      ongoing
+                                    </Text>
+                                  </View>
+                                )}
+                              </View>
+                            </View>
+
+                            {/* First/last and the average sit on the summary row; the individual
+                                visits behind them are a tap away, since most people have one. */}
+                            <View style={styles.attendeeFactsRow}>
+                              <View style={styles.attendeeFact}>
+                                <Text style={[styles.attendeeFactLabel, { color: colors.muted }]}>JOINED</Text>
+                                <Text style={[styles.attendeeFactValue, { color: colors.txt }]}>
+                                  {formatTime(a.firstStartedAt)}
+                                </Text>
+                              </View>
+                              <View style={styles.attendeeFact}>
+                                <Text style={[styles.attendeeFactLabel, { color: colors.muted }]}>LEFT</Text>
+                                <Text
+                                  style={[
+                                    styles.attendeeFactValue,
+                                    { color: a.hasOpenStay ? palette.mintPresence : colors.txt },
+                                  ]}
+                                >
+                                  {a.hasOpenStay ? 'In room' : formatTime(a.lastEndedAt)}
+                                </Text>
+                              </View>
+                              <View style={styles.attendeeFact}>
+                                <Text style={[styles.attendeeFactLabel, { color: colors.muted }]}>AVG SCORE</Text>
+                                <Text style={[styles.attendeeFactValue, { color: colors.txt }]}>
+                                  {a.avgConfidence === undefined
+                                    ? '--'
+                                    : `${Math.round(a.avgConfidence * 100)}%`}
+                                </Text>
+                              </View>
+                            </View>
+
+                            <TouchableOpacity
+                              activeOpacity={0.7}
+                              onPress={() =>
+                                setExpandedVisits(prev => {
+                                  const next = new Set(prev);
+                                  if (next.has(visitKey)) next.delete(visitKey);
+                                  else next.add(visitKey);
+                                  return next;
+                                })
+                              }
+                            >
+                              <Text style={[styles.visitsToggle, { color: palette.mintPresence }]}>
+                                {visitsOpen ? '▲ Hide' : '▼ Show'} {a.stays.length} visit
+                                {a.stays.length === 1 ? '' : 's'}
+                              </Text>
+                            </TouchableOpacity>
+
+                            {visitsOpen && (
+                              <View style={[styles.visitsBox, { borderColor: colors.border }]}>
+                                {a.stays.map((s, i) => (
+                                  <View
+                                    key={`${s.startedAt}-${i}`}
+                                    style={[
+                                      styles.visitRow,
+                                      i > 0 && { borderTopWidth: 1, borderTopColor: colors.border },
+                                    ]}
+                                  >
+                                    <Text style={[styles.visitIndex, { color: colors.muted }]}>{i + 1}</Text>
+                                    <Text style={[styles.visitTime, { color: colors.txt }]}>
+                                      {formatTime(s.startedAt)}
+                                      <Text style={{ color: colors.muted }}> → </Text>
+                                      {s.endedAt ? (
+                                        formatTime(s.endedAt)
+                                      ) : (
+                                        <Text style={{ color: palette.mintPresence }}>still in room</Text>
+                                      )}
+                                    </Text>
+                                    <Text style={[styles.visitDuration, { color: colors.sub }]}>
+                                      {s.endedAt ? formatDuration(s.durationMs) : '--'}
+                                    </Text>
+                                    <Text style={[styles.visitScore, { color: colors.muted }]}>
+                                      {s.score === undefined ? '--' : `${Math.round(s.score * 100)}%`}
+                                    </Text>
+                                  </View>
+                                ))}
+                                {(a.ultrasonicVerifiedMs !== null || a.motionAnomalyMs > 0) && (
+                                  <View style={[styles.visitFooter, { borderTopColor: colors.border }]}>
+                                    {a.ultrasonicVerifiedMs !== null && (
+                                      <Text style={[styles.visitFooterText, { color: colors.muted }]}>
+                                        Verified{' '}
+                                        <Text style={{ color: palette.mintPresence, fontWeight: '700' }}>
+                                          {a.ultrasonicVerifiedMs > 0
+                                            ? formatDuration(a.ultrasonicVerifiedMs)
+                                            : 'never'}
+                                        </Text>
+                                      </Text>
+                                    )}
+                                    {a.motionAnomalyMs > 0 && (
+                                      <Text style={[styles.visitFooterText, { color: colors.muted }]}>
+                                        Inactive{' '}
+                                        <Text style={{ color: palette.amberWarn, fontWeight: '700' }}>
+                                          {formatDuration(a.motionAnomalyMs)}
+                                        </Text>
+                                      </Text>
+                                    )}
+                                  </View>
+                                )}
                               </View>
                             )}
                           </View>
-                        </View>
-                      ))}
+                        );
+                      })}
                   </View>
                 );
               })
@@ -552,16 +662,82 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   attendeeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
     borderTopWidth: 1,
     paddingTop: 10,
     marginTop: 10,
+  },
+  attendeeTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     gap: 12,
   },
   attendeeLeft: {
     flex: 1,
+  },
+  attendeeFactsRow: {
+    flexDirection: 'row',
+    marginTop: 10,
+    gap: 16,
+  },
+  attendeeFact: {
+    flex: 1,
+  },
+  attendeeFactLabel: {
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  attendeeFactValue: {
+    fontSize: 13,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  visitsToggle: {
+    fontSize: 11,
+    fontWeight: '700',
+    marginTop: 10,
+  },
+  visitsBox: {
+    borderWidth: 1,
+    borderRadius: 10,
+    marginTop: 8,
+    paddingHorizontal: 10,
+  },
+  visitRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 8,
+  },
+  visitIndex: {
+    fontSize: 10,
+    fontWeight: '700',
+    width: 14,
+  },
+  visitTime: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  visitDuration: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  visitScore: {
+    fontSize: 11,
+    width: 38,
+    textAlign: 'right',
+  },
+  visitFooter: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 14,
+    borderTopWidth: 1,
+    paddingVertical: 8,
+  },
+  visitFooterText: {
+    fontSize: 11,
   },
   attendeeName: {
     fontSize: 14,

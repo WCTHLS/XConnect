@@ -142,7 +142,14 @@ export const roomMembership = pgTable("room_membership", {
   role: text("role").notNull(),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
   endedAt: timestamp("ended_at", { withTimezone: true }),
+  // The final reading before the stay closed. Since a stay is closed by the reaper once the
+  // device has gone quiet, this is whatever was last heard as they dropped off — useful as an
+  // exit reading, but a poor summary of the visit, which is what avgConfidence is for.
   lastConfidence: real("last_confidence"),
+  // Mean of every heartbeat's confidence across the stay, averaged in memory as the batches
+  // arrive (the readings themselves are never persisted — far too many rows for what they buy).
+  // Null on rows written before this column existed, where only lastConfidence is available.
+  avgConfidence: real("avg_confidence"),
   ultrasonicVerified: boolean("ultrasonic_verified"),
   motionAnomalyFlag: boolean("motion_anomaly_flag")
 });

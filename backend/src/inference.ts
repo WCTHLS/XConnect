@@ -130,6 +130,10 @@ type RoomMembershipRecord = {
   startedAt: number;
   lastSeenAt: number;
   lastConfidence?: number;
+  /** Running mean of every heartbeat's confidence, kept as sum/count so each batch is O(1) and
+   *  the individual readings never have to be held (or written) anywhere. */
+  confidenceSum: number;
+  confidenceCount: number;
   ultrasonicVerified?: boolean;
   motionAnomalyFlag?: boolean;
 };
@@ -147,6 +151,10 @@ export class PocInferenceEngine {
    * pooled connection their insert could otherwise reach Postgres before the room row exists.
    */
   private readonly pendingRoomCreation = new Map<string, Promise<void>>();
+  /** In-flight device upserts, so a state change recorded in the same tick as a device's very
+   *  first appearance waits for its row instead of being rejected by the foreign key. Mirrors
+   *  pendingRoomCreation above, which solves the identical race for rooms. */
+  private readonly pendingDeviceCreation = new Map<string, Promise<void>>();
   /**
    * Devices whose room was ended out from under them (presenter left, or admin ended the
    * session), keyed by device ID. Clients see this on their next live poll and switch sharing
@@ -919,6 +927,12 @@ export class PocInferenceEngine {
       }
       existing.lastSeenAt = now;
       existing.lastConfidence = latest.confidence;
+      // Folded in per batch rather than kept as a series: the mean is what reports want, and
+      // storing every reading would be a row per device per heartbeat for the whole session.
+      if (latest.confidence !== undefined) {
+        existing.confidenceSum += latest.confidence;
+        existing.confidenceCount += 1;
+      }
       existing.ultrasonicVerified = latest.ultrasonicVerified;
       existing.motionAnomalyFlag = latest.motionAnomalyFlag;
       durationMs = now - existing.startedAt;
@@ -926,6 +940,20 @@ export class PocInferenceEngine {
     } else {
       // A brand-new membership entry is itself the "connected" transition.
       this.recordStateChange(roomId, deviceId, "connected", true, now);
+      // The starting value of each flag is logged too, not just later changes: without it a stay
+      // that began already flagged has no opening event, and its flagged time reads as nothing.
+      // Usually false for motion (the flag needs several windows of history before it can be
+      // true, which a fresh device has not accumulated), but a device rejoining within the same
+      // process carries that history in and genuinely can start flagged.
+      if (latest.motionAnomalyFlag !== undefined) {
+        this.recordStateChange(roomId, deviceId, "motion_anomaly_flag", latest.motionAnomalyFlag, now);
+      }
+      // Deliberately not logged for a presenter: they emit the tone rather than hear it, so their
+      // "verified" is true by definition and never changes. Recording it would read as
+      // corroboration of their presence that nothing actually performed.
+      if (role !== "presenter" && latest.ultrasonicVerified !== undefined) {
+        this.recordStateChange(roomId, deviceId, "ultrasonic_verified", latest.ultrasonicVerified, now);
+      }
       this.roomMembership.set(key, {
         roomId,
         roomCode,
@@ -935,6 +963,8 @@ export class PocInferenceEngine {
         startedAt: now,
         lastSeenAt: now,
         lastConfidence: latest.confidence,
+        confidenceSum: latest.confidence ?? 0,
+        confidenceCount: latest.confidence === undefined ? 0 : 1,
         ultrasonicVerified: latest.ultrasonicVerified,
         motionAnomalyFlag: latest.motionAnomalyFlag
       });
@@ -955,8 +985,11 @@ export class PocInferenceEngine {
     if (!this.db) return;
     const db = this.db;
     (async () => {
-      const pending = this.pendingRoomCreation.get(roomId);
-      if (pending) await pending;
+      // Both parents must exist first: this row references rooms AND devices.
+      const pendingRoom = this.pendingRoomCreation.get(roomId);
+      if (pendingRoom) await pendingRoom;
+      const pendingDevice = this.pendingDeviceCreation.get(deviceId);
+      if (pendingDevice) await pendingDevice;
       await db.insert(schema.stateChangeEvents).values({ roomId, deviceId, field, value, changedAt: new Date(now) });
     })().catch((err) => console.error("[db] failed to record state change:", err));
   }
@@ -1093,18 +1126,26 @@ export class PocInferenceEngine {
       startedAt: new Date(membership.startedAt),
       endedAt: new Date(membership.lastSeenAt),
       lastConfidence: membership.lastConfidence,
+      avgConfidence:
+        membership.confidenceCount > 0 ? membership.confidenceSum / membership.confidenceCount : null,
       ultrasonicVerified: membership.ultrasonicVerified,
       motionAnomalyFlag: membership.motionAnomalyFlag
     });
 
-    // The stay just ended — this is the "connected" -> false transition.
-    await this.db.insert(schema.stateChangeEvents).values({
-      roomId: membership.roomId,
-      deviceId,
-      field: "connected",
-      value: false,
-      changedAt: new Date(membership.lastSeenAt)
-    });
+    // The stay just ended — this is the "connected" -> false transition. Any flag still true is
+    // closed at the same instant: a flag that was never switched off before the device left
+    // would otherwise sit open forever, and its duration could only be guessed at read time.
+    const endedAt = new Date(membership.lastSeenAt);
+    const closing: { field: string; value: boolean }[] = [{ field: "connected", value: false }];
+    if (membership.motionAnomalyFlag) closing.push({ field: "motion_anomaly_flag", value: false });
+    // Presenters never open an ultrasonic interval (see trackRoomMembership), so there is never
+    // one of theirs to close.
+    if (membership.role !== "presenter" && membership.ultrasonicVerified) {
+      closing.push({ field: "ultrasonic_verified", value: false });
+    }
+    await this.db.insert(schema.stateChangeEvents).values(
+      closing.map((c) => ({ roomId: membership.roomId, deviceId, field: c.field, value: c.value, changedAt: endedAt }))
+    );
   }
 
   private persistClosedMembership(key: string, membership: RoomMembershipRecord) {
@@ -1114,17 +1155,29 @@ export class PocInferenceEngine {
     );
   }
 
-  /** Fire-and-forget upsert, gated on this.db. Never awaited by any caller. */
+  /**
+   * Fire-and-forget upsert, gated on this.db — no caller awaits it. The promise is parked in
+   * pendingDeviceCreation for the duration so that anything writing a row which references this
+   * device (state_change_events) can wait for it, rather than racing the device's own insert on
+   * its first ever appearance and losing the write to a foreign key violation.
+   */
   private upsertDevice(deviceId: string, displayName: string | undefined, now: number) {
     if (!this.db) return;
-    this.db
+    const write = this.db
       .insert(schema.devices)
       .values({ deviceId, displayName, firstSeenAt: new Date(now), lastSeenAt: new Date(now) })
       .onConflictDoUpdate({
         target: schema.devices.deviceId,
         set: { displayName, lastSeenAt: new Date(now) }
       })
-      .catch((err) => console.error("[db] failed to upsert device:", err));
+      .then(() => undefined)
+      .catch((err) => console.error("[db] failed to upsert device:", err))
+      .finally(() => {
+        // Only clear the entry if it is still this write: a later upsert for the same device may
+        // already have replaced it, and deleting that one would reopen the race.
+        if (this.pendingDeviceCreation.get(deviceId) === write) this.pendingDeviceCreation.delete(deviceId);
+      });
+    this.pendingDeviceCreation.set(deviceId, write);
   }
 
   /**

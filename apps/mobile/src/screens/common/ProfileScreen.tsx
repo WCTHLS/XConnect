@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -7,6 +7,7 @@ import {
   StyleSheet,
   ScrollView,
   Switch,
+  ActivityIndicator,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
@@ -14,9 +15,28 @@ import { palette } from '../../theme/colors';
 import { Role } from '../../components/navigation/BottomNav';
 import { AppAlert } from '../../components/ui/AppAlert';
 
+/** Compact enough for a stat tile: minutes below an hour, then hours to one decimal. */
+function formatDwell(ms: number): string {
+  if (ms < 60_000) return '0m';
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  return `${(minutes / 60).toFixed(1)}h`;
+}
+
+export interface MyStats {
+  /** Distinct rooms this account has been sensor-verified in. */
+  sessions: number;
+  dwellMs: number;
+  /** 0–1, or null when no membership row carried a confidence reading. */
+  avgConfidence: number | null;
+}
+
 interface ProfileScreenProps {
   displayName: string;
   onSaveDisplayName: (name: string) => Promise<void>;
+  /** Resolves to null when the figures can't be fetched, so the card says so rather than
+   *  showing zeros that look like a real (empty) history. */
+  onFetchMyStats: () => Promise<MyStats | null>;
   userEmail?: string;
   role: Role;
   deviceId: string;
@@ -29,6 +49,7 @@ interface ProfileScreenProps {
 export const ProfileScreen: React.FC<ProfileScreenProps> = ({
   displayName,
   onSaveDisplayName,
+  onFetchMyStats,
   userEmail,
   role,
   deviceId,
@@ -43,6 +64,22 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
   const [name, setName] = useState(displayName);
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  // undefined while the request is in flight, null once it has failed.
+  const [stats, setStats] = useState<MyStats | null | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    onFetchMyStats()
+      .then(result => {
+        if (!cancelled) setStats(result);
+      })
+      .catch(() => {
+        if (!cancelled) setStats(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [onFetchMyStats]);
 
   const handleSaveName = async () => {
     if (!name.trim()) return;
@@ -177,22 +214,39 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
           </TouchableOpacity>
         </View>
 
-        {/* Stats 3-Column Row */}
+        {/* Stats 3-Column Row. Sensor-verified attendance from the server — never a stand-in
+            figure, since a made-up number here reads exactly like a real one. */}
         <View style={[styles.statsRow, { borderTopColor: colors.border }]}>
-          <View style={styles.statCol}>
-            <Text style={[styles.statValue, { color: colors.txt }]}>24</Text>
-            <Text style={[styles.statLabel, { color: colors.muted }]}>Sessions</Text>
-          </View>
-          <View style={[styles.statDivider, { backgroundColor: colors.border }]} />
-          <View style={styles.statCol}>
-            <Text style={[styles.statValue, { color: palette.mintPresence }]}>18.4h</Text>
-            <Text style={[styles.statLabel, { color: colors.muted }]}>Dwell</Text>
-          </View>
-          <View style={[styles.statDivider, { backgroundColor: colors.border }]} />
-          <View style={styles.statCol}>
-            <Text style={[styles.statValue, { color: palette.skyMesh }]}>99%</Text>
-            <Text style={[styles.statLabel, { color: colors.muted }]}>Avg Conf</Text>
-          </View>
+          {stats === undefined ? (
+            <ActivityIndicator color={palette.mintPresence} style={styles.statsLoading} />
+          ) : stats === null ? (
+            <Text style={[styles.statsUnavailable, { color: colors.muted }]}>
+              Attendance totals are unavailable right now.
+            </Text>
+          ) : (
+            <>
+              <View style={styles.statCol}>
+                <Text style={[styles.statValue, { color: colors.txt }]}>{stats.sessions}</Text>
+                <Text style={[styles.statLabel, { color: colors.muted }]}>
+                  {stats.sessions === 1 ? 'Session' : 'Sessions'}
+                </Text>
+              </View>
+              <View style={[styles.statDivider, { backgroundColor: colors.border }]} />
+              <View style={styles.statCol}>
+                <Text style={[styles.statValue, { color: palette.mintPresence }]}>
+                  {formatDwell(stats.dwellMs)}
+                </Text>
+                <Text style={[styles.statLabel, { color: colors.muted }]}>Dwell</Text>
+              </View>
+              <View style={[styles.statDivider, { backgroundColor: colors.border }]} />
+              <View style={styles.statCol}>
+                <Text style={[styles.statValue, { color: palette.skyMesh }]}>
+                  {stats.avgConfidence === null ? '—' : `${Math.round(stats.avgConfidence * 100)}%`}
+                </Text>
+                <Text style={[styles.statLabel, { color: colors.muted }]}>Avg Conf</Text>
+              </View>
+            </>
+          )}
         </View>
       </View>
 
@@ -399,6 +453,14 @@ const styles = StyleSheet.create({
   statLabel: {
     fontSize: 11,
     marginTop: 2,
+  },
+  statsLoading: {
+    paddingVertical: 8,
+  },
+  statsUnavailable: {
+    fontSize: 12,
+    paddingVertical: 8,
+    textAlign: 'center',
   },
   statDivider: {
     width: 1,

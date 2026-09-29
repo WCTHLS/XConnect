@@ -1,10 +1,11 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
   StyleSheet,
   ScrollView,
+  ActivityIndicator,
 } from 'react-native';
 import Svg, { Path, Circle } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
@@ -12,6 +13,7 @@ import { palette } from '../../theme/colors';
 import { TopBar } from '../../components/ui/TopBar';
 import { MobileScreen } from '../../components/navigation/BottomNav';
 import { AppAlert } from '../../components/ui/AppAlert';
+import { exportHistoryReport, type HistoryDetail } from '../../services/sessionHistory';
 
 interface SessionEndScreenProps {
   roomId: string;
@@ -26,6 +28,8 @@ interface SessionEndScreenProps {
   endedAt?: string | null;
   acousticMatchPercent?: number;
   wifiSimilarityPercent?: number;
+  /** Loads the persisted attendance record for a room this presenter hosted. */
+  onFetchRoomHistory: (roomId: string, sessionId: string) => Promise<HistoryDetail>;
   onNavigate: (screen: MobileScreen) => void;
 }
 
@@ -39,9 +43,11 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
   endedAt,
   acousticMatchPercent = 99.2,
   wifiSimilarityPercent = 98.5,
+  onFetchRoomHistory,
   onNavigate,
 }) => {
   const { colors } = useTheme();
+  const [exporting, setExporting] = useState(false);
 
   // Format real duration
   const totalMinutes = Math.max(1, Math.round(durationMs / 60000));
@@ -50,11 +56,34 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
       ? `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`
       : `${totalMinutes}m`;
 
-  const handleExportReport = () => {
-    AppAlert.alert(
-      'Session Report Generated',
-      `Full verified attendance report for ${roomId.toUpperCase()} (${totalAttendees} attendees, ${dwellFormatted} dwell) is ready for export.`
-    );
+  const handleExportReport = async () => {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      // Fetched rather than built from what's on screen: the report is the persisted attendance
+      // record, including everyone's individual visits, which this screen only has totals for.
+      const occurrence = await onFetchRoomHistory(roomId, sessionId);
+      if (occurrence.rooms.length === 0) {
+        AppAlert.alert(
+          'Nothing to report yet',
+          "No attendance has been recorded for this room. If it only just ended, the last few people's time is still being written — try again in a moment."
+        );
+        return;
+      }
+      const outcome = await exportHistoryReport(occurrence);
+      AppAlert.alert(
+        'Report Exported',
+        outcome.kind === 'savedToFolder'
+          ? 'Saved to the folder you picked.'
+          : outcome.kind === 'shared'
+          ? 'Report shared.'
+          : `Saved to ${outcome.uri}`
+      );
+    } catch (err: any) {
+      AppAlert.alert('Could not export', err?.message || 'The report could not be generated.');
+    } finally {
+      setExporting(false);
+    }
   };
 
   return (
@@ -224,10 +253,15 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
         <View style={styles.actions}>
           <TouchableOpacity
             activeOpacity={0.85}
-            onPress={handleExportReport}
-            style={styles.exportButton}
+            disabled={exporting}
+            onPress={() => void handleExportReport()}
+            style={[styles.exportButton, exporting && { opacity: 0.6 }]}
           >
-            <Text style={styles.exportButtonText}>Export PDF Attendance Report</Text>
+            {exporting ? (
+              <ActivityIndicator size="small" color="#0F2F2C" />
+            ) : (
+              <Text style={styles.exportButtonText}>Export PDF Attendance Report</Text>
+            )}
           </TouchableOpacity>
 
           <TouchableOpacity
