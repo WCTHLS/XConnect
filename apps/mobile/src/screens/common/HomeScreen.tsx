@@ -244,13 +244,6 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [openInviteId, setOpenInviteId] = useState<number | null>(null);
   const openInvite = answeredInvites.find(i => i.id === openInviteId) ?? null;
 
-  const presenterHistory = [
-    { room: 'Hall A', date: 'Sep 11', dwell: '38m', count: 24 },
-    { room: 'Workshop 1', date: 'Sep 10', dwell: '52m', count: 12 },
-    { room: 'Auditorium', date: 'Sep 9', dwell: '1h 14m', count: 85 },
-    { room: 'Hall A', date: 'Sep 8', dwell: '29m', count: 19 },
-  ];
-
   return (
     <ScrollView
       style={[styles.container, { backgroundColor: colors.surf }]}
@@ -700,9 +693,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         )}
       </View>
 
-      {/* Attendees and presenters both see what they replied to past invites — real data,
-          unlike the admin's carousel below, which is still placeholder content. */}
-      {role === 'attendee' || role === 'presenter' ? (
+      {/* Attendees and presenters see what they replied to past invites. Admins get nothing
+          here: their past sessions are the History tab's job, with real data behind it. */}
+      {(role === 'attendee' || role === 'presenter') && (
         <View style={styles.recentSection}>
           <Text style={[styles.recentTitle, { color: colors.sub }]}>YOUR INVITE REPLIES</Text>
 
@@ -835,67 +828,6 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             })
           )}
         </View>
-      ) : (
-      <View style={styles.recentSection}>
-        <Text style={[styles.recentTitle, { color: colors.sub }]}>
-          RECENT SESSIONS
-        </Text>
-
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.recentScroll}
-        >
-          {presenterHistory.map(
-            (s: any, i: number) => (
-              <View
-                key={i}
-                style={[
-                  styles.recentCard,
-                  {
-                    backgroundColor: colors.card,
-                    borderColor: colors.border,
-                  },
-                ]}
-              >
-                <View style={styles.recentIconBox}>
-                  <Svg width={13} height={13} viewBox="0 0 24 24" fill="none">
-                    <Rect
-                      x={3}
-                      y={9}
-                      width={18}
-                      height={13}
-                      rx={2}
-                      stroke={palette.mintPresence}
-                      strokeWidth={2}
-                    />
-                    <Path
-                      d="M3 9l9-7 9 7"
-                      stroke={palette.mintPresence}
-                      strokeWidth={2}
-                      strokeLinecap="round"
-                    />
-                  </Svg>
-                </View>
-
-                <Text style={[styles.recentRoomName, { color: colors.txt }]} numberOfLines={1}>
-                  {s.room}
-                </Text>
-                <Text style={[styles.recentDate, { color: colors.muted }]}>
-                  {s.date}
-                </Text>
-
-                <View style={styles.recentBottomRow}>
-                  <Text style={styles.recentDwell}>{s.dwell}</Text>
-                  <Text style={styles.recentCheck}>
-                    {s.count ? `${s.count}✓` : '✓'}
-                  </Text>
-                </View>
-              </View>
-            )
-          )}
-        </ScrollView>
-      </View>
       )}
 
       <InviteDetailSheet
@@ -1249,55 +1181,5 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  recentScroll: {
-    gap: 10,
-    paddingBottom: 6,
-  },
-  recentCard: {
-    width: 130,
-    borderRadius: 16,
-    borderWidth: 1,
-    padding: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 4,
-    elevation: 1,
-  },
-  recentIconBox: {
-    width: 28,
-    height: 28,
-    borderRadius: 8,
-    backgroundColor: 'rgba(51,209,172,0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(51,209,172,0.25)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 8,
-  },
-  recentRoomName: {
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  recentDate: {
-    fontSize: 10,
-    marginTop: 1,
-  },
-  recentBottomRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: 10,
-  },
-  recentDwell: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: palette.mintPresence,
-  },
-  recentCheck: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: palette.mintPresence,
   },
 });
