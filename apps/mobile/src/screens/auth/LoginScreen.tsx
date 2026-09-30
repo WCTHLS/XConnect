@@ -6,8 +6,8 @@ import {
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
+  ScrollView,
 } from 'react-native';
-import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import Svg, { Path, Circle } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
@@ -94,13 +94,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   };
 
   return (
-    <KeyboardAwareScrollView
+    <ScrollView
       style={{ flex: 1, backgroundColor: colors.surf }}
       contentContainerStyle={styles.container}
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}
-      enableOnAndroid
-      extraScrollHeight={20}
     >
         {/* Header Branding */}
         <View style={styles.header}>
@@ -265,7 +263,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
             </Text>
           </TouchableOpacity>
         </View>
-    </KeyboardAwareScrollView>
+    </ScrollView>
   );
 };
 

@@ -7,7 +7,6 @@ import {
   StyleSheet,
   ScrollView,
 } from 'react-native';
-import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import Svg, { Path, Circle } from 'react-native-svg';
 import { getAcousticTokenForRoom } from '@confpresence/shared';
 import { useTheme } from '../../theme/useTheme';
@@ -58,11 +57,10 @@ export const PresenterSetupScreen: React.FC<PresenterSetupScreenProps> = ({
         onBack={() => onNavigate('home')}
       />
 
-      <KeyboardAwareScrollView
+      <ScrollView
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
-        enableOnAndroid
-        extraScrollHeight={20}
+        keyboardShouldPersistTaps="handled"
       >
         {/* Acoustic Token Preview Card */}
         <View
@@ -175,7 +173,7 @@ export const PresenterSetupScreen: React.FC<PresenterSetupScreenProps> = ({
             placeholderTextColor={colors.muted}
           />
         </View>
-      </KeyboardAwareScrollView>
+      </ScrollView>
 
       {/* Start Broadcast CTA */}
       <View style={styles.footer}>
