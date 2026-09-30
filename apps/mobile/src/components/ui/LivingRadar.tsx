@@ -4,24 +4,43 @@ import Svg, { Circle, Line } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
 
+export function getMemberInitials(name?: string, fallbackId?: string): string {
+  if (!name || !name.trim()) {
+    return fallbackId ? fallbackId.slice(-2).toUpperCase() : '??';
+  }
+  const parts = name.trim().split(/\s+/);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  }
+  return parts[0].slice(0, 2).toUpperCase();
+}
+
+export interface LivingRadarMember {
+  displayName?: string;
+  deviceId?: string;
+  ultrasonicVerified?: boolean;
+}
+
 interface LivingRadarProps {
   scanning?: boolean;
   participantCount?: number;
+  members?: LivingRadarMember[];
   statusText?: string;
 }
 
-const NODES = [
-  { x: 42, y: 28, initials: 'AK', verified: true },
-  { x: 68, y: 52, initials: 'MR', verified: true },
-  { x: 30, y: 62, initials: 'JP', verified: false },
-  { x: 72, y: 30, initials: 'SL', verified: true },
-  { x: 22, y: 42, initials: 'BC', verified: true },
-  { x: 58, y: 72, initials: 'TW', verified: true },
+const NODE_COORDINATES = [
+  { x: 42, y: 28 },
+  { x: 68, y: 52 },
+  { x: 30, y: 62 },
+  { x: 72, y: 30 },
+  { x: 22, y: 42 },
+  { x: 58, y: 72 },
 ];
 
 export const LivingRadar: React.FC<LivingRadarProps> = ({
   scanning = false,
-  participantCount = 6,
+  participantCount = 0,
+  members,
   statusText,
 }) => {
   const { colors, theme } = useTheme();
@@ -100,8 +119,30 @@ export const LivingRadar: React.FC<LivingRadarProps> = ({
     outputRange: ['0deg', '360deg'],
   });
 
+  const activeNodes = React.useMemo(() => {
+    if (members && members.length > 0) {
+      return members.slice(0, 6).map((m, i) => {
+        const coords = NODE_COORDINATES[i % NODE_COORDINATES.length];
+        return {
+          x: coords.x,
+          y: coords.y,
+          initials: getMemberInitials(m.displayName, m.deviceId),
+          verified: m.ultrasonicVerified ?? true,
+        };
+      });
+    }
+    if (participantCount && participantCount > 0) {
+      return NODE_COORDINATES.slice(0, Math.min(participantCount, 6)).map((coords, i) => ({
+        x: coords.x,
+        y: coords.y,
+        initials: `A${i + 1}`,
+        verified: true,
+      }));
+    }
+    return [];
+  }, [members, participantCount]);
+
   const ringColor = scanning ? palette.skyMesh : palette.mintPresence;
-  const activeNodes = NODES.slice(0, Math.min(participantCount, 6));
 
   const renderPulseRing = (anim: Animated.Value) => {
     const scale = anim.interpolate({

@@ -5,10 +5,10 @@ const sessionId = "test-session";
 const roomId = "room-a";
 
 console.log("1. Joining Presenter and Attendees...");
-engine.join("presenter-device-01", "presenter", roomId, "Dr. Alice");
-engine.join("attendee-device-02", "attendee", undefined, "Bob (Matching WiFi)");
-engine.join("attendee-device-03", "attendee", undefined, "Charlie (No WiFi / Fallback)");
-engine.join("attendee-device-04", "attendee", undefined, "Diana (Different WiFi)");
+engine.join("presenter-device-01", "presenter", roomId, "Dr. Alice", sessionId);
+engine.join("attendee-device-02", "attendee", roomId, "Bob (Matching WiFi)", sessionId);
+engine.join("attendee-device-03", "attendee", roomId, "Charlie (No WiFi / Fallback)", sessionId);
+engine.join("attendee-device-04", "attendee", roomId, "Diana (Different WiFi)", sessionId);
 
 const now = new Date().toISOString();
 
@@ -28,8 +28,8 @@ engine.ingest({
   ],
   wifiFingerprint: [
     { bssid: "aa:bb:cc:01:01:01", ssid: "Conference-5G", rssi: -50, frequency: 5180 },
-    { bssid: "aa:bb:cc:01:01:02", ssid: "Conference-2.4G", rssi: -60, frequency: 2412 },
-    { bssid: "aa:bb:cc:01:01:03", ssid: "Venue-Guest", rssi: -70, frequency: 5200 }
+    { bssid: "aa:bb:cc:02:01:01", ssid: "Conference-2.4G", rssi: -60, frequency: 2412 },
+    { bssid: "aa:bb:cc:03:01:01", ssid: "Venue-Guest", rssi: -70, frequency: 5200 }
   ]
 });
 
@@ -38,19 +38,21 @@ engine.ingest({
   sessionId,
   deviceId: "attendee-device-02",
   role: "attendee",
+  roomId,
   rotatingId: "att2-tok-02",
   capturedAt: now,
   peers: [{ rotatingId: "pres-tok-01", rssi: -68, seenAt: now }],
   wifiFingerprint: [
     { bssid: "aa:bb:cc:01:01:01", ssid: "Conference-5G", rssi: -52, frequency: 5180 },
-    { bssid: "aa:bb:cc:01:01:02", ssid: "Conference-2.4G", rssi: -58, frequency: 2412 },
-    { bssid: "aa:bb:cc:01:01:03", ssid: "Venue-Guest", rssi: -72, frequency: 5200 }
+    { bssid: "aa:bb:cc:02:01:01", ssid: "Conference-2.4G", rssi: -58, frequency: 2412 },
+    { bssid: "aa:bb:cc:03:01:01", ssid: "Venue-Guest", rssi: -72, frequency: 5200 }
   ]
 });
 
 // Attendee 3 (Pure BLE, No Wi-Fi)
 engine.ingest({
   sessionId,
+  roomId,
   deviceId: "attendee-device-03",
   role: "attendee",
   rotatingId: "att3-tok-03",
@@ -61,6 +63,7 @@ engine.ingest({
 // Attendee 4 (Different Wi-Fi)
 engine.ingest({
   sessionId,
+  roomId,
   deviceId: "attendee-device-04",
   role: "attendee",
   rotatingId: "att4-tok-04",

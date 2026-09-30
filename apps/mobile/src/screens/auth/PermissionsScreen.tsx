@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,12 @@ import Svg, { Path, Rect } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
 import { MobileScreen } from '../../components/navigation/BottomNav';
+import {
+  checkBlePermissions,
+  checkAudioPermissions,
+  requestBlePermissions,
+  requestAudioPermissions,
+} from '../../services/presenceService';
 
 interface PermissionsScreenProps {
   onNavigate: (screen: MobileScreen) => void;
@@ -23,9 +29,39 @@ export const PermissionsScreen: React.FC<PermissionsScreenProps> = ({
 }) => {
   const { colors, theme } = useTheme();
   const [granted, setGranted] = useState<Record<string, boolean>>({
-    bluetooth: true,
-    microphone: true,
+    bluetooth: false,
+    microphone: false,
   });
+
+  const syncPermissionStatus = useCallback(async () => {
+    const [bleOk, audioOk] = await Promise.all([
+      checkBlePermissions(),
+      checkAudioPermissions(),
+    ]);
+    setGranted({
+      bluetooth: bleOk,
+      microphone: audioOk,
+    });
+  }, []);
+
+  useEffect(() => {
+    void syncPermissionStatus();
+  }, [syncPermissionStatus]);
+
+  const handleToggle = async (key: string, val: boolean) => {
+    if (!val) {
+      setGranted(g => ({ ...g, [key]: false }));
+      return;
+    }
+
+    if (key === 'bluetooth') {
+      const ok = await requestBlePermissions();
+      setGranted(g => ({ ...g, bluetooth: ok }));
+    } else if (key === 'microphone') {
+      const ok = await requestAudioPermissions();
+      setGranted(g => ({ ...g, microphone: ok }));
+    }
+  };
 
   const perms = [
     {
@@ -75,6 +111,15 @@ export const PermissionsScreen: React.FC<PermissionsScreenProps> = ({
   const allGranted = Object.values(granted).every(Boolean);
 
   const handleContinue = async () => {
+    // Proactively request any permission that isn't granted yet
+    if (!granted.bluetooth) {
+      const bleOk = await requestBlePermissions();
+      if (bleOk) setGranted(g => ({ ...g, bluetooth: true }));
+    }
+    if (!granted.microphone) {
+      const audioOk = await requestAudioPermissions();
+      if (audioOk) setGranted(g => ({ ...g, microphone: true }));
+    }
     await onGrantAll();
     onNavigate('login');
   };
@@ -124,9 +169,7 @@ export const PermissionsScreen: React.FC<PermissionsScreenProps> = ({
                   </Text>
                   <Switch
                     value={granted[p.key]}
-                    onValueChange={val =>
-                      setGranted(g => ({ ...g, [p.key]: val }))
-                    }
+                    onValueChange={val => void handleToggle(p.key, val)}
                     trackColor={{
                       false: colors.border,
                       true: 'rgba(51,209,172,0.4)',

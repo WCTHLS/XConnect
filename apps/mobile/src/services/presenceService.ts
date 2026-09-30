@@ -31,7 +31,32 @@ export class RoomRejectedError extends Error {
   }
 }
 
-async function requestBlePermissions(): Promise<boolean> {
+export async function checkBlePermissions(): Promise<boolean> {
+  if (Platform.OS !== "android") return true;
+  try {
+    if (Platform.Version >= 31) {
+      const scan = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN);
+      const adv = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE);
+      const conn = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT);
+      return scan && adv && conn;
+    } else {
+      return await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
+    }
+  } catch {
+    return false;
+  }
+}
+
+export async function checkAudioPermissions(): Promise<boolean> {
+  if (Platform.OS !== "android") return true;
+  try {
+    return await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
+  } catch {
+    return false;
+  }
+}
+
+export async function requestBlePermissions(): Promise<boolean> {
   if (Platform.OS !== "android") return true;
 
   try {
@@ -68,7 +93,7 @@ async function requestBlePermissions(): Promise<boolean> {
   }
 }
 
-async function requestAudioPermissions(): Promise<boolean> {
+export async function requestAudioPermissions(): Promise<boolean> {
   if (Platform.OS !== "android") return true;
   try {
     const granted = await PermissionsAndroid.request(

@@ -109,6 +109,7 @@ export const PresenterDashboardScreen: React.FC<PresenterDashboardScreenProps> =
         <LivingRadar
           scanning={false}
           participantCount={attendeeCount}
+          members={attendeesOnly}
           statusText={`Acoustic Gate Verified · Token: ${acousticToken}`}
         />
 

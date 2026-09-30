@@ -1,142 +1,31 @@
-import { getAcousticTokenForRoom, type LiveRoomState, type PresenceBatch, type RoomMemberInfo, type UltrasonicObservation, type WifiApObservation } from "@confpresence/shared";
-import { eq } from "drizzle-orm";
+import type {
+  LiveRoomState,
+  PresenceBatch,
+  RoomMemberInfo,
+  WifiApObservation,
+} from "@confpresence/shared";
 import type { Db } from "./db/index.js";
-import { schema } from "./db/index.js";
+import {
+  type ActiveRoomRecord,
+  type DeviceRecord,
+  type RoomMembershipRecord,
+  MIN_RSSI,
+  MOTION_SLIDING_WINDOW_SIZE,
+  MOTION_STILL_VARIANCE_THRESHOLD,
+  ROOM_AUTO_EXPIRY_MS,
+  ROOM_ENDED_NOTICE_TTL_MS,
+  ROOM_MEMBERSHIP_GRACE_MS,
+  WINDOW_MS,
+} from "./engine/types.js";
+import { isUltrasonicTokenMatch } from "./engine/ultrasonic.js";
+import { computeWifiCosineSimilarity } from "./engine/wifi.js";
+import { computeMotionAnomalyFlag } from "./engine/motion.js";
+import { buildBleGraph, computeShortestHop, findConnectedComponent } from "./engine/graph.js";
+import { EnginePersistenceManager } from "./engine/persistence.js";
 
-const WINDOW_MS = 30_000; // 30 seconds sliding active window
-const MIN_RSSI = -85;     // 20+ meters coverage in open line-of-sight halls
-
-// Motion-anomaly thresholds. Not yet calibrated against real recorded sessions,
-// tune these once real data exists rather than trusting these starting values.
-const MOTION_STILL_VARIANCE_THRESHOLD = 0.02; // below this, a ~10s window counts as "still"
-const MOTION_SLIDING_WINDOW_SIZE = Number(process.env.MOTION_SLIDING_WINDOW_SIZE) || 3;
-const MOTION_MIN_WINDOWS_FOR_FLAG = Math.min(3, MOTION_SLIDING_WINDOW_SIZE); // batches needed before a flag is meaningful
-const MOTION_STILL_FRACTION_THRESHOLD = 0.9;  // fraction of the sliding window that must be still to flag
-
-type DeviceRecord = {
-  deviceId: string;
-  displayName?: string;
-  role: "presenter" | "attendee";
-  roomId?: string;
-  /** Signed-in person behind this device (undefined when auth is off). */
-  userId?: string;
-  email?: string;
-  /** Session label the device joined under (grouping only; a room's identity is its occurrence ID). */
-  sessionLabel?: string;
-  rotatingId?: string;
-  wifiFingerprint?: WifiApObservation[];
-  uwbDiscoveryToken?: string;
-  uwbTokenUpdatedAt?: number;
-  wifiHistory?: Map<string, { ap: WifiApObservation; lastSeen: number }>;
-  /** Most recent motion windows (true = still), newest last, capped at MOTION_SLIDING_WINDOW_SIZE. */
-  motionWindowHistory?: boolean[];
-  /** Ultrasonic acoustic observation (if heard) */
-  ultrasonicObservation?: UltrasonicObservation;
-  ultrasonicObservedAt?: number;
-  /** Active ultrasonic token emitted (if presenter) */
-  ultrasonicEmittedToken?: string;
-  updatedAt: number;
-};
-
-/**
- * Checks whether an acoustic token heard by an attendee matches an expected presenter/room token.
- * Normalizes case, removes hyphens/underscores/spaces, and resolves common room aliases (e.g., 'ROOM-A' == 'RM-A').
- */
-export function isUltrasonicTokenMatch(heard?: string, expected?: string): boolean {
-  if (!heard || !expected) return false;
-
-  const normalize = (tok: string): string =>
-    tok
-      .trim()
-      .toUpperCase()
-      .replace(/[\s\-_]+/g, "");
-
-  const hNorm = normalize(heard);
-  const eNorm = normalize(expected);
-
-  if (hNorm === eNorm) return true;
-  if (hNorm.length >= 2 && (eNorm.includes(hNorm) || hNorm.includes(eNorm))) return true;
-
-  // Compare using standardized room tokenizer tokens
-  const hTokenNorm = normalize(getAcousticTokenForRoom(heard));
-  const eTokenNorm = normalize(getAcousticTokenForRoom(expected));
-  if (hTokenNorm === eTokenNorm) return true;
-  if (hTokenNorm === eNorm || eTokenNorm === hNorm) return true;
-
-  // Resolve standard room aliases (ROOM <-> RM, HALL <-> HL, WORKSHOP <-> WK, STAGE <-> ST)
-  const toAlias = (n: string): string =>
-    n
-      .replace(/^ROOM/g, "RM")
-      .replace(/^HALL/g, "HL")
-      .replace(/^WORKSHOP/g, "WK")
-      .replace(/^STAGE/g, "ST")
-      .replace(/^AUDITORIUM/g, "AUD");
-
-  const hAlias = toAlias(hNorm);
-  const eAlias = toAlias(eNorm);
-
-  if (hAlias === eAlias) return true;
-  if (hAlias.length >= 2 && (eAlias.includes(hAlias) || hAlias.includes(eAlias))) return true;
-
-  // Suffix code match (e.g., '1' for 'WK-1' or 'WORKSHOP-1')
-  const hSuffix = hAlias.replace(/^(RM|HL|WK|ST)/, "");
-  const eSuffix = eAlias.replace(/^(RM|HL|WK|ST)/, "");
-  if (hSuffix && eSuffix && hSuffix === eSuffix) return true;
-
-  return false;
-}
-
-/** How long a device can drop out of a room's cluster before its stay is considered over. */
-const ROOM_MEMBERSHIP_GRACE_MS = 45_000;
-
-/**
- * How long a room can go quiet before the next use of its name starts a brand-new occurrence
- * instead of resuming the old one. Long enough to cover a genuine brief interruption (a restart,
- * stepping out, a connectivity blip); short enough that hours of silence reliably means someone
- * unrelated is reusing this room+session name, not the same presenter coming back — the two are
- * otherwise indistinguishable and a long window quietly merges unrelated presentations into one
- * room record. An explicit room end (presenter leaving) or PocInferenceEngine.endSession achieves
- * a fresh occurrence immediately regardless of this window.
- */
-const ROOM_AUTO_EXPIRY_MS = 15 * 60 * 1000;
-
-/** How long a "your room was ended" notice stays available to a device that hasn't polled yet. */
-const ROOM_ENDED_NOTICE_TTL_MS = 10 * 60 * 1000;
-
-type ActiveRoomRecord = {
-  /** Real, unique identity of this occurrence of the room (rooms.id). */
-  roomId: string;
-  code: string;
-  sessionLabel: string;
-  startedAt: number;
-  lastActivityAt: number;
-  /**
-   * Signed-in person currently hosting this occurrence, refreshed on every presenter join/ingest
-   * so a takeover moves ownership with it. Held on the room rather than inferred from the live
-   * presenter's device record, because that record is reaped after ~90s of silence while the room
-   * itself stays alive for ROOM_AUTO_EXPIRY_MS — without this, a presenter who force-quit could
-   * not be offered their own still-open room back.
-   */
-  ownerUserId?: string;
-};
-
-type RoomMembershipRecord = {
-  /** Occurrence ID (rooms.id) this stay belongs to. */
-  roomId: string;
-  roomCode: string;
-  sessionLabel: string;
-  userId?: string;
-  role: "presenter" | "attendee";
-  startedAt: number;
-  lastSeenAt: number;
-  lastConfidence?: number;
-  /** Running mean of every heartbeat's confidence, kept as sum/count so each batch is O(1) and
-   *  the individual readings never have to be held (or written) anywhere. */
-  confidenceSum: number;
-  confidenceCount: number;
-  ultrasonicVerified?: boolean;
-  motionAnomalyFlag?: boolean;
-};
+// Re-export public utilities
+export { isUltrasonicTokenMatch };
+export * from "./engine/types.js";
 
 export class PocInferenceEngine {
   private readonly devices = new Map<string, DeviceRecord>();
@@ -146,27 +35,17 @@ export class PocInferenceEngine {
   /** Which occurrence a (session label, room name) pair currently resolves to. */
   private readonly activeRoomsByKey = new Map<string, ActiveRoomRecord>();
   /**
-   * In-flight "create this room row" write, keyed by occurrence ID. Writers that reference the
-   * room by foreign key (membership rows, state-change events) await this first, since on a
-   * pooled connection their insert could otherwise reach Postgres before the room row exists.
-   */
-  private readonly pendingRoomCreation = new Map<string, Promise<void>>();
-  /** In-flight device upserts, so a state change recorded in the same tick as a device's very
-   *  first appearance waits for its row instead of being rejected by the foreign key. Mirrors
-   *  pendingRoomCreation above, which solves the identical race for rooms. */
-  private readonly pendingDeviceCreation = new Map<string, Promise<void>>();
-  /**
    * Devices whose room was ended out from under them (presenter left, or admin ended the
    * session), keyed by device ID. Clients see this on their next live poll and switch sharing
    * off. Cleared when the device joins again or leaves; entries otherwise expire after
    * ROOM_ENDED_NOTICE_TTL_MS so a device that never polls again can't leak one forever.
    */
   private readonly roomEndedNotices = new Map<string, { roomCode: string; endedAt: number }>();
-  /** Optional Postgres persistence. undefined = pure in-memory mode (no DATABASE_URL set). */
-  private readonly db?: Db;
+  /** Persistence manager for Postgres storage & state event logging. */
+  private readonly persistence: EnginePersistenceManager;
 
   constructor(options?: { db?: Db }) {
-    this.db = options?.db;
+    this.persistence = new EnginePersistenceManager(options?.db);
     // trim() also runs inline on ingest()/roomState(), but presence must expire even if
     // nobody happens to be polling (e.g. an admin screen isn't open) — otherwise a stale
     // room_membership stays "connected" indefinitely instead of closing ~45s after the
@@ -203,14 +82,15 @@ export class PocInferenceEngine {
       sessionLabel,
       startedAt: now,
       lastActivityAt: now,
-      ownerUserId: presenterUserId
+      ownerUserId: presenterUserId,
     });
 
-    if (this.db) {
-      const write = this.upsertRoomInternal(roomId, roomCode, sessionLabel, now)
+    if (this.persistence.hasDb) {
+      const write = this.persistence
+        .upsertRoom(roomId, roomCode, sessionLabel, now)
         .catch((err) => console.error("[db] failed to create room row:", err))
-        .finally(() => this.pendingRoomCreation.delete(roomId));
-      this.pendingRoomCreation.set(roomId, write);
+        .finally(() => this.persistence.pendingRoomCreation.delete(roomId));
+      this.persistence.pendingRoomCreation.set(roomId, write);
     }
     return roomId;
   }
@@ -248,11 +128,6 @@ export class PocInferenceEngine {
    * Self-service room-end for the presenter rejoin flow: only succeeds if userId actually owns
    * this room, so one signed-in user can never end a room that belongs to someone else just by
    * guessing its sessionLabel/roomCode.
-   *
-   * Ownership is read the same way myActiveRooms reads it — off the room record, falling back to
-   * a live presenter device record only when the room has no recorded owner. Checking solely for
-   * a live device record would make a room un-endable exactly when ending it matters most: after
-   * the host force-quit, leaving it open with nobody reporting into it.
    */
   endRoomIfOwner(sessionLabel: string, roomCode: string, userId: string): boolean {
     const key = PocInferenceEngine.roomKey(sessionLabel, roomCode);
@@ -281,45 +156,29 @@ export class PocInferenceEngine {
     for (const [membershipKey, membership] of this.roomMembership.entries()) {
       if (membershipKey.startsWith(prefix)) {
         const deviceId = membershipKey.slice(prefix.length);
-        // This membership row can be stale: a device that was an attendee here may have since
-        // become the presenter of a different room entirely, within the grace window that keeps
-        // this row alive after they stopped being counted as a member. Only tell it "your room
-        // ended" if it hasn't moved on — otherwise a presenter elsewhere would be wrongly kicked
-        // off their own, unrelated, still-live room.
         const current = this.devices.get(deviceId);
-        const movedToDifferentRoom = current?.role === "presenter" && (current.roomId !== room.code || current.sessionLabel !== room.sessionLabel);
+        const movedToDifferentRoom =
+          current?.role === "presenter" &&
+          (current.roomId !== room.code || current.sessionLabel !== room.sessionLabel);
         if (!movedToDifferentRoom) {
           this.roomEndedNotices.set(deviceId, { roomCode: room.code, endedAt: now });
         }
         membership.lastSeenAt = now;
-        this.persistClosedMembership(membershipKey, membership);
+        this.persistence.persistClosedMembership(membershipKey, membership);
         this.roomMembership.delete(membershipKey);
       }
     }
-    // Devices keep running until their next poll tells them the room ended. Notify every device
-    // still associated with this room via its OWN record, not just whichever ones happened to
-    // have a currently-live BLE-cluster membership above — an attendee's Bluetooth link can be
-    // briefly flaky right at the instant the room ends, which would otherwise mean they never
-    // get a matching roomMembership row here and so never receive the notice at all, leaving
-    // their client's "still in this room" state (and its duration counter) running forever.
-    // A device's own roomId/sessionLabel is refreshed on every batch upload independent of BLE
-    // health, so this is the reliable channel; the roomMembership loop above is only additionally
-    // needed for its DB duration bookkeeping. Presenter records are also dropped outright so
-    // nothing (roster polls, the admin overview) keeps computing for this room, and so a new
-    // occurrence can't be started by leftover state.
     for (const [deviceId, d] of [...this.devices.entries()]) {
       if (d.roomId === room.code && d.sessionLabel === room.sessionLabel) {
         this.roomEndedNotices.set(deviceId, { roomCode: room.code, endedAt: now });
         if (d.role === "presenter") this.devices.delete(deviceId);
       }
     }
-    this.endRoomInternal(room.roomId, now).catch((err) => console.error("[db] failed to mark room ended:", err));
+    this.persistence.endRoom(room.roomId, now).catch((err) => console.error("[db] failed to mark room ended:", err));
   }
 
   /**
-   * If another presenter already holds this room under this session label and is still live
-   * (heard from within two windows, the same liveness test roomState() uses), returns its name.
-   * A presenter that stops reporting is treated as gone after that, so someone else can take over.
+   * If another presenter already holds this room under this session label and is still live, returns its name.
    */
   presenterConflict(sessionLabel: string, roomCode: string, deviceId: string, userId?: string): { presenterName: string } | undefined {
     const now = Date.now();
@@ -349,14 +208,15 @@ export class PocInferenceEngine {
     return { roomCode: notice.roomCode };
   }
 
-  private async endRoomInternal(roomId: string, now: number) {
-    if (!this.db) return;
-    const pending = this.pendingRoomCreation.get(roomId);
-    if (pending) await pending;
-    await this.db.update(schema.rooms).set({ endedAt: new Date(now) }).where(eq(schema.rooms.id, roomId));
-  }
-
-  join(deviceId: string, role: "presenter" | "attendee", roomId?: string, displayName?: string, sessionLabel?: string, userId?: string, email?: string) {
+  join(
+    deviceId: string,
+    role: "presenter" | "attendee",
+    roomId?: string,
+    displayName?: string,
+    sessionLabel?: string,
+    userId?: string,
+    email?: string
+  ) {
     const current = this.devices.get(deviceId);
     const now = Date.now();
     this.roomEndedNotices.delete(deviceId);
@@ -376,12 +236,10 @@ export class PocInferenceEngine {
       ultrasonicObservation: current?.ultrasonicObservation,
       ultrasonicObservedAt: current?.ultrasonicObservedAt,
       ultrasonicEmittedToken: current?.ultrasonicEmittedToken,
-      updatedAt: now
+      updatedAt: now,
     });
-    this.upsertDevice(deviceId, displayName || current?.displayName, now);
+    this.persistence.upsertDevice(deviceId, displayName || current?.displayName, now);
     if (role === "presenter" && roomId && sessionLabel) {
-      // The same person restarting the app arrives as a new device. Drop their older presenter
-      // record for this room so two devices never both count as its presenter.
       if (userId) {
         for (const [id, d] of this.devices) {
           if (id !== deviceId && d.userId === userId && d.role === "presenter" && d.roomId === roomId && d.sessionLabel === sessionLabel) {
@@ -395,12 +253,6 @@ export class PocInferenceEngine {
 
   leave(deviceId: string) {
     const device = this.devices.get(deviceId);
-    // A presenter leaving ends the room for everyone, not just themselves — attendee-side
-    // clustering is presenter-anchored (see roomState()), so without this presenter there is
-    // no room to be "in" anymore. Close every open stay in this room immediately rather than
-    // waiting up to ROOM_MEMBERSHIP_GRACE_MS for trim()'s passive staleness sweep to notice —
-    // that delay is a fallback for ungraceful disconnects, not the right latency for a clean,
-    // explicit leave.
     if (device?.role === "presenter" && device.roomId && device.sessionLabel) {
       const key = PocInferenceEngine.roomKey(device.sessionLabel, device.roomId);
       const room = this.activeRoomsByKey.get(key);
@@ -433,7 +285,7 @@ export class PocInferenceEngine {
       ultrasonicObservation: current?.ultrasonicObservation,
       ultrasonicObservedAt: current?.ultrasonicObservedAt,
       ultrasonicEmittedToken: current?.ultrasonicEmittedToken,
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
     });
   }
 
@@ -444,8 +296,7 @@ export class PocInferenceEngine {
     const wifiHistory = current?.wifiHistory ?? new Map<string, { ap: WifiApObservation; lastSeen: number }>();
     const now = Date.now();
 
-    // Track this device's most recent motion windows (still vs. moving), for the anomaly
-    // flag in roomState(). Only the last MOTION_SLIDING_WINDOW_SIZE batches are kept.
+    // Track motion window history
     let motionWindowHistory = current?.motionWindowHistory ?? [];
     if (batch.motionVariance !== undefined) {
       motionWindowHistory = [...motionWindowHistory, batch.motionVariance < MOTION_STILL_VARIANCE_THRESHOLD];
@@ -454,7 +305,7 @@ export class PocInferenceEngine {
       }
     }
 
-    // 1. Ingest fresh Wi-Fi APs into 30s rolling fingerprint history
+    // 1. Ingest fresh Wi-Fi APs
     if (batch.wifiFingerprint && batch.wifiFingerprint.length > 0) {
       for (const ap of batch.wifiFingerprint) {
         const bssid = ap.bssid.toLowerCase().trim();
@@ -470,7 +321,7 @@ export class PocInferenceEngine {
     }
 
     // 3. Compile consolidated active Wi-Fi fingerprint
-    const consolidatedWifi: WifiApObservation[] = [...wifiHistory.values()].map(e => e.ap);
+    const consolidatedWifi: WifiApObservation[] = [...wifiHistory.values()].map((e) => e.ap);
 
     // 4. Ingest Ultrasonic observations
     const ultrasonicObservation = batch.ultrasonicObservation || current?.ultrasonicObservation;
@@ -494,9 +345,9 @@ export class PocInferenceEngine {
       ultrasonicObservation,
       ultrasonicObservedAt,
       ultrasonicEmittedToken,
-      updatedAt: now
+      updatedAt: now,
     });
-    this.upsertDevice(batch.deviceId, batch.displayName || current?.displayName, now);
+    this.persistence.upsertDevice(batch.deviceId, batch.displayName || current?.displayName, now);
     const ingestRoomCode = batch.roomId ?? current?.roomId;
     if (batch.role === "presenter" && ingestRoomCode) {
       this.resolveRoom(batch.sessionId, ingestRoomCode, now, userId ?? current?.userId);
@@ -510,11 +361,12 @@ export class PocInferenceEngine {
     const sessionId = sessionLabel;
     this.trim();
     const now = Date.now();
-    const graph = this.buildGraph();
+    const graph = buildBleGraph(this.devices, this.batches, MIN_RSSI);
 
     // 1. Find all active presenters in this specific room
-    const presentersInRoom = [...this.devices.values()]
-      .filter((d) => d.role === "presenter" && d.roomId === roomId && d.sessionLabel === sessionLabel && now - d.updatedAt < WINDOW_MS * 2);
+    const presentersInRoom = [...this.devices.values()].filter(
+      (d) => d.role === "presenter" && d.roomId === roomId && d.sessionLabel === sessionLabel && now - d.updatedAt < WINDOW_MS * 2
+    );
 
     if (!presentersInRoom.length) {
       return {
@@ -522,12 +374,11 @@ export class PocInferenceEngine {
         roomId,
         estimatedMemberDeviceIds: [],
         members: [],
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
       };
     }
 
-    // 2. Host Sticky Locking & Density Resolution:
-    // Prioritize the Host who has active in-room peer sightings (protecting from remote 0-peer takeovers)
+    // 2. Host Sticky Locking & Density Resolution
     const presenter = presentersInRoom.sort((a, b) => {
       const peersA = (graph.get(a.deviceId) ?? new Set()).size;
       const peersB = (graph.get(b.deviceId) ?? new Set()).size;
@@ -535,15 +386,15 @@ export class PocInferenceEngine {
       return b.updatedAt - a.updatedAt;
     })[0];
 
-    // Presenter active acoustic token for this room (e.g. 'RMA' or custom emitted token)
     const expectedUltrasonicToken = (presenter.ultrasonicEmittedToken || presenter.roomId || roomId).trim().toUpperCase();
 
     // 3. Get all connected members in this presenter's physical graph cluster
-    const clusterMembers = this.componentFrom(presenter.deviceId, graph);
+    const clusterMembers = findConnectedComponent(presenter.deviceId, graph);
 
-    // 4. Find all other active presenters across other rooms for dynamic multi-room separation
-    const otherPresenters = [...this.devices.values()]
-      .filter((d) => d.role === "presenter" && d.deviceId !== presenter.deviceId && d.roomId && now - d.updatedAt < WINDOW_MS * 2);
+    // 4. Find all other active presenters across other rooms
+    const otherPresenters = [...this.devices.values()].filter(
+      (d) => d.role === "presenter" && d.deviceId !== presenter.deviceId && d.roomId && now - d.updatedAt < WINDOW_MS * 2
+    );
 
     // 5. Build members list with Strongest-Link, Wi-Fi Affinity & Ultrasonic Hard Gate
     const membersInfo: RoomMemberInfo[] = [];
@@ -557,10 +408,9 @@ export class PocInferenceEngine {
         rec?.uwbDiscoveryToken && rec.uwbTokenUpdatedAt !== undefined && now - rec.uwbTokenUpdatedAt < WINDOW_MS
           ? rec.uwbDiscoveryToken
           : undefined;
-      const motionAnomalyFlag = this.computeMotionAnomalyFlag(rec);
+      const motionAnomalyFlag = computeMotionAnomalyFlag(rec);
 
       // Layer 3: Ultrasonic Gate Check
-      // If attendee heard the room token within the last 45s
       const heardToken = rec?.ultrasonicObservation?.token?.trim().toUpperCase();
       const isAcousticMatch = Boolean(
         heardToken &&
@@ -574,7 +424,7 @@ export class PocInferenceEngine {
         const membership = this.trackRoomMembership(sessionId, roomId, memberId, "presenter", now, {
           confidence: 1.0,
           ultrasonicVerified: true,
-          motionAnomalyFlag
+          motionAnomalyFlag,
         });
         membersInfo.push({
           deviceId: memberId,
@@ -587,51 +437,39 @@ export class PocInferenceEngine {
           motionAnomalyFlag,
           ultrasonicVerified: true,
           durationMs: membership.durationMs,
-          startedAt: membership.startedAt
+          startedAt: membership.startedAt,
         });
         continue;
       }
 
-      // A device presenting a different room is never ambiguous — its own roomId already says
-      // where it belongs, unlike an attendee, there's no signal-based inference needed (or
-      // wanted) here. The multi-room affinity check below is for attendees; applying it to
-      // another presenter degenerates into comparing that presenter to themselves, which only
-      // wins by a wide-enough margin when their hop-distance and Wi-Fi environment clearly
-      // differ from this room's presenter — not guaranteed when two presenters are physically
-      // close together (e.g. testing side by side), letting them bleed into each other's rosters.
       if (rec?.role === "presenter") {
         continue;
       }
 
-      // Physical proximity alone does NOT make someone a member. Being in this presenter's BLE
-      // cluster only means "near enough to plausibly be here" — an attendee still has to have
-      // actually joined THIS room, which is what their own device record claiming this room and
-      // session means (set by join/ingest when they confirm a detected room). Without this, any
-      // nearby device running the app gets swept into the roster and recorded as attendance,
-      // including one that never confirmed anything and never saw that it had "joined" at all.
-      // The sensors' job is verifying a claim is genuine, not manufacturing the claim.
       if (rec?.roomId !== roomId || rec?.sessionLabel !== sessionLabel) {
         continue;
       }
 
-      // Check Multi-Room Affinity: Is this attendee physically closer to another presenter?
+      // Check Multi-Room Affinity
       let assignedToThisRoom = true;
       if (!isAcousticMatch && otherPresenters.length > 0) {
-        const thisHop = this.shortestPathDistance(memberId, presenter.deviceId, graph);
-        const thisWifi = (presenter.wifiFingerprint && rec?.wifiFingerprint)
-          ? (this.computeWifiCosineSimilarity(rec.wifiFingerprint, presenter.wifiFingerprint) ?? 0.5)
-          : 0.5;
+        const thisHop = computeShortestHop(memberId, presenter.deviceId, graph);
+        const thisWifi =
+          presenter.wifiFingerprint && rec?.wifiFingerprint
+            ? computeWifiCosineSimilarity(rec.wifiFingerprint, presenter.wifiFingerprint) ?? 0.5
+            : 0.5;
         const thisAffinity = (1 / Math.max(1, thisHop)) * 0.5 + thisWifi * 0.5;
 
         for (const other of otherPresenters) {
-          const otherHop = this.shortestPathDistance(memberId, other.deviceId, graph);
-          const otherWifi = (other.wifiFingerprint && rec?.wifiFingerprint)
-            ? (this.computeWifiCosineSimilarity(rec.wifiFingerprint, other.wifiFingerprint) ?? 0.5)
-            : 0.5;
+          const otherHop = computeShortestHop(memberId, other.deviceId, graph);
+          const otherWifi =
+            other.wifiFingerprint && rec?.wifiFingerprint
+              ? computeWifiCosineSimilarity(rec.wifiFingerprint, other.wifiFingerprint) ?? 0.5
+              : 0.5;
           const otherAffinity = (1 / Math.max(1, otherHop)) * 0.5 + otherWifi * 0.5;
 
           if (otherAffinity > thisAffinity + 0.15) {
-            assignedToThisRoom = false; // Attendee has walked into another room!
+            assignedToThisRoom = false;
             break;
           }
         }
@@ -643,15 +481,15 @@ export class PocInferenceEngine {
       let confidence = isAcousticMatch ? 0.98 : 0.85;
 
       if (presenter.wifiFingerprint?.length && rec?.wifiFingerprint?.length) {
-        const sim = this.computeWifiCosineSimilarity(rec.wifiFingerprint, presenter.wifiFingerprint);
+        const sim = computeWifiCosineSimilarity(rec.wifiFingerprint, presenter.wifiFingerprint);
         if (sim !== undefined) {
           wifiSimilarity = Number(sim.toFixed(2));
           if (isAcousticMatch) {
-            confidence = 0.99; // Ultra-high audit grade proof
-          } else if (sim >= 0.70) {
-            confidence = Number(Math.min(0.98, 0.85 + (sim - 0.70) * 0.43).toFixed(2));
+            confidence = 0.99;
+          } else if (sim >= 0.7) {
+            confidence = Number(Math.min(0.98, 0.85 + (sim - 0.7) * 0.43).toFixed(2));
           } else {
-            confidence = Number(Math.max(0.70, 0.85 - (0.70 - sim) * 0.30).toFixed(2));
+            confidence = Number(Math.max(0.7, 0.85 - (0.7 - sim) * 0.3).toFixed(2));
           }
         }
       }
@@ -661,7 +499,7 @@ export class PocInferenceEngine {
         confidence,
         wifiSimilarity,
         ultrasonicVerified: isAcousticMatch,
-        motionAnomalyFlag
+        motionAnomalyFlag,
       });
       membersInfo.push({
         deviceId: memberId,
@@ -674,7 +512,7 @@ export class PocInferenceEngine {
         motionAnomalyFlag,
         ultrasonicVerified: isAcousticMatch,
         durationMs: membership.durationMs,
-        startedAt: membership.startedAt
+        startedAt: membership.startedAt,
       });
     }
 
@@ -685,22 +523,10 @@ export class PocInferenceEngine {
       presenterName: presenter.displayName || presenter.deviceId,
       estimatedMemberDeviceIds,
       members: membersInfo,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     };
   }
 
-  /**
-   * Every currently-active room hosted by userId, across every session label and room, so a
-   * rejoining presenter's Home screen can find a hosted room server-side rather than trusting a
-   * local device snapshot (which can't survive a reinstall, a different device, or a force-close
-   * older than its own 45s window).
-   *
-   * Ownership comes from the room record, not from a live presenter device record: a device that
-   * stops reporting is reaped after ~90s, but the room occurrence itself survives for
-   * ROOM_AUTO_EXPIRY_MS (15 min). Keying off the device record meant a presenter who force-quit
-   * hit a dead zone — their room was still open and still closeable, yet nothing offered it back
-   * to them, which is precisely the case this whole flow exists to handle.
-   */
   myActiveRooms(userId: string): LiveRoomState[] {
     const now = Date.now();
     const results: LiveRoomState[] = [];
@@ -709,8 +535,6 @@ export class PocInferenceEngine {
 
       const ownsRoom =
         room.ownerUserId === userId ||
-        // Fallback for a room whose owner was never recorded (started while signed out, or before
-        // ownership tracking): fall back to whoever is currently live in it.
         (!room.ownerUserId &&
           [...this.devices.values()].some(
             (d) =>
@@ -728,7 +552,7 @@ export class PocInferenceEngine {
   deviceRoomState(sessionLabel: string, deviceId: string): LiveRoomState {
     const sessionId = sessionLabel;
     this.trim();
-    const graph = this.buildGraph();
+    const graph = buildBleGraph(this.devices, this.batches, MIN_RSSI);
     const now = Date.now();
 
     const currentDevice = this.devices.get(deviceId);
@@ -736,21 +560,14 @@ export class PocInferenceEngine {
       return this.roomState(sessionId, currentDevice.roomId);
     }
 
-    // For Attendees: Find which active presenter's room cluster has highest affinity.
-    //
-    // Deliberately NOT scoped to the asking device's own session label. An attendee has no way to
-    // know a session code — that's a presenter/admin concept — so scoping detection to whatever
-    // label the device happens to be carrying just means a stale or arbitrary value silently makes
-    // every room undetectable. Detection answers "which active room are you physically in", across
-    // all of them, and the answer carries that room's real session label back so the client can
-    // adopt it rather than assert one of its own.
-    const activePresenters = [...this.devices.values()]
-      .filter((d) => d.role === "presenter" && d.roomId && d.sessionLabel && now - d.updatedAt < WINDOW_MS * 2);
+    const activePresenters = [...this.devices.values()].filter(
+      (d) => d.role === "presenter" && d.roomId && d.sessionLabel && now - d.updatedAt < WINDOW_MS * 2
+    );
 
     let bestMatch: { roomCode: string; sessionLabel: string } | undefined;
     let highestAffinity = -1;
 
-    // Check Acoustic Gate first: If attendee physically heard an active presenter's ultrasonic token
+    // Check Acoustic Gate first
     const heardToken = currentDevice?.ultrasonicObservation?.token?.trim().toUpperCase();
     if (heardToken && currentDevice?.ultrasonicObservedAt && now - currentDevice.ultrasonicObservedAt < 45_000) {
       for (const presenter of activePresenters) {
@@ -764,12 +581,13 @@ export class PocInferenceEngine {
 
     if (!bestMatch) {
       for (const presenter of activePresenters) {
-        const cluster = this.componentFrom(presenter.deviceId, graph);
+        const cluster = findConnectedComponent(presenter.deviceId, graph);
         if (cluster.has(deviceId)) {
-          const hop = this.shortestPathDistance(deviceId, presenter.deviceId, graph);
-          const wifi = (presenter.wifiFingerprint && currentDevice?.wifiFingerprint)
-            ? (this.computeWifiCosineSimilarity(currentDevice.wifiFingerprint, presenter.wifiFingerprint) ?? 0.5)
-            : 0.5;
+          const hop = computeShortestHop(deviceId, presenter.deviceId, graph);
+          const wifi =
+            presenter.wifiFingerprint && currentDevice?.wifiFingerprint
+              ? computeWifiCosineSimilarity(currentDevice.wifiFingerprint, presenter.wifiFingerprint) ?? 0.5
+              : 0.5;
           const affinity = (1 / Math.max(1, hop)) * 0.5 + wifi * 0.5;
 
           if (affinity > highestAffinity) {
@@ -789,75 +607,14 @@ export class PocInferenceEngine {
       roomId: "unknown",
       estimatedMemberDeviceIds: [],
       members: [],
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     };
   }
 
-  /**
-   * Computes the calibrated indoor similarity (0.0 to 1.0) between two Wi-Fi AP fingerprints.
-   * Uses Multi-BSSID base MAC grouping (2.4G vs 5G matching) + signal proximity delta.
-   */
   computeWifiCosineSimilarity(fpA: WifiApObservation[], fpB: WifiApObservation[]): number | undefined {
-    if (!fpA.length || !fpB.length) return undefined;
-
-    // Filter out faint noise APs below -85 dBm and take the top 15 strongest APs
-    const validA = fpA.filter((ap) => ap.rssi >= -85).sort((a, b) => b.rssi - a.rssi).slice(0, 15);
-    const validB = fpB.filter((ap) => ap.rssi >= -85).sort((a, b) => b.rssi - a.rssi).slice(0, 15);
-
-    if (!validA.length || !validB.length) return undefined;
-
-    // Base MAC extraction for Multi-BSSID virtual router grouping (e.g. AA:BB:CC:DD:EE:* matches 2.4G & 5G)
-    const toBaseMac = (bssid: string): string => {
-      const norm = bssid.toLowerCase().trim();
-      const parts = norm.split(":");
-      return parts.length >= 5 ? parts.slice(0, 5).join(":") : norm;
-    };
-
-    const mapA = new Map<string, number>();
-    for (const ap of validA) {
-      const baseKey = toBaseMac(ap.bssid);
-      mapA.set(baseKey, Math.max(mapA.get(baseKey) ?? -100, ap.rssi));
-    }
-
-    const mapB = new Map<string, number>();
-    for (const ap of validB) {
-      const baseKey = toBaseMac(ap.bssid);
-      mapB.set(baseKey, Math.max(mapB.get(baseKey) ?? -100, ap.rssi));
-    }
-
-    let sharedCount = 0;
-    let totalSignalSim = 0;
-
-    for (const [baseKey, rssiA] of mapA) {
-      const rssiB = mapB.get(baseKey);
-      if (rssiB !== undefined) {
-        sharedCount++;
-        // Delta tolerance across 2m - 10m room distance: 0 dBm diff -> 1.0, 15 dBm diff -> 0.67
-        const delta = Math.abs(rssiA - rssiB);
-        const signalSim = Math.max(0, 1 - delta / 45);
-        totalSignalSim += signalSim;
-      }
-    }
-
-    if (sharedCount === 0) return 0;
-
-    const overlapRatio = (sharedCount * 2) / (mapA.size + mapB.size);
-    const avgSignalSim = totalSignalSim / sharedCount;
-    const rawMatch = 0.35 * overlapRatio + 0.65 * avgSignalSim;
-
-    // Calibrated in-room bounds: In-room shared APs (>= 3) cleanly output 82% to 96%
-    if (sharedCount >= 2 && overlapRatio >= 0.3) {
-      return Number(Math.min(0.96, Math.max(0.78, 0.72 + rawMatch * 0.25)).toFixed(2));
-    }
-
-    return Number(Math.min(0.65, rawMatch * 0.75).toFixed(2));
+    return computeWifiCosineSimilarity(fpA, fpB);
   }
 
-  /**
-   * Every room occurrence currently active, across all session labels — what the admin Live tab
-   * watches, so an admin sees the whole event rather than only the session code their own app
-   * happens to be set to.
-   */
   listActiveRooms(): { sessionLabel: string; roomCode: string }[] {
     this.trim();
     const now = Date.now();
@@ -866,8 +623,6 @@ export class PocInferenceEngine {
       .map((room) => ({ sessionLabel: room.sessionLabel, roomCode: room.code }));
   }
 
-  /** Distinct session labels with at least one active room right now — lets an attendee pick a
-   * live session instead of needing to already know its code. */
   listActiveSessionLabels(): string[] {
     return [...new Set(this.listActiveRooms().map((r) => r.sessionLabel))];
   }
@@ -881,25 +636,6 @@ export class PocInferenceEngine {
     return [...rooms];
   }
 
-  /**
-   * True once a device has spent an anomalously still fraction of a long-enough
-   * session. A single still window is normal (someone sitting attentively); a
-   * device that is still for nearly its whole session looks more like a phone
-   * left on a desk. This is a flag for human review, never an automatic rejection.
-   */
-  private computeMotionAnomalyFlag(rec?: DeviceRecord): boolean {
-    const history = rec?.motionWindowHistory;
-    if (!history || history.length < MOTION_MIN_WINDOWS_FOR_FLAG) return false;
-    const fractionStill = history.filter(Boolean).length / history.length;
-    return fractionStill >= MOTION_STILL_FRACTION_THRESHOLD;
-  }
-
-  /**
-   * Records that `deviceId` is present in `roomId` at `now`, and returns how long it has
-   * been continuously present. A device that drops out of the room's cluster for longer
-   * than ROOM_MEMBERSHIP_GRACE_MS has its stay considered over; trim() reaps those entries,
-   * so the next sighting starts the clock over from zero.
-   */
   private trackRoomMembership(
     sessionLabel: string,
     roomCode: string,
@@ -908,27 +644,22 @@ export class PocInferenceEngine {
     now: number,
     latest: { confidence?: number; wifiSimilarity?: number; ultrasonicVerified?: boolean; motionAnomalyFlag?: boolean }
   ): { durationMs: number; startedAt: string } {
-    // Never creates a room: only a presenter's join/ingest may. A stray roster calculation for a
-    // room that was just ended must not start a new occurrence.
     const roomId = this.activeRoomId(sessionLabel, roomCode, now);
     if (!roomId) return { durationMs: 0, startedAt: new Date(now).toISOString() };
     const key = `${roomId}::${deviceId}`;
     const existing = this.roomMembership.get(key);
     let durationMs: number;
     let startedAtMs: number;
+
     if (existing) {
-      // Heartbeat fields (confidence, wifiSimilarity) are never persisted — only meaningful
-      // boolean transitions are, and only when the value actually changes.
       if (latest.motionAnomalyFlag !== undefined && latest.motionAnomalyFlag !== existing.motionAnomalyFlag) {
-        this.recordStateChange(roomId, deviceId, "motion_anomaly_flag", latest.motionAnomalyFlag, now);
+        this.persistence.recordStateChange(roomId, deviceId, "motion_anomaly_flag", latest.motionAnomalyFlag, now);
       }
       if (latest.ultrasonicVerified !== undefined && latest.ultrasonicVerified !== existing.ultrasonicVerified) {
-        this.recordStateChange(roomId, deviceId, "ultrasonic_verified", latest.ultrasonicVerified, now);
+        this.persistence.recordStateChange(roomId, deviceId, "ultrasonic_verified", latest.ultrasonicVerified, now);
       }
       existing.lastSeenAt = now;
       existing.lastConfidence = latest.confidence;
-      // Folded in per batch rather than kept as a series: the mean is what reports want, and
-      // storing every reading would be a row per device per heartbeat for the whole session.
       if (latest.confidence !== undefined) {
         existing.confidenceSum += latest.confidence;
         existing.confidenceCount += 1;
@@ -938,21 +669,12 @@ export class PocInferenceEngine {
       durationMs = now - existing.startedAt;
       startedAtMs = existing.startedAt;
     } else {
-      // A brand-new membership entry is itself the "connected" transition.
-      this.recordStateChange(roomId, deviceId, "connected", true, now);
-      // The starting value of each flag is logged too, not just later changes: without it a stay
-      // that began already flagged has no opening event, and its flagged time reads as nothing.
-      // Usually false for motion (the flag needs several windows of history before it can be
-      // true, which a fresh device has not accumulated), but a device rejoining within the same
-      // process carries that history in and genuinely can start flagged.
+      this.persistence.recordStateChange(roomId, deviceId, "connected", true, now);
       if (latest.motionAnomalyFlag !== undefined) {
-        this.recordStateChange(roomId, deviceId, "motion_anomaly_flag", latest.motionAnomalyFlag, now);
+        this.persistence.recordStateChange(roomId, deviceId, "motion_anomaly_flag", latest.motionAnomalyFlag, now);
       }
-      // Deliberately not logged for a presenter: they emit the tone rather than hear it, so their
-      // "verified" is true by definition and never changes. Recording it would read as
-      // corroboration of their presence that nothing actually performed.
       if (role !== "presenter" && latest.ultrasonicVerified !== undefined) {
-        this.recordStateChange(roomId, deviceId, "ultrasonic_verified", latest.ultrasonicVerified, now);
+        this.persistence.recordStateChange(roomId, deviceId, "ultrasonic_verified", latest.ultrasonicVerified, now);
       }
       this.roomMembership.set(key, {
         roomId,
@@ -966,116 +688,12 @@ export class PocInferenceEngine {
         confidenceSum: latest.confidence ?? 0,
         confidenceCount: latest.confidence === undefined ? 0 : 1,
         ultrasonicVerified: latest.ultrasonicVerified,
-        motionAnomalyFlag: latest.motionAnomalyFlag
+        motionAnomalyFlag: latest.motionAnomalyFlag,
       });
       durationMs = 0;
       startedAtMs = now;
     }
     return { durationMs, startedAt: new Date(startedAtMs).toISOString() };
-  }
-
-  /**
-   * Fire-and-forget insert of a meaningful state-change event, gated on this.db. This is the
-   * "persist only meaningful changes" half of the persistence design — heartbeat-level data
-   * (confidence, wifiSimilarity, every poll's live value) stays in-memory only and is never
-   * written here; only discrete transitions (a flag flipping, a connection starting/ending) are.
-   * Never awaited by any caller.
-   */
-  private recordStateChange(roomId: string, deviceId: string, field: string, value: boolean, now: number) {
-    if (!this.db) return;
-    const db = this.db;
-    (async () => {
-      // Both parents must exist first: this row references rooms AND devices.
-      const pendingRoom = this.pendingRoomCreation.get(roomId);
-      if (pendingRoom) await pendingRoom;
-      const pendingDevice = this.pendingDeviceCreation.get(deviceId);
-      if (pendingDevice) await pendingDevice;
-      await db.insert(schema.stateChangeEvents).values({ roomId, deviceId, field, value, changedAt: new Date(now) });
-    })().catch((err) => console.error("[db] failed to record state change:", err));
-  }
-
-  private shortestPathDistance(start: string, target: string, graph: Map<string, Set<string>>): number {
-    if (start === target) return 0;
-    const visited = new Set<string>([start]);
-    const queue: [string, number][] = [[start, 0]];
-    while (queue.length) {
-      const [curr, dist] = queue.shift()!;
-      for (const neighbor of graph.get(curr) ?? []) {
-        if (neighbor === target) return dist + 1;
-        if (!visited.has(neighbor)) {
-          visited.add(neighbor);
-          queue.push([neighbor, dist + 1]);
-        }
-      }
-    }
-    return 99; // Not connected
-  }
-
-  private buildGraph(): Map<string, Set<string>> {
-    const graph = new Map<string, Set<string>>();
-    const tokenToDevice = new Map<string, string>();
-    for (const device of this.devices.values()) {
-      if (device.rotatingId) tokenToDevice.set(device.rotatingId, device.deviceId);
-    }
-
-    const resolveDeviceId = (token: string): string | undefined => {
-      const direct = tokenToDevice.get(token);
-      if (direct) return direct;
-      const cleanToken = token.trim();
-      const prefix = cleanToken.split("-")[0];
-      if (prefix && prefix.length >= 4) {
-        for (const device of this.devices.values()) {
-          const deviceClean = device.deviceId.toLowerCase();
-          const prefixClean = prefix.toLowerCase();
-          if (deviceClean.endsWith(prefixClean) || deviceClean.includes(prefixClean)) {
-            return device.deviceId;
-          }
-        }
-      }
-      return undefined;
-    };
-
-    const sightings = new Map<string, { count: number; maxRssi: number }>();
-
-    for (const batch of this.batches) {
-      for (const peer of batch.peers) {
-        if (peer.rssi < MIN_RSSI) continue;
-        const peerDeviceId = resolveDeviceId(peer.rotatingId);
-        if (!peerDeviceId || peerDeviceId === batch.deviceId) continue;
-
-        const key = [batch.deviceId, peerDeviceId].sort().join("|");
-        const current = sightings.get(key) ?? { count: 0, maxRssi: -999 };
-        current.count += 1;
-        current.maxRssi = Math.max(current.maxRssi, peer.rssi);
-        sightings.set(key, current);
-      }
-    }
-
-    for (const [key, data] of sightings) {
-      const [left, right] = key.split("|");
-      if (data.count >= 1) {
-        if (!graph.has(left)) graph.set(left, new Set());
-        if (!graph.has(right)) graph.set(right, new Set());
-        graph.get(left)?.add(right);
-        graph.get(right)?.add(left);
-      }
-    }
-    return graph;
-  }
-
-  private componentFrom(start: string, graph: Map<string, Set<string>>): Set<string> {
-    const visited = new Set<string>([start]);
-    const queue = [start];
-    while (queue.length) {
-      const current = queue.shift() as string;
-      for (const neighbor of graph.get(current) ?? []) {
-        if (!visited.has(neighbor)) {
-          visited.add(neighbor);
-          queue.push(neighbor);
-        }
-      }
-    }
-    return visited;
   }
 
   private trim() {
@@ -1093,110 +711,9 @@ export class PocInferenceEngine {
     const staleMembershipCutoff = Date.now() - ROOM_MEMBERSHIP_GRACE_MS;
     for (const [key, membership] of this.roomMembership.entries()) {
       if (membership.lastSeenAt < staleMembershipCutoff) {
-        this.persistClosedMembership(key, membership);
+        this.persistence.persistClosedMembership(key, membership);
         this.roomMembership.delete(key);
       }
     }
-  }
-
-  /**
-   * Fire-and-forget from the caller's perspective (never awaited by trim()), but internally
-   * sequenced: defensively re-upserts the room/device rows first, awaited, before inserting the
-   * room_membership row that references them by foreign key. This can't assume the room's own
-   * creation write already landed — it may simply not exist yet (e.g. right after a manual
-   * truncate, or a brief DB outage earlier in the stay).
-   */
-  private async persistClosedMembershipInternal(key: string, membership: RoomMembershipRecord) {
-    if (!this.db) return;
-    const deviceId = key.slice(membership.roomId.length + 2);
-
-    const pending = this.pendingRoomCreation.get(membership.roomId);
-    if (pending) await pending;
-    await this.upsertRoomInternal(membership.roomId, membership.roomCode, membership.sessionLabel, membership.startedAt);
-    await this.db
-      .insert(schema.devices)
-      .values({ deviceId, firstSeenAt: new Date(membership.startedAt), lastSeenAt: new Date(membership.lastSeenAt) })
-      .onConflictDoNothing();
-
-    await this.db.insert(schema.roomMembership).values({
-      roomId: membership.roomId,
-      deviceId,
-      userId: membership.userId,
-      role: membership.role,
-      startedAt: new Date(membership.startedAt),
-      endedAt: new Date(membership.lastSeenAt),
-      lastConfidence: membership.lastConfidence,
-      avgConfidence:
-        membership.confidenceCount > 0 ? membership.confidenceSum / membership.confidenceCount : null,
-      ultrasonicVerified: membership.ultrasonicVerified,
-      motionAnomalyFlag: membership.motionAnomalyFlag
-    });
-
-    // The stay just ended — this is the "connected" -> false transition. Any flag still true is
-    // closed at the same instant: a flag that was never switched off before the device left
-    // would otherwise sit open forever, and its duration could only be guessed at read time.
-    const endedAt = new Date(membership.lastSeenAt);
-    const closing: { field: string; value: boolean }[] = [{ field: "connected", value: false }];
-    if (membership.motionAnomalyFlag) closing.push({ field: "motion_anomaly_flag", value: false });
-    // Presenters never open an ultrasonic interval (see trackRoomMembership), so there is never
-    // one of theirs to close.
-    if (membership.role !== "presenter" && membership.ultrasonicVerified) {
-      closing.push({ field: "ultrasonic_verified", value: false });
-    }
-    await this.db.insert(schema.stateChangeEvents).values(
-      closing.map((c) => ({ roomId: membership.roomId, deviceId, field: c.field, value: c.value, changedAt: endedAt }))
-    );
-  }
-
-  private persistClosedMembership(key: string, membership: RoomMembershipRecord) {
-    if (!this.db) return;
-    this.persistClosedMembershipInternal(key, membership).catch((err) =>
-      console.error("[db] failed to persist closed room_membership:", err)
-    );
-  }
-
-  /**
-   * Fire-and-forget upsert, gated on this.db — no caller awaits it. The promise is parked in
-   * pendingDeviceCreation for the duration so that anything writing a row which references this
-   * device (state_change_events) can wait for it, rather than racing the device's own insert on
-   * its first ever appearance and losing the write to a foreign key violation.
-   */
-  private upsertDevice(deviceId: string, displayName: string | undefined, now: number) {
-    if (!this.db) return;
-    const write = this.db
-      .insert(schema.devices)
-      .values({ deviceId, displayName, firstSeenAt: new Date(now), lastSeenAt: new Date(now) })
-      .onConflictDoUpdate({
-        target: schema.devices.deviceId,
-        set: { displayName, lastSeenAt: new Date(now) }
-      })
-      .then(() => undefined)
-      .catch((err) => console.error("[db] failed to upsert device:", err))
-      .finally(() => {
-        // Only clear the entry if it is still this write: a later upsert for the same device may
-        // already have replaced it, and deleting that one would reopen the race.
-        if (this.pendingDeviceCreation.get(deviceId) === write) this.pendingDeviceCreation.delete(deviceId);
-      });
-    this.pendingDeviceCreation.set(deviceId, write);
-  }
-
-  /**
-   * Inserts the session label row (grouping only) then the room occurrence row, in that order —
-   * the room references the label by foreign key, and two un-awaited inserts on a pooled
-   * connection have no ordering guarantee. Both are onConflictDoNothing, so callers with the
-   * same values racing each other is harmless.
-   */
-  private async upsertRoomInternal(roomId: string, roomCode: string, sessionLabel: string | undefined, now: number) {
-    if (!this.db) return;
-    if (sessionLabel) {
-      await this.db
-        .insert(schema.sessions)
-        .values({ id: sessionLabel, code: sessionLabel, startedAt: new Date(now) })
-        .onConflictDoNothing();
-    }
-    await this.db
-      .insert(schema.rooms)
-      .values({ id: roomId, code: roomCode, sessionId: sessionLabel, label: roomCode, startedAt: new Date(now) })
-      .onConflictDoNothing();
   }
 }
