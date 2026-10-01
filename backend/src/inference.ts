@@ -8,6 +8,7 @@ import type { Db } from "./db/index.js";
 import {
   type ActiveRoomRecord,
   type DeviceRecord,
+  type RecentlyLeftRecord,
   type RoomMembershipRecord,
   MIN_RSSI,
   MOTION_SLIDING_WINDOW_SIZE,
@@ -41,6 +42,13 @@ export class PocInferenceEngine {
    * ROOM_ENDED_NOTICE_TTL_MS so a device that never polls again can't leak one forever.
    */
   private readonly roomEndedNotices = new Map<string, { roomCode: string; endedAt: number }>();
+  /**
+   * Attendees who left each still-active room occurrence mid-session, keyed by occurrence ID
+   * then device ID, so the live view can show a "Left" tab alongside who's in the room right
+   * now. Populated wherever a membership closes other than the whole room ending (see
+   * closeMembershipAsLeft), and dropped entirely once the room occurrence itself ends.
+   */
+  private readonly recentlyLeftByRoom = new Map<string, Map<string, RecentlyLeftRecord>>();
   /** Persistence manager for Postgres storage & state event logging. */
   private readonly persistence: EnginePersistenceManager;
 
@@ -151,6 +159,10 @@ export class PocInferenceEngine {
    */
   private endRoomOccurrence(key: string, room: ActiveRoomRecord) {
     this.activeRoomsByKey.delete(key);
+    // The room itself is ending, not just this one attendee — there's no more "still active
+    // room" for a Left tab to describe, and the final attendance record is about to be written
+    // to Postgres anyway, so this in-memory copy no longer serves anything.
+    this.recentlyLeftByRoom.delete(room.roomId);
     const now = Date.now();
     const prefix = `${room.roomId}::`;
     for (const [membershipKey, membership] of this.roomMembership.entries()) {
@@ -257,6 +269,16 @@ export class PocInferenceEngine {
       const key = PocInferenceEngine.roomKey(device.sessionLabel, device.roomId);
       const room = this.activeRoomsByKey.get(key);
       if (room) this.endRoomOccurrence(key, room);
+    } else if (device?.role === "attendee" && device.roomId && device.sessionLabel) {
+      // An explicit leave means the person told us they're gone — close their stay right now
+      // rather than leaving it open for the same 45s grace that exists to cover a silent
+      // disconnect, where nobody's actually said anything yet.
+      const occurrenceId = this.activeRoomId(device.sessionLabel, device.roomId);
+      if (occurrenceId) {
+        const membershipKey = `${occurrenceId}::${deviceId}`;
+        const membership = this.roomMembership.get(membershipKey);
+        if (membership) this.closeMembershipAsLeft(membershipKey, membership, Date.now());
+      }
     }
     this.devices.delete(deviceId);
     this.roomEndedNotices.delete(deviceId);
@@ -361,6 +383,11 @@ export class PocInferenceEngine {
     const sessionId = sessionLabel;
     this.trim();
     const now = Date.now();
+    // Resolved once up front since it's stable for this call, but NOT turned into the actual
+    // leftMembers list until each return site below: the member loop further down can clear a
+    // rejoining device out of recentlyLeftByRoom, and building the list too early would return a
+    // stale snapshot that still shows that device as both present and left in the same response.
+    const occurrenceId = this.activeRoomId(sessionLabel, roomId, now);
     const graph = buildBleGraph(this.devices, this.batches, MIN_RSSI);
 
     // 1. Find all active presenters in this specific room
@@ -374,6 +401,7 @@ export class PocInferenceEngine {
         roomId,
         estimatedMemberDeviceIds: [],
         members: [],
+        leftMembers: this.buildLeftMembers(occurrenceId),
         updatedAt: new Date().toISOString(),
       };
     }
@@ -523,6 +551,7 @@ export class PocInferenceEngine {
       presenterName: presenter.displayName || presenter.deviceId,
       estimatedMemberDeviceIds,
       members: membersInfo,
+      leftMembers: this.buildLeftMembers(occurrenceId),
       updatedAt: new Date().toISOString(),
     };
   }
@@ -636,6 +665,58 @@ export class PocInferenceEngine {
     return [...rooms];
   }
 
+  /**
+   * Closes an open membership the same way trim()'s passive staleness sweep always has
+   * (persist, then delete), and additionally records it in recentlyLeftByRoom when it's an
+   * attendee leaving a room that is still going — the two callers this serves are an explicit
+   * leave() and that same staleness sweep, neither of which is the whole room ending (that path,
+   * endRoomOccurrence, closes every stay at once and clears recentlyLeftByRoom instead, since
+   * there's no more "still active room" for a Left tab to describe).
+   */
+  private closeMembershipAsLeft(key: string, membership: RoomMembershipRecord, now: number) {
+    this.persistence.persistClosedMembership(key, membership);
+    this.roomMembership.delete(key);
+    if (membership.role !== "attendee") return;
+    const deviceId = key.slice(membership.roomId.length + 2);
+    const device = this.devices.get(deviceId);
+    let left = this.recentlyLeftByRoom.get(membership.roomId);
+    if (!left) {
+      left = new Map();
+      this.recentlyLeftByRoom.set(membership.roomId, left);
+    }
+    left.set(deviceId, {
+      deviceId,
+      displayName: device?.displayName,
+      email: device?.email,
+      startedAt: membership.startedAt,
+      leftAt: now,
+      lastConfidence: membership.lastConfidence,
+      motionAnomalyFlag: membership.motionAnomalyFlag,
+      ultrasonicVerified: membership.ultrasonicVerified,
+    });
+  }
+
+  /** The live view's "Left" tab for one room occurrence, most recently left first. */
+  private buildLeftMembers(occurrenceId: string | undefined): RoomMemberInfo[] {
+    if (!occurrenceId) return [];
+    const left = this.recentlyLeftByRoom.get(occurrenceId);
+    if (!left || left.size === 0) return [];
+    return [...left.values()]
+      .sort((a, b) => b.leftAt - a.leftAt)
+      .map((r) => ({
+        deviceId: r.deviceId,
+        displayName: r.displayName || r.deviceId,
+        email: r.email,
+        role: "attendee",
+        confidence: r.lastConfidence,
+        motionAnomalyFlag: r.motionAnomalyFlag,
+        ultrasonicVerified: r.ultrasonicVerified,
+        durationMs: r.leftAt - r.startedAt,
+        startedAt: new Date(r.startedAt).toISOString(),
+        endedAt: new Date(r.leftAt).toISOString(),
+      }));
+  }
+
   private trackRoomMembership(
     sessionLabel: string,
     roomCode: string,
@@ -669,6 +750,9 @@ export class PocInferenceEngine {
       durationMs = now - existing.startedAt;
       startedAtMs = existing.startedAt;
     } else {
+      // If this device was sitting in the Left tab for this room, it just came back — a rejoin
+      // is a brand-new membership either way, so there's nothing to merge, only this to clear.
+      this.recentlyLeftByRoom.get(roomId)?.delete(deviceId);
       this.persistence.recordStateChange(roomId, deviceId, "connected", true, now);
       if (latest.motionAnomalyFlag !== undefined) {
         this.persistence.recordStateChange(roomId, deviceId, "motion_anomaly_flag", latest.motionAnomalyFlag, now);
@@ -711,8 +795,7 @@ export class PocInferenceEngine {
     const staleMembershipCutoff = Date.now() - ROOM_MEMBERSHIP_GRACE_MS;
     for (const [key, membership] of this.roomMembership.entries()) {
       if (membership.lastSeenAt < staleMembershipCutoff) {
-        this.persistence.persistClosedMembership(key, membership);
-        this.roomMembership.delete(key);
+        this.closeMembershipAsLeft(key, membership, Date.now());
       }
     }
   }

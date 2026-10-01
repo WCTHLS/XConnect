@@ -134,6 +134,14 @@ export interface LiveRoomState {
   presenterName?: string;
   estimatedMemberDeviceIds: string[];
   members?: RoomMemberInfo[];
+  /**
+   * Attendees who left this still-active room mid-session (an explicit leave, or the same 45s
+   * silent-disconnect window that covers a dropped connection), most recent first. Each carries
+   * its real startedAt/endedAt/durationMs for the stay that just closed, same shape as `members`
+   * so the two can share rendering. Empty once the room itself ends: that attendance has already
+   * moved into the persisted history by then.
+   */
+  leftMembers?: RoomMemberInfo[];
   updatedAt: string;
 }
 

@@ -896,22 +896,33 @@ function MainApp() {
    * being pointed at from the one actually being broadcast.
    */
   const handleStartAssignedRoom = async (assignedRoom: string, assignedSession: string) => {
-    setRoomId(assignedRoom);
-    setSessionId(assignedSession);
+    // togglePresence takes the room/session to start from this explicit snapshot, not from the
+    // roomId/sessionId state — so those are only set once we know the switch actually happened.
+    // Setting them up front meant cancelling the "Still Hosting Another Room" prompt (declining
+    // to end the room you're already in) still left this screen pointed at the room you declined
+    // to switch to, with your actual still-live room now unreachable from here.
     const ok = await togglePresence(true, {
       role: 'presenter',
       roomId: assignedRoom,
       sessionId: assignedSession,
       updatedAt: Date.now(),
     });
-    if (ok) nav('presenterDashboard');
+    if (ok) {
+      setRoomId(assignedRoom);
+      setSessionId(assignedSession);
+      nav('presenterDashboard');
+    }
   };
 
   const handleRejoinMyRoom = async (room: LiveRoomState) => {
-    setRoomId(room.roomId);
-    setSessionId(room.sessionId);
+    // Same ordering fix as handleStartAssignedRoom above, and for the same reason: don't adopt
+    // the target room's identity until togglePresence confirms the switch went through.
     const ok = await togglePresence(true, { role: 'presenter', roomId: room.roomId, sessionId: room.sessionId, updatedAt: Date.now() });
-    if (ok) nav('presenterDashboard');
+    if (ok) {
+      setRoomId(room.roomId);
+      setSessionId(room.sessionId);
+      nav('presenterDashboard');
+    }
   };
 
   /**

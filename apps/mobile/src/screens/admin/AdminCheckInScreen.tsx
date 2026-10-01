@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -17,6 +17,12 @@ import { palette } from '../../theme/colors';
 import { TopBar } from '../../components/ui/TopBar';
 import { MobileScreen } from '../../components/navigation/BottomNav';
 import type { NotifiableUser } from './AdminNotifyScreen';
+import { useKeyboardAwareScroll } from '../../hooks/useKeyboardAwareScroll';
+
+// Named rather than read back off styles.content: StyleSheet.create's return value is an opaque
+// style ID on native builds, not the object itself, so its paddingBottom isn't something that
+// can be read back out at runtime to add the keyboard's height on top of it.
+const CONTENT_BOTTOM_PADDING = 28;
 
 export interface InviteSendResult {
   invited: number;
@@ -87,6 +93,14 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sendResult, setSendResult] = useState<InviteSendResult | null>(null);
+
+  const { scrollRef, focusHandlerFor, keyboardPadding } = useKeyboardAwareScroll();
+  const sessionIdRef = useRef<TextInput>(null);
+  const typedPresentersRef = useRef<TextInput>(null);
+  const roomCodeRef = useRef<TextInput>(null);
+  const typedAttendeesRef = useRef<TextInput>(null);
+  const titleRef = useRef<TextInput>(null);
+  const messageRef = useRef<TextInput>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -242,10 +256,16 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
         onBack={() => onNavigate('adminNotify')}
       />
 
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        ref={scrollRef}
+        contentContainerStyle={[styles.content, { paddingBottom: CONTENT_BOTTOM_PADDING + keyboardPadding }]}
+        showsVerticalScrollIndicator={false}
+      >
             <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <Text style={[styles.label, { color: colors.sub }]}>SESSION CODE</Text>
               <TextInput
+                ref={sessionIdRef}
+                onFocus={focusHandlerFor(sessionIdRef)}
                 style={[styles.input, { backgroundColor: colors.bg, borderColor: colors.border, color: colors.txt }]}
                 value={sessionId}
                 onChangeText={setSessionId}
@@ -353,6 +373,8 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
               </TouchableOpacity>
 
               <TextInput
+                ref={typedPresentersRef}
+                onFocus={focusHandlerFor(typedPresentersRef)}
                 style={[
                   styles.input,
                   styles.multiline,
@@ -371,6 +393,8 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
                 ASSIGN ROOM{presenterEmails.length > 0 ? '' : ' (WITH A PRESENTER)'}
               </Text>
               <TextInput
+                ref={roomCodeRef}
+                onFocus={focusHandlerFor(roomCodeRef)}
                 style={[
                   styles.input,
                   { backgroundColor: colors.bg, borderColor: colors.border, color: colors.txt },
@@ -414,6 +438,8 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
               </TouchableOpacity>
 
               <TextInput
+                ref={typedAttendeesRef}
+                onFocus={focusHandlerFor(typedAttendeesRef)}
                 style={[
                   styles.input,
                   styles.multiline,
@@ -436,6 +462,8 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
             <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <Text style={[styles.label, { color: colors.sub }]}>TITLE</Text>
               <TextInput
+                ref={titleRef}
+                onFocus={focusHandlerFor(titleRef)}
                 style={[styles.input, { backgroundColor: colors.bg, borderColor: colors.border, color: colors.txt }]}
                 value={title}
                 onChangeText={setTitle}
@@ -445,6 +473,8 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
 
               <Text style={[styles.label, { color: colors.sub, marginTop: 16 }]}>MESSAGE</Text>
               <TextInput
+                ref={messageRef}
+                onFocus={focusHandlerFor(messageRef)}
                 style={[
                   styles.input,
                   styles.multiline,
@@ -578,7 +608,7 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  content: { paddingHorizontal: 20, paddingBottom: 28, gap: 12 },
+  content: { paddingHorizontal: 20, paddingBottom: CONTENT_BOTTOM_PADDING, gap: 12 },
   card: { borderRadius: 16, borderWidth: 1.5, padding: 16 },
   label: { fontSize: 10, fontWeight: '800', letterSpacing: 0.8, marginBottom: 6 },
   input: {

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -14,6 +14,12 @@ import { palette } from '../../theme/colors';
 import { RoomChip } from '../../components/ui/RoomChip';
 import { TopBar } from '../../components/ui/TopBar';
 import { MobileScreen } from '../../components/navigation/BottomNav';
+import { useKeyboardAwareScroll } from '../../hooks/useKeyboardAwareScroll';
+
+// Named rather than read back off styles.content: StyleSheet.create's return value is an opaque
+// style ID on native builds, not the object itself, so its paddingBottom isn't something that
+// can be read back out at runtime to add the keyboard's height on top of it.
+const CONTENT_BOTTOM_PADDING = 24;
 
 interface PresenterSetupScreenProps {
   rooms: string[];
@@ -38,6 +44,10 @@ export const PresenterSetupScreen: React.FC<PresenterSetupScreenProps> = ({
   const [customRoom, setCustomRoom] = useState('');
   const [showCustom, setShowCustom] = useState(false);
 
+  const { scrollRef, focusHandlerFor, keyboardPadding } = useKeyboardAwareScroll();
+  const customRoomRef = useRef<TextInput>(null);
+  const sessionIdRef = useRef<TextInput>(null);
+
   const effectiveRoom = showCustom && customRoom.trim() ? customRoom.trim() : selectedRoom;
   const acousticToken = getAcousticTokenForRoom(effectiveRoom);
 
@@ -58,7 +68,8 @@ export const PresenterSetupScreen: React.FC<PresenterSetupScreenProps> = ({
       />
 
       <ScrollView
-        contentContainerStyle={styles.content}
+        ref={scrollRef}
+        contentContainerStyle={[styles.content, { paddingBottom: CONTENT_BOTTOM_PADDING + keyboardPadding }]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
@@ -135,6 +146,8 @@ export const PresenterSetupScreen: React.FC<PresenterSetupScreenProps> = ({
           {showCustom && (
             <View style={styles.customInputWrapper}>
               <TextInput
+                ref={customRoomRef}
+                onFocus={focusHandlerFor(customRoomRef)}
                 style={[
                   styles.customInput,
                   {
@@ -159,6 +172,8 @@ export const PresenterSetupScreen: React.FC<PresenterSetupScreenProps> = ({
             SESSION IDENTIFIER
           </Text>
           <TextInput
+            ref={sessionIdRef}
+            onFocus={focusHandlerFor(sessionIdRef)}
             style={[
               styles.input,
               {
@@ -198,7 +213,7 @@ const styles = StyleSheet.create({
   content: {
     paddingHorizontal: 20,
     paddingTop: 12,
-    paddingBottom: 24,
+    paddingBottom: CONTENT_BOTTOM_PADDING,
   },
   acousticCard: {
     borderRadius: 16,

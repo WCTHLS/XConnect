@@ -77,3 +77,21 @@ export type RoomMembershipRecord = {
   ultrasonicVerified?: boolean;
   motionAnomalyFlag?: boolean;
 };
+
+/**
+ * An attendee's just-closed stay in a room that is still active, kept so the live view can show
+ * who left mid-session separately from who's currently in the room. Snapshotted off the closing
+ * RoomMembershipRecord (plus whatever displayName/email the device record still had), not kept
+ * as a live reference to either — both can be deleted or reused the instant after this is built.
+ * Dropped entirely when the room occurrence ends; the final record is in Postgres by then.
+ */
+export type RecentlyLeftRecord = {
+  deviceId: string;
+  displayName?: string;
+  email?: string;
+  startedAt: number;
+  leftAt: number;
+  lastConfidence?: number;
+  motionAnomalyFlag?: boolean;
+  ultrasonicVerified?: boolean;
+};

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -23,6 +23,12 @@ import {
 } from '../../services/auth';
 import { MobileScreen, Role } from '../../components/navigation/BottomNav';
 import { RolePicker } from '../../components/ui/RolePicker';
+import { useKeyboardAwareScroll } from '../../hooks/useKeyboardAwareScroll';
+
+// Named rather than read back off styles.container: StyleSheet.create's return value is an
+// opaque style ID on native builds, not the object itself, so its paddingBottom isn't something
+// that can be read back out at runtime to add the keyboard's height on top of it.
+const CONTENT_BOTTOM_PADDING = 56;
 
 interface LoginScreenProps {
   role: Role;
@@ -49,6 +55,10 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
   // Held locally until sign-in succeeds, so a failed attempt (or backing out to Create Account)
   // doesn't leave the app committed to a role nobody ended up signing in under.
   const [pickedRole, setPickedRole] = useState<Role>(role);
+
+  const { scrollRef, focusHandlerFor, keyboardPadding } = useKeyboardAwareScroll();
+  const emailRef = useRef<TextInput>(null);
+  const passwordRef = useRef<TextInput>(null);
 
   /** `entersApp` is false for actions that succeed without signing anyone in (password reset),
    * which must not commit the picked role or navigate away from this screen. */
@@ -95,8 +105,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
 
   return (
     <ScrollView
+      ref={scrollRef}
       style={{ flex: 1, backgroundColor: colors.surf }}
-      contentContainerStyle={styles.container}
+      contentContainerStyle={[styles.container, { paddingBottom: CONTENT_BOTTOM_PADDING + keyboardPadding }]}
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}
     >
@@ -196,6 +207,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
           <View style={styles.inputGroup}>
             <Text style={[styles.inputLabel, { color: colors.sub }]}>EMAIL ADDRESS</Text>
             <TextInput
+              ref={emailRef}
+              onFocus={focusHandlerFor(emailRef)}
               style={[
                 styles.input,
                 {
@@ -223,6 +236,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
               </TouchableOpacity>
             </View>
             <TextInput
+              ref={passwordRef}
+              onFocus={focusHandlerFor(passwordRef)}
               style={[
                 styles.input,
                 {
@@ -271,7 +286,7 @@ const styles = StyleSheet.create({
   container: {
     paddingHorizontal: 24,
     paddingTop: 36,
-    paddingBottom: 56,
+    paddingBottom: CONTENT_BOTTOM_PADDING,
   },
   header: {
     alignItems: 'center',

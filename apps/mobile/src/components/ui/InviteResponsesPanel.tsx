@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -16,6 +16,7 @@ import DateTimePicker, { type DateTimePickerEvent } from '@react-native-communit
 import type { InviteRole, SessionInvite } from '@confpresence/shared';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
+import { useKeyboardAwareScroll } from '../../hooks/useKeyboardAwareScroll';
 
 interface InviteResponsesPanelProps {
   onFetchInvites: (sessionId: string) => Promise<{ invites: SessionInvite[] }>;
@@ -115,6 +116,18 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
   const [accounts, setAccounts] = useState<{ id: string; email: string; name: string }[]>([]);
   const [peopleSaving, setPeopleSaving] = useState(false);
   const [peopleError, setPeopleError] = useState<string | null>(null);
+
+  // Each modal's content scrolls independently of the others, so each gets its own instance
+  // rather than sharing one scrollRef/focusedInput across modals that are never open together.
+  const editKeyboard = useKeyboardAwareScroll();
+  const editSessionIdRef = useRef<TextInput>(null);
+  const editRoomCodeRef = useRef<TextInput>(null);
+  const editTitleRef = useRef<TextInput>(null);
+  const editMessageRef = useRef<TextInput>(null);
+
+  const peopleKeyboard = useKeyboardAwareScroll();
+  const addTypedRef = useRef<TextInput>(null);
+  const addRoomCodeRef = useRef<TextInput>(null);
 
   // Deliberately fetches every session's invites rather than just the selected one: the dropdown
   // needs the full set of codes to offer, and switching between them shouldn't cost a round trip.
@@ -587,7 +600,16 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
 
       <Modal visible={editOpen} animationType="slide" transparent onRequestClose={() => setEditOpen(false)}>
         <TouchableOpacity activeOpacity={1} style={styles.modalBackdrop} onPress={() => setEditOpen(false)}>
-          <TouchableOpacity activeOpacity={1} style={[styles.modalSheet, { backgroundColor: colors.bg }]}>
+          {/* A Modal renders in its own native window on Android, which doesn't resize for the
+              keyboard the way the main screen does — padding added to the ScrollView's content
+              assumes the viewport shrinks to reveal it, which never happens here. Shifting the
+              sheet itself up by the keyboard's own reported height works regardless, since it's
+              a plain layout change inside content RN already renders, not something that depends
+              on the surrounding native window resizing at all. */}
+          <TouchableOpacity
+            activeOpacity={1}
+            style={[styles.modalSheet, { backgroundColor: colors.bg, marginBottom: editKeyboard.keyboardPadding }]}
+          >
             <View style={styles.modalHeaderRow}>
               <Text style={[styles.modalTitle, { color: colors.txt }]}>Edit Invite Details</Text>
               <TouchableOpacity activeOpacity={0.7} onPress={() => setEditOpen(false)} style={styles.modalCloseButton}>
@@ -597,7 +619,7 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
               </TouchableOpacity>
             </View>
 
-            <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
+            <ScrollView ref={editKeyboard.scrollRef} style={styles.modalScroll} showsVerticalScrollIndicator={false}>
               <Text style={[styles.hint, { color: colors.muted, marginTop: 0 }]}>
                 Applies to all {visibleInvites.length} invite{visibleInvites.length === 1 ? '' : 's'} in
                 this session.
@@ -605,6 +627,8 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
 
               <Text style={[styles.label, { color: colors.sub, marginTop: 16 }]}>SESSION CODE</Text>
               <TextInput
+                ref={editSessionIdRef}
+                onFocus={editKeyboard.focusHandlerFor(editSessionIdRef)}
                 style={[styles.input, { backgroundColor: colors.card, borderColor: colors.border, color: colors.txt }]}
                 value={editSessionId}
                 onChangeText={setEditSessionId}
@@ -615,6 +639,8 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
                 <>
                   <Text style={[styles.label, { color: colors.sub, marginTop: 16 }]}>ASSIGNED ROOM</Text>
                   <TextInput
+                    ref={editRoomCodeRef}
+                    onFocus={editKeyboard.focusHandlerFor(editRoomCodeRef)}
                     style={[styles.input, { backgroundColor: colors.card, borderColor: colors.border, color: colors.txt }]}
                     value={editRoomCode}
                     onChangeText={setEditRoomCode}
@@ -689,6 +715,8 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
 
               <Text style={[styles.label, { color: colors.sub, marginTop: 16 }]}>TITLE</Text>
               <TextInput
+                ref={editTitleRef}
+                onFocus={editKeyboard.focusHandlerFor(editTitleRef)}
                 style={[styles.input, { backgroundColor: colors.card, borderColor: colors.border, color: colors.txt }]}
                 value={editTitle}
                 onChangeText={setEditTitle}
@@ -698,6 +726,8 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
 
               <Text style={[styles.label, { color: colors.sub, marginTop: 16 }]}>MESSAGE</Text>
               <TextInput
+                ref={editMessageRef}
+                onFocus={editKeyboard.focusHandlerFor(editMessageRef)}
                 style={[
                   styles.input,
                   styles.multiline,
@@ -755,7 +785,10 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
         onRequestClose={() => setPeopleRole(null)}
       >
         <TouchableOpacity activeOpacity={1} style={styles.modalBackdrop} onPress={() => setPeopleRole(null)}>
-          <TouchableOpacity activeOpacity={1} style={[styles.modalSheet, { backgroundColor: colors.bg }]}>
+          <TouchableOpacity
+            activeOpacity={1}
+            style={[styles.modalSheet, { backgroundColor: colors.bg, marginBottom: peopleKeyboard.keyboardPadding }]}
+          >
             <View style={styles.modalHeaderRow}>
               <Text style={[styles.modalTitle, { color: colors.txt }]}>
                 {peopleRole === 'presenter' ? 'Presenter' : 'Attendees'}
@@ -767,7 +800,7 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
               </TouchableOpacity>
             </View>
 
-            <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
+            <ScrollView ref={peopleKeyboard.scrollRef} style={styles.modalScroll} showsVerticalScrollIndicator={false}>
               <Text style={[styles.hint, { color: colors.muted, marginTop: 0 }]}>
                 Removing someone deletes their invite, including any reply they already gave.
                 Anyone added is invited on the same terms as the rest of this session.
@@ -850,6 +883,8 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
                 </Svg>
               </TouchableOpacity>
               <TextInput
+                ref={addTypedRef}
+                onFocus={peopleKeyboard.focusHandlerFor(addTypedRef)}
                 style={[
                   styles.input,
                   styles.multiline,
@@ -868,6 +903,8 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
                 <>
                   <Text style={[styles.label, { color: colors.sub, marginTop: 16 }]}>ASSIGN ROOM</Text>
                   <TextInput
+                    ref={addRoomCodeRef}
+                    onFocus={peopleKeyboard.focusHandlerFor(addRoomCodeRef)}
                     style={[styles.input, { backgroundColor: colors.card, borderColor: colors.border, color: colors.txt }]}
                     value={addRoomCode}
                     onChangeText={setAddRoomCode}

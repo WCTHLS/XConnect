@@ -42,6 +42,21 @@ function formatJoinedAndDuration(durationMs: number | undefined): { joinedAt: st
   return { joinedAt, duration };
 }
 
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds.toString().padStart(2, '0')}s` : `${seconds}s`;
+}
+
+function formatClockTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+/** A roster entry tagged with whether it's currently live or has left, so the "All" tab can mix
+ * both kinds while each card still renders the right badge and timing line. */
+type RosterEntry = { member: RoomMemberInfo; left: boolean };
+
 export const AdminRoomDetailScreen: React.FC<AdminRoomDetailScreenProps> = ({
   room,
   peak,
@@ -49,16 +64,20 @@ export const AdminRoomDetailScreen: React.FC<AdminRoomDetailScreenProps> = ({
   onNavigate,
 }) => {
   const { colors } = useTheme();
-  const [tab, setTab] = useState<'all' | 'inRoom'>('all');
+  const [tab, setTab] = useState<'all' | 'inRoom' | 'left'>('all');
 
   const members = room.members ?? [];
+  const leftMembers = room.leftMembers ?? [];
   const presenter = members.find(m => m.role === 'presenter');
   const attendees = members.filter(m => m.role !== 'presenter');
   const roomName = room.roomId.toUpperCase();
-  // "All" and "In-Room" currently show the same set — the live overview endpoint only reports
-  // who's in the room right now, not history of who's left. Both tabs are wired for real so a
-  // "Left" tab can be added later without a rework, not because they mean different things yet.
-  const rosterOrder: RoomMemberInfo[] = presenter ? [presenter, ...attendees] : attendees;
+  // In-room: who's live right now, presenter first. Left: who left mid-session, most recent
+  // first (the server already sorts leftMembers that way). All: both, live roster first so the
+  // presenter and current attendees never get pushed below someone who's already gone.
+  const inRoomEntries: RosterEntry[] = (presenter ? [presenter, ...attendees] : attendees).map(member => ({ member, left: false }));
+  const leftEntries: RosterEntry[] = leftMembers.map(member => ({ member, left: true }));
+  const rosterOrder: RosterEntry[] =
+    tab === 'inRoom' ? inRoomEntries : tab === 'left' ? leftEntries : [...inRoomEntries, ...leftEntries];
 
   const handleCloseRoom = () => {
     AppAlert.alert(
@@ -120,7 +139,7 @@ export const AdminRoomDetailScreen: React.FC<AdminRoomDetailScreenProps> = ({
           ]}
         >
           <Text style={[styles.tabChipText, { color: tab === 'all' ? palette.mintPresence : colors.muted }]}>
-            All ({members.length})
+            All ({members.length + leftMembers.length})
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
@@ -136,6 +155,21 @@ export const AdminRoomDetailScreen: React.FC<AdminRoomDetailScreenProps> = ({
         >
           <Text style={[styles.tabChipText, { color: tab === 'inRoom' ? palette.mintPresence : colors.muted }]}>
             In-Room ({members.length})
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          activeOpacity={0.8}
+          onPress={() => setTab('left')}
+          style={[
+            styles.tabChip,
+            {
+              backgroundColor: tab === 'left' ? 'rgba(148,163,184,0.22)' : colors.card,
+              borderColor: tab === 'left' ? colors.sub : colors.border,
+            },
+          ]}
+        >
+          <Text style={[styles.tabChipText, { color: tab === 'left' ? colors.sub : colors.muted }]}>
+            Left ({leftMembers.length})
           </Text>
         </TouchableOpacity>
 
@@ -155,20 +189,26 @@ export const AdminRoomDetailScreen: React.FC<AdminRoomDetailScreenProps> = ({
         {rosterOrder.length === 0 ? (
           <View style={[styles.emptyCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
             <Text style={[styles.emptyText, { color: colors.muted }]}>
-              No presenter or attendees in this room right now.
+              {tab === 'left'
+                ? 'Nobody has left this room mid-session yet.'
+                : 'No presenter or attendees in this room right now.'}
             </Text>
           </View>
         ) : (
-          rosterOrder.map(m => {
+          rosterOrder.map(({ member: m, left }) => {
             const isPresenter = m.role === 'presenter';
-            const { joinedAt, duration } = formatJoinedAndDuration(m.durationMs);
+            const { joinedAt, duration } = left
+              ? { joinedAt: m.startedAt ? formatClockTime(m.startedAt) : '—', duration: formatDuration(m.durationMs ?? 0) }
+              : formatJoinedAndDuration(m.durationMs);
             const confidencePct = typeof m.confidence === 'number' ? Math.round(m.confidence * 100) : undefined;
             return (
               <View
                 key={m.deviceId}
                 style={[
                   styles.memberCard,
-                  isPresenter
+                  left
+                    ? { backgroundColor: colors.card, borderColor: colors.border, opacity: 0.75 }
+                    : isPresenter
                     ? { backgroundColor: 'rgba(51,209,172,0.10)', borderColor: palette.mintPresence }
                     : { backgroundColor: colors.card, borderColor: colors.border },
                 ]}
@@ -177,12 +217,14 @@ export const AdminRoomDetailScreen: React.FC<AdminRoomDetailScreenProps> = ({
                   <View
                     style={[
                       styles.avatar,
-                      isPresenter
+                      left
+                        ? { backgroundColor: colors.border }
+                        : isPresenter
                         ? { backgroundColor: 'rgba(51,209,172,0.22)' }
                         : { backgroundColor: 'rgba(56,189,248,0.18)' },
                     ]}
                   >
-                    <Text style={[styles.avatarText, { color: isPresenter ? palette.mintPresence : palette.skyMesh }]}>
+                    <Text style={[styles.avatarText, { color: left ? colors.muted : isPresenter ? palette.mintPresence : palette.skyMesh }]}>
                       {initialsFor(m.displayName || m.deviceId)}
                     </Text>
                   </View>
@@ -197,16 +239,24 @@ export const AdminRoomDetailScreen: React.FC<AdminRoomDetailScreenProps> = ({
                     </Text>
                   </View>
 
-                  <View style={styles.activeBadge}>
-                    <View style={styles.activeDot} />
-                    <Text style={styles.activeBadgeText}>ACTIVE</Text>
-                  </View>
+                  {left ? (
+                    <View style={[styles.activeBadge, { backgroundColor: colors.border }]}>
+                      <Text style={[styles.activeBadgeText, { color: colors.muted }]}>LEFT</Text>
+                    </View>
+                  ) : (
+                    <View style={styles.activeBadge}>
+                      <View style={styles.activeDot} />
+                      <Text style={styles.activeBadgeText}>ACTIVE</Text>
+                    </View>
+                  )}
                 </View>
 
                 <View style={[styles.memberDivider, { borderTopColor: colors.border }]} />
 
                 <Text style={[styles.joinedText, { color: colors.sub }]}>
-                  ← Joined {joinedAt} · {duration}
+                  {left
+                    ? `← Joined ${joinedAt} · left ${m.endedAt ? formatClockTime(m.endedAt) : '—'} · ${duration} total`
+                    : `← Joined ${joinedAt} · ${duration}`}
                 </Text>
 
                 <View style={styles.pillsRow}>

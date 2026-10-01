@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -14,6 +14,12 @@ import { palette } from '../../theme/colors';
 import { signUpWithEmail } from '../../services/auth';
 import { MobileScreen, Role } from '../../components/navigation/BottomNav';
 import { RolePicker } from '../../components/ui/RolePicker';
+import { useKeyboardAwareScroll } from '../../hooks/useKeyboardAwareScroll';
+
+// Named rather than read back off styles.container: StyleSheet.create's return value is an
+// opaque style ID on native builds, not the object itself, so its paddingBottom isn't something
+// that can be read back out at runtime to add the keyboard's height on top of it.
+const CONTENT_BOTTOM_PADDING = 56;
 
 interface CreateAccountScreenProps {
   role: Role;
@@ -38,6 +44,12 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pickedRole, setPickedRole] = useState<Role>(role);
+
+  const { scrollRef, focusHandlerFor, keyboardPadding } = useKeyboardAwareScroll();
+  const nameRef = useRef<TextInput>(null);
+  const emailRef = useRef<TextInput>(null);
+  const passwordRef = useRef<TextInput>(null);
+  const confirmPasswordRef = useRef<TextInput>(null);
 
   const handleCreate = async () => {
     if (!name.trim()) {
@@ -77,8 +89,9 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
 
   return (
     <ScrollView
+      ref={scrollRef}
       style={{ flex: 1, backgroundColor: colors.bg }}
-      contentContainerStyle={styles.container}
+      contentContainerStyle={[styles.container, { paddingBottom: CONTENT_BOTTOM_PADDING + keyboardPadding }]}
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}
     >
@@ -113,6 +126,8 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
           <View style={styles.inputGroup}>
             <Text style={[styles.inputLabel, { color: colors.sub }]}>FULL NAME</Text>
             <TextInput
+              ref={nameRef}
+              onFocus={focusHandlerFor(nameRef)}
               style={[
                 styles.input,
                 {
@@ -131,6 +146,8 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
           <View style={styles.inputGroup}>
             <Text style={[styles.inputLabel, { color: colors.sub }]}>EMAIL ADDRESS</Text>
             <TextInput
+              ref={emailRef}
+              onFocus={focusHandlerFor(emailRef)}
               style={[
                 styles.input,
                 {
@@ -151,6 +168,8 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
           <View style={styles.inputGroup}>
             <Text style={[styles.inputLabel, { color: colors.sub }]}>PASSWORD</Text>
             <TextInput
+              ref={passwordRef}
+              onFocus={focusHandlerFor(passwordRef)}
               style={[
                 styles.input,
                 {
@@ -170,6 +189,8 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
           <View style={styles.inputGroup}>
             <Text style={[styles.inputLabel, { color: colors.sub }]}>CONFIRM PASSWORD</Text>
             <TextInput
+              ref={confirmPasswordRef}
+              onFocus={focusHandlerFor(confirmPasswordRef)}
               style={[
                 styles.input,
                 {
@@ -220,7 +241,7 @@ const styles = StyleSheet.create({
   container: {
     paddingHorizontal: 24,
     paddingTop: 36,
-    paddingBottom: 56,
+    paddingBottom: CONTENT_BOTTOM_PADDING,
   },
   header: {
     alignItems: 'center',
