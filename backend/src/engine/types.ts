@@ -21,6 +21,15 @@ export const ROOM_AUTO_EXPIRY_MS = 15 * 60 * 1000;
 /** How long a "your room was ended" notice stays available to a device that hasn't polled yet. */
 export const ROOM_ENDED_NOTICE_TTL_MS = 10 * 60 * 1000;
 
+/**
+ * How often the engine rebuilds the BLE graph and every active room's live state. Live polls and
+ * the admin overview read a cached snapshot from the last tick instead of recomputing it per
+ * request — that recompute is O(total devices), so doing it per poll made cost scale with the
+ * number of people polling rather than staying flat. A couple of seconds of staleness is the
+ * tradeoff; clients already poll on a 3s cadence, so it isn't perceptible as new lag.
+ */
+export const TICK_INTERVAL_MS = 2_000;
+
 export type DeviceRecord = {
   deviceId: string;
   displayName?: string;

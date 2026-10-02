@@ -1,4 +1,4 @@
-import { bigserial, boolean, pgTable, real, text, timestamp, unique } from "drizzle-orm/pg-core";
+import { bigserial, boolean, index, pgTable, real, text, timestamp, unique } from "drizzle-orm/pg-core";
 
 // A grouping label for rooms, not a lifecycle entity. New rows use the human-typed label as
 // both `id` and `code`; rows from before rooms became the primary entity keep their old
@@ -56,18 +56,27 @@ export const devices = pgTable("devices", {
 // device's motion-anomaly flag flipping, its room connection starting/ending, or (once the
 // client-side staleness bug is fixed) its ultrasonic-verified status changing. `field` names
 // which signal changed; `value` is the value it changed to.
-export const stateChangeEvents = pgTable("state_change_events", {
-  id: bigserial("id", { mode: "number" }).primaryKey(),
-  roomId: text("room_id")
-    .notNull()
-    .references(() => rooms.id),
-  deviceId: text("device_id")
-    .notNull()
-    .references(() => devices.deviceId),
-  field: text("field").notNull(),
-  value: boolean("value").notNull(),
-  changedAt: timestamp("changed_at", { withTimezone: true }).notNull()
-});
+export const stateChangeEvents = pgTable(
+  "state_change_events",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    roomId: text("room_id")
+      .notNull()
+      .references(() => rooms.id),
+    deviceId: text("device_id")
+      .notNull()
+      .references(() => devices.deviceId),
+    field: text("field").notNull(),
+    value: boolean("value").notNull(),
+    changedAt: timestamp("changed_at", { withTimezone: true }).notNull()
+  },
+  table => ({
+    // Every read of this table (the admin room-detail timeline) filters by roomId, and this is
+    // the one table every state change for every device ever gets a row in — unbounded growth
+    // with an unindexed predicate on it.
+    roomIdIdx: index("state_change_events_room_id_idx").on(table.roomId)
+  })
+);
 
 // One row per device registered for push notifications via Azure Notification Hubs.
 // `installationId` is the id we hand Notification Hubs itself (currently the device's own
@@ -124,32 +133,48 @@ export const sessionInvites = pgTable(
   },
   table => ({
     // Re-inviting the same address to the same session updates that invite rather than stacking
-    // duplicates, which would make the admin's responded/not-responded counts meaningless.
-    sessionEmail: unique("session_invites_session_email").on(table.sessionCode, table.email)
+    // duplicates, which would make the admin's responded/not-responded counts meaningless. This
+    // composite unique constraint is also a composite index, so it already covers every query
+    // that filters by sessionCode alone or by (sessionCode, email) together — most of them, by
+    // far, do. It does NOT help /api/me/invites, which filters by email alone with no sessionCode
+    // (a person's invites span every session they've been invited to) — email's own index below
+    // is for that one.
+    sessionEmail: unique("session_invites_session_email").on(table.sessionCode, table.email),
+    emailIdx: index("session_invites_email_idx").on(table.email)
   })
 );
 
-export const roomMembership = pgTable("room_membership", {
-  id: bigserial("id", { mode: "number" }).primaryKey(),
-  roomId: text("room_id")
-    .notNull()
-    .references(() => rooms.id),
-  deviceId: text("device_id")
-    .notNull()
-    .references(() => devices.deviceId),
-  // Nullable: rows from before accounts existed have no user.
-  userId: text("user_id").references(() => users.id),
-  role: text("role").notNull(),
-  startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
-  endedAt: timestamp("ended_at", { withTimezone: true }),
-  // The final reading before the stay closed. Since a stay is closed by the reaper once the
-  // device has gone quiet, this is whatever was last heard as they dropped off — useful as an
-  // exit reading, but a poor summary of the visit, which is what avgConfidence is for.
-  lastConfidence: real("last_confidence"),
-  // Mean of every heartbeat's confidence across the stay, averaged in memory as the batches
-  // arrive (the readings themselves are never persisted — far too many rows for what they buy).
-  // Null on rows written before this column existed, where only lastConfidence is available.
-  avgConfidence: real("avg_confidence"),
-  ultrasonicVerified: boolean("ultrasonic_verified"),
-  motionAnomalyFlag: boolean("motion_anomaly_flag")
-});
+export const roomMembership = pgTable(
+  "room_membership",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    roomId: text("room_id")
+      .notNull()
+      .references(() => rooms.id),
+    deviceId: text("device_id")
+      .notNull()
+      .references(() => devices.deviceId),
+    // Nullable: rows from before accounts existed have no user.
+    userId: text("user_id").references(() => users.id),
+    role: text("role").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    // The final reading before the stay closed. Since a stay is closed by the reaper once the
+    // device has gone quiet, this is whatever was last heard as they dropped off — useful as an
+    // exit reading, but a poor summary of the visit, which is what avgConfidence is for.
+    lastConfidence: real("last_confidence"),
+    // Mean of every heartbeat's confidence across the stay, averaged in memory as the batches
+    // arrive (the readings themselves are never persisted — far too many rows for what they buy).
+    // Null on rows written before this column existed, where only lastConfidence is available.
+    avgConfidence: real("avg_confidence"),
+    ultrasonicVerified: boolean("ultrasonic_verified"),
+    motionAnomalyFlag: boolean("motion_anomaly_flag")
+  },
+  table => ({
+    // One row per stay, written continuously for as long as the app runs — the admin room-detail
+    // view filters by roomId, and /api/me/stats and /api/me/room-history filter by userId. Both
+    // were unindexed predicates on this table.
+    roomIdIdx: index("room_membership_room_id_idx").on(table.roomId),
+    userIdIdx: index("room_membership_user_id_idx").on(table.userId)
+  })
+);

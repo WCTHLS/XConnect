@@ -16,12 +16,13 @@ import {
   ROOM_AUTO_EXPIRY_MS,
   ROOM_ENDED_NOTICE_TTL_MS,
   ROOM_MEMBERSHIP_GRACE_MS,
+  TICK_INTERVAL_MS,
   WINDOW_MS,
 } from "./engine/types.js";
 import { isUltrasonicTokenMatch } from "./engine/ultrasonic.js";
 import { computeWifiCosineSimilarity } from "./engine/wifi.js";
 import { computeMotionAnomalyFlag } from "./engine/motion.js";
-import { buildBleGraph, computeShortestHop, findConnectedComponent } from "./engine/graph.js";
+import { buildBleGraph, computeHopDistances } from "./engine/graph.js";
 import { EnginePersistenceManager } from "./engine/persistence.js";
 
 // Re-export public utilities
@@ -30,7 +31,13 @@ export * from "./engine/types.js";
 
 export class PocInferenceEngine {
   private readonly devices = new Map<string, DeviceRecord>();
-  private readonly batches: PresenceBatch[] = [];
+  /**
+   * Recent sensor batches, grouped by the device that sent them (each sub-array stays in arrival
+   * order). Grouped rather than one flat list so a device leaving can drop its own entries in
+   * O(1) — deleting one Map key — instead of scanning every batch in the system to find the few
+   * that belong to it, which is what made many devices leaving at once expensive.
+   */
+  private readonly batchesByDevice = new Map<string, PresenceBatch[]>();
   /** First-seen/last-seen timestamps per room membership, keyed by `${occurrenceRoomId}::${deviceId}`. */
   private readonly roomMembership = new Map<string, RoomMembershipRecord>();
   /** Which occurrence a (session label, room name) pair currently resolves to. */
@@ -51,14 +58,119 @@ export class PocInferenceEngine {
   private readonly recentlyLeftByRoom = new Map<string, Map<string, RecentlyLeftRecord>>();
   /** Persistence manager for Postgres storage & state event logging. */
   private readonly persistence: EnginePersistenceManager;
+  /** BLE proximity graph as of the last tick. Request handlers read this rather than rebuild it. */
+  private currentGraph: Map<string, Set<string>> = new Map();
+  /** Every active room's computed live state as of the last tick, keyed like activeRoomsByKey. */
+  private readonly roomSnapshots = new Map<string, LiveRoomState>();
+  /**
+   * Which active room (keyed like activeRoomsByKey) each non-presenter device was resolved into
+   * as of the last tick, via the same acoustic-gate-then-affinity matching deviceRoomState used to
+   * run per request. A device with no current match has no entry.
+   */
+  private readonly deviceRoomIndex = new Map<string, string>();
+  /**
+   * One BFS per active presenter per tick (deviceId -> hop distance for every device reachable
+   * from it), computed once and read by every room's affinity check and resolveDeviceRooms. The
+   * per-member-per-presenter version of this (a fresh BFS for every member against every
+   * presenter) was the actual dominant cost once the graph rebuild itself stopped running per
+   * request — thousands of full-graph traversals per tick at real room sizes, down to one per
+   * presenter.
+   */
+  private presenterHopMaps = new Map<string, Map<string, number>>();
 
   constructor(options?: { db?: Db }) {
     this.persistence = new EnginePersistenceManager(options?.db);
-    // trim() also runs inline on ingest()/roomState(), but presence must expire even if
-    // nobody happens to be polling (e.g. an admin screen isn't open) — otherwise a stale
-    // room_membership stays "connected" indefinitely instead of closing ~45s after the
-    // last sighting.
-    setInterval(() => this.trim(), 5_000).unref();
+    setInterval(() => this.tick(), TICK_INTERVAL_MS).unref();
+  }
+
+  /**
+   * Rebuilds the BLE graph once and recomputes every active room's live state from it, instead of
+   * each poll doing its own full rebuild — the thing that made request cost scale with total
+   * device count rather than staying flat. Normally driven by the interval above; exposed so a
+   * one-shot script (or a future force-refresh) can call it directly without waiting on the timer.
+   */
+  tick() {
+    const t0 = performance.now();
+    this.trim();
+    const now = Date.now();
+    this.currentGraph = buildBleGraph(this.devices, this.batchesByDevice, MIN_RSSI);
+    const tGraph = performance.now();
+
+    const activePresenters = [...this.devices.values()].filter(
+      (d) => d.role === "presenter" && d.roomId && d.sessionLabel && now - d.updatedAt < WINDOW_MS * 2
+    );
+    this.presenterHopMaps = new Map();
+    for (const presenter of activePresenters) {
+      this.presenterHopMaps.set(presenter.deviceId, computeHopDistances(presenter.deviceId, this.currentGraph));
+    }
+    const tHops = performance.now();
+
+    const liveKeys = new Set<string>();
+    for (const [key, room] of this.activeRoomsByKey.entries()) {
+      if (now - room.lastActivityAt >= ROOM_AUTO_EXPIRY_MS) continue;
+      liveKeys.add(key);
+      this.roomSnapshots.set(key, this.computeRoomState(room, now, this.currentGraph));
+    }
+    const tRooms = performance.now();
+    // Drop snapshots for rooms that expired or ended since the last tick, so a stale one can't
+    // linger and be served by roomState()'s cache lookup.
+    for (const key of this.roomSnapshots.keys()) {
+      if (!liveKeys.has(key)) this.roomSnapshots.delete(key);
+    }
+
+    this.resolveDeviceRooms(now, activePresenters);
+    const tDone = performance.now();
+    // A warning, not routine telemetry: at TICK_INTERVAL_MS = 2s, a tick taking even half that is
+    // worth knowing about well before it reaches the point of actually falling behind.
+    if (tDone - t0 > TICK_INTERVAL_MS / 2) {
+      console.warn(`[tick] slow: total ${(tDone - t0).toFixed(1)}ms (graph ${(tGraph - t0).toFixed(1)}ms, hops ${(tHops - tGraph).toFixed(1)}ms, rooms ${(tRooms - tHops).toFixed(1)}ms, deviceRooms ${(tDone - tRooms).toFixed(1)}ms)`);
+    }
+  }
+
+  /**
+   * For every non-presenter device, works out which active room's physical cluster it's actually
+   * in — the acoustic-gate-then-affinity matching deviceRoomState used to run fresh on every poll,
+   * now done once per tick for every device instead. Reads presenterHopMaps (built just before
+   * this is called) rather than running its own BFS per presenter per device.
+   */
+  private resolveDeviceRooms(now: number, activePresenters: DeviceRecord[]) {
+    this.deviceRoomIndex.clear();
+    for (const [deviceId, device] of this.devices) {
+      if (device.role === "presenter") continue;
+
+      let bestMatchKey: string | undefined;
+
+      // Check Acoustic Gate first
+      const heardToken = device.ultrasonicObservation?.token?.trim().toUpperCase();
+      if (heardToken && device.ultrasonicObservedAt && now - device.ultrasonicObservedAt < 45_000) {
+        for (const presenter of activePresenters) {
+          const expectedToken = (presenter.ultrasonicEmittedToken || presenter.roomId || "").trim().toUpperCase();
+          if (expectedToken && isUltrasonicTokenMatch(heardToken, expectedToken)) {
+            bestMatchKey = PocInferenceEngine.roomKey(presenter.sessionLabel!, presenter.roomId!);
+            break;
+          }
+        }
+      }
+
+      if (!bestMatchKey) {
+        let highestAffinity = -1;
+        for (const presenter of activePresenters) {
+          const hop = this.presenterHopMaps.get(presenter.deviceId)?.get(deviceId);
+          if (hop === undefined) continue;
+          const wifi =
+            presenter.wifiFingerprint && device.wifiFingerprint
+              ? computeWifiCosineSimilarity(device.wifiFingerprint, presenter.wifiFingerprint) ?? 0.5
+              : 0.5;
+          const affinity = (1 / Math.max(1, hop)) * 0.5 + wifi * 0.5;
+          if (affinity > highestAffinity) {
+            highestAffinity = affinity;
+            bestMatchKey = PocInferenceEngine.roomKey(presenter.sessionLabel!, presenter.roomId!);
+          }
+        }
+      }
+
+      if (bestMatchKey) this.deviceRoomIndex.set(deviceId, bestMatchKey);
+    }
   }
 
   private static roomKey(sessionLabel: string, roomCode: string): string {
@@ -159,6 +271,10 @@ export class PocInferenceEngine {
    */
   private endRoomOccurrence(key: string, room: ActiveRoomRecord) {
     this.activeRoomsByKey.delete(key);
+    // Drop the cached snapshot immediately rather than waiting for the next tick to notice this
+    // key is gone — the roomEndedNotice flag below already tells clients to stop regardless, but
+    // there's no reason to keep serving a stale "who's in the room" body in the meantime.
+    this.roomSnapshots.delete(key);
     // The room itself is ending, not just this one attendee — there's no more "still active
     // room" for a Left tab to describe, and the final attendance record is about to be written
     // to Postgres anyway, so this in-memory copy no longer serves anything.
@@ -282,11 +398,7 @@ export class PocInferenceEngine {
     }
     this.devices.delete(deviceId);
     this.roomEndedNotices.delete(deviceId);
-    for (let i = this.batches.length - 1; i >= 0; i--) {
-      if (this.batches[i].deviceId === deviceId) {
-        this.batches.splice(i, 1);
-      }
-    }
+    this.batchesByDevice.delete(deviceId);
   }
 
   setUwbToken(deviceId: string, discoveryTokenBase64: string) {
@@ -374,21 +486,43 @@ export class PocInferenceEngine {
     if (batch.role === "presenter" && ingestRoomCode) {
       this.resolveRoom(batch.sessionId, ingestRoomCode, now, userId ?? current?.userId);
     }
-    this.batches.push(batch);
-    this.trim();
+    let deviceBatches = this.batchesByDevice.get(batch.deviceId);
+    if (!deviceBatches) {
+      deviceBatches = [];
+      this.batchesByDevice.set(batch.deviceId, deviceBatches);
+    }
+    deviceBatches.push(batch);
     return true;
   }
 
+  /**
+   * O(1) read of the last tick's computed state for this room — no graph work here. Falls back to
+   * an empty "nobody here" shape when there's no active occurrence or the first tick hasn't run
+   * yet, same shape callers always got from a brand-new room.
+   */
   roomState(sessionLabel: string, roomId: string): LiveRoomState {
-    const sessionId = sessionLabel;
-    this.trim();
-    const now = Date.now();
-    // Resolved once up front since it's stable for this call, but NOT turned into the actual
-    // leftMembers list until each return site below: the member loop further down can clear a
-    // rejoining device out of recentlyLeftByRoom, and building the list too early would return a
-    // stale snapshot that still shows that device as both present and left in the same response.
-    const occurrenceId = this.activeRoomId(sessionLabel, roomId, now);
-    const graph = buildBleGraph(this.devices, this.batches, MIN_RSSI);
+    return (
+      this.roomSnapshots.get(PocInferenceEngine.roomKey(sessionLabel, roomId)) ?? {
+        sessionId: sessionLabel,
+        roomId,
+        estimatedMemberDeviceIds: [],
+        members: [],
+        leftMembers: [],
+        updatedAt: new Date().toISOString(),
+      }
+    );
+  }
+
+  /**
+   * The actual per-room computation, run once per tick for every active room rather than once per
+   * poll. Moving trackRoomMembership() in here (instead of inside the old per-request roomState)
+   * is what fixes a GET mutating attendance, and the tick visiting every active room regardless of
+   * who's polling is what fixes an unpolled room recording no time at all.
+   */
+  private computeRoomState(room: ActiveRoomRecord, now: number, graph: Map<string, Set<string>>): LiveRoomState {
+    const sessionLabel = room.sessionLabel;
+    const roomId = room.code;
+    const occurrenceId = room.roomId;
 
     // 1. Find all active presenters in this specific room
     const presentersInRoom = [...this.devices.values()].filter(
@@ -397,7 +531,7 @@ export class PocInferenceEngine {
 
     if (!presentersInRoom.length) {
       return {
-        sessionId,
+        sessionId: sessionLabel,
         roomId,
         estimatedMemberDeviceIds: [],
         members: [],
@@ -416,8 +550,10 @@ export class PocInferenceEngine {
 
     const expectedUltrasonicToken = (presenter.ultrasonicEmittedToken || presenter.roomId || roomId).trim().toUpperCase();
 
-    // 3. Get all connected members in this presenter's physical graph cluster
-    const clusterMembers = findConnectedComponent(presenter.deviceId, graph);
+    // 3. Get all connected members in this presenter's physical graph cluster — the keys of its
+    // hop-distance map (computed once per presenter in tick(), not per room) double as this.
+    const presenterHops = this.presenterHopMaps.get(presenter.deviceId);
+    const clusterMembers = new Set(presenterHops?.keys() ?? []);
 
     // 4. Find all other active presenters across other rooms
     const otherPresenters = [...this.devices.values()].filter(
@@ -449,7 +585,7 @@ export class PocInferenceEngine {
 
       if (isPresenter) {
         estimatedMemberDeviceIds.push(memberId);
-        const membership = this.trackRoomMembership(sessionId, roomId, memberId, "presenter", now, {
+        const membership = this.trackRoomMembership(occurrenceId, roomId, sessionLabel, memberId, "presenter", now, {
           confidence: 1.0,
           ultrasonicVerified: true,
           motionAnomalyFlag,
@@ -478,10 +614,13 @@ export class PocInferenceEngine {
         continue;
       }
 
-      // Check Multi-Room Affinity
+      // Check Multi-Room Affinity. Hop distances are read from presenterHopMaps (one BFS per
+      // presenter, computed once in tick()) rather than a fresh BFS per member here — this loop
+      // runs per member per room, so the per-request version of this was the actual dominant cost
+      // once the graph itself stopped being rebuilt per request.
       let assignedToThisRoom = true;
       if (!isAcousticMatch && otherPresenters.length > 0) {
-        const thisHop = computeShortestHop(memberId, presenter.deviceId, graph);
+        const thisHop = presenterHops?.get(memberId) ?? 99;
         const thisWifi =
           presenter.wifiFingerprint && rec?.wifiFingerprint
             ? computeWifiCosineSimilarity(rec.wifiFingerprint, presenter.wifiFingerprint) ?? 0.5
@@ -489,7 +628,7 @@ export class PocInferenceEngine {
         const thisAffinity = (1 / Math.max(1, thisHop)) * 0.5 + thisWifi * 0.5;
 
         for (const other of otherPresenters) {
-          const otherHop = computeShortestHop(memberId, other.deviceId, graph);
+          const otherHop = this.presenterHopMaps.get(other.deviceId)?.get(memberId) ?? 99;
           const otherWifi =
             other.wifiFingerprint && rec?.wifiFingerprint
               ? computeWifiCosineSimilarity(rec.wifiFingerprint, other.wifiFingerprint) ?? 0.5
@@ -523,7 +662,7 @@ export class PocInferenceEngine {
       }
 
       estimatedMemberDeviceIds.push(memberId);
-      const membership = this.trackRoomMembership(sessionId, roomId, memberId, rec?.role || "attendee", now, {
+      const membership = this.trackRoomMembership(occurrenceId, roomId, sessionLabel, memberId, rec?.role || "attendee", now, {
         confidence,
         wifiSimilarity,
         ultrasonicVerified: isAcousticMatch,
@@ -544,8 +683,9 @@ export class PocInferenceEngine {
       });
     }
 
+
     return {
-      sessionId,
+      sessionId: sessionLabel,
       roomId,
       presenterDeviceId: presenter.deviceId,
       presenterName: presenter.displayName || presenter.deviceId,
@@ -578,61 +718,24 @@ export class PocInferenceEngine {
     return results;
   }
 
+  /**
+   * O(1) read of the last tick's resolved room for this device — no graph work here. An
+   * attendee's own device doesn't self-report which room it's physically in, so "which room is
+   * this" used to be resolved fresh on every poll (resolveDeviceRooms, above, now does it once
+   * per tick for every device instead).
+   */
   deviceRoomState(sessionLabel: string, deviceId: string): LiveRoomState {
-    const sessionId = sessionLabel;
-    this.trim();
-    const graph = buildBleGraph(this.devices, this.batches, MIN_RSSI);
-    const now = Date.now();
-
     const currentDevice = this.devices.get(deviceId);
     if (currentDevice?.role === "presenter" && currentDevice.roomId) {
-      return this.roomState(sessionId, currentDevice.roomId);
+      return this.roomState(sessionLabel, currentDevice.roomId);
     }
 
-    const activePresenters = [...this.devices.values()].filter(
-      (d) => d.role === "presenter" && d.roomId && d.sessionLabel && now - d.updatedAt < WINDOW_MS * 2
-    );
-
-    let bestMatch: { roomCode: string; sessionLabel: string } | undefined;
-    let highestAffinity = -1;
-
-    // Check Acoustic Gate first
-    const heardToken = currentDevice?.ultrasonicObservation?.token?.trim().toUpperCase();
-    if (heardToken && currentDevice?.ultrasonicObservedAt && now - currentDevice.ultrasonicObservedAt < 45_000) {
-      for (const presenter of activePresenters) {
-        const expectedToken = (presenter.ultrasonicEmittedToken || presenter.roomId || "").trim().toUpperCase();
-        if (expectedToken && isUltrasonicTokenMatch(heardToken, expectedToken)) {
-          bestMatch = { roomCode: presenter.roomId!, sessionLabel: presenter.sessionLabel! };
-          break;
-        }
-      }
-    }
-
-    if (!bestMatch) {
-      for (const presenter of activePresenters) {
-        const cluster = findConnectedComponent(presenter.deviceId, graph);
-        if (cluster.has(deviceId)) {
-          const hop = computeShortestHop(deviceId, presenter.deviceId, graph);
-          const wifi =
-            presenter.wifiFingerprint && currentDevice?.wifiFingerprint
-              ? computeWifiCosineSimilarity(currentDevice.wifiFingerprint, presenter.wifiFingerprint) ?? 0.5
-              : 0.5;
-          const affinity = (1 / Math.max(1, hop)) * 0.5 + wifi * 0.5;
-
-          if (affinity > highestAffinity) {
-            highestAffinity = affinity;
-            bestMatch = { roomCode: presenter.roomId!, sessionLabel: presenter.sessionLabel! };
-          }
-        }
-      }
-    }
-
-    if (bestMatch) {
-      return this.roomState(bestMatch.sessionLabel, bestMatch.roomCode);
-    }
+    const key = this.deviceRoomIndex.get(deviceId);
+    const snapshot = key ? this.roomSnapshots.get(key) : undefined;
+    if (snapshot) return snapshot;
 
     return {
-      sessionId,
+      sessionId: sessionLabel,
       roomId: "unknown",
       estimatedMemberDeviceIds: [],
       members: [],
@@ -645,7 +748,6 @@ export class PocInferenceEngine {
   }
 
   listActiveRooms(): { sessionLabel: string; roomCode: string }[] {
-    this.trim();
     const now = Date.now();
     return [...this.activeRoomsByKey.values()]
       .filter((room) => now - room.lastActivityAt < ROOM_AUTO_EXPIRY_MS)
@@ -657,7 +759,6 @@ export class PocInferenceEngine {
   }
 
   listRooms(sessionLabel: string): string[] {
-    this.trim();
     const rooms = new Set<string>(["room-a", "room-b", "auditorium"]);
     for (const d of this.devices.values()) {
       if (d.roomId && d.sessionLabel === sessionLabel) rooms.add(d.roomId);
@@ -717,16 +818,20 @@ export class PocInferenceEngine {
       }));
   }
 
+  /**
+   * Called only from computeRoomState, once per tick per clustered member — the caller already
+   * knows the occurrence is active (it's iterating activeRoomsByKey directly), so this no longer
+   * needs to re-resolve it itself the way the old per-request call site did.
+   */
   private trackRoomMembership(
-    sessionLabel: string,
+    roomId: string,
     roomCode: string,
+    sessionLabel: string,
     deviceId: string,
     role: "presenter" | "attendee",
     now: number,
     latest: { confidence?: number; wifiSimilarity?: number; ultrasonicVerified?: boolean; motionAnomalyFlag?: boolean }
   ): { durationMs: number; startedAt: string } {
-    const roomId = this.activeRoomId(sessionLabel, roomCode, now);
-    if (!roomId) return { durationMs: 0, startedAt: new Date(now).toISOString() };
     const key = `${roomId}::${deviceId}`;
     const existing = this.roomMembership.get(key);
     let durationMs: number;
@@ -782,8 +887,14 @@ export class PocInferenceEngine {
 
   private trim() {
     const cutoff = Date.now() - WINDOW_MS;
-    while (this.batches.length && new Date(this.batches[0].capturedAt).getTime() < cutoff) {
-      this.batches.shift();
+    for (const [deviceId, deviceBatches] of this.batchesByDevice) {
+      while (deviceBatches.length && new Date(deviceBatches[0].capturedAt).getTime() < cutoff) {
+        deviceBatches.shift();
+      }
+      // A device that went stale without an explicit leave (crash, dropped connection) still
+      // needs its now-empty entry cleared, or every device that's ever connected would leave a
+      // permanent empty array behind in this map for the life of the server.
+      if (deviceBatches.length === 0) this.batchesByDevice.delete(deviceId);
     }
     const staleDeviceCutoff = Date.now() - WINDOW_MS * 3;
     for (const [id, record] of this.devices.entries()) {

@@ -75,6 +75,9 @@ engine.ingest({
 });
 
 console.log("3. Querying Room State for 'room-a'...");
+// roomState() now reads a snapshot computed on a tick rather than recomputing per call — force
+// one tick so the just-ingested batches are actually reflected before reading it.
+engine.tick();
 const state = engine.roomState(sessionId, roomId);
 console.log("Room State:", JSON.stringify(state, null, 2));
 
