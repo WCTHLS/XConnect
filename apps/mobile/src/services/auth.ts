@@ -258,7 +258,11 @@ export async function signInWithMicrosoft(): Promise<{ ok: boolean; error?: stri
       redirectUri,
       scopes: SCOPES,
       responseType: AuthSession.ResponseType.Code,
-      usePKCE: true
+      usePKCE: true,
+      prompt: AuthSession.Prompt.SelectAccount,
+      extraParams: {
+        prompt: "select_account"
+      }
     });
     const result = await request.promptAsync(discovery);
     if (result.type !== "success") {
