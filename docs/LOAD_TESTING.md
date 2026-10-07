@@ -2,9 +2,9 @@
 
 `backend/src/loadtest.ts` is a standalone script that simulates many devices hitting the real
 API at once, so you can answer "does the server keep up at N devices" with actual numbers
-instead of guessing from reading the code. It's what found and confirmed the fixes for two real
-scaling bugs (below), and it's meant to be re-run after any change to the inference engine or
-the live-poll/batch-upload routes, not just read once and forgotten.
+instead of guessing from reading the code. It's what found and confirmed the fixes for several
+real scaling and durability bugs (below), and it's meant to be re-run after any change to the
+inference engine or the live-poll/batch-upload routes, not just read once and forgotten.
 
 It follows the repo's existing pattern of a standalone `tsx` script (`test_wifi_inference.ts`)
 rather than introducing a test framework, and it is **not** part of `pnpm test` — it's slow,
@@ -52,7 +52,9 @@ PORT=3001
 
 Leaving `DATABASE_URL` out as well puts the engine in pure in-memory mode, which is the right
 default for this: it isolates the inference engine's own cost from Postgres's, and the two are
-worth measuring separately (see "What it doesn't cover" below).
+worth measuring separately (see "What it doesn't cover" below). The same goes for `REDIS_URL` —
+leave it unset for a pure in-memory run, add it to measure the Redis checkpoint path, but don't
+mix all three layers into one run if you're trying to tell which one caused what.
 
 ## Running it
 
@@ -122,41 +124,53 @@ When the server itself is the bottleneck (not the network or the load-test clien
 signal is usually inside the server's own logs, not the client-side table — see `[tick] slow:`
 below.
 
+## Testing restart survival (with `REDIS_URL` set)
+
+A plain run only tests throughput. To test whether the engine actually survives a restart (the
+point of the Redis checkpoint — see `docs/LOAD_TEST_RESULTS.md` section 6), run the harness
+against a server you then kill and restart partway through:
+
+1. Start the auth-off server with `REDIS_URL` (and ideally `DATABASE_URL`, to match a real
+   deployment) set in `.env.loadtest`.
+2. Launch `loadtest.ts` in the background.
+3. ~20-30 seconds in (past ramp-up, into the steady state), kill the server and immediately
+   restart it against the same `.env.loadtest`.
+4. Let the run finish, then check two things: the client's error count should stop climbing once
+   the new server is back up (errors cluster in the restart window, not scattered throughout),
+   and the room's Postgres row should be a single unbroken `started_at`→`ended_at` span for the
+   whole test, not split into two separate occurrences.
+
+A second occurrence appearing, or errors continuing well past the restart, both mean the restore
+didn't actually pick up where the old process left off — see `docs/LOAD_TEST_RESULTS.md` for what
+that looked like the one time it happened (a Redis key collision with a leftover test process,
+not a flaw in the restore logic itself).
+
 ## What it found (project history)
 
-This is worth keeping as a record, not just a how-to. Three real findings came directly out of
-runs of this script, before and after the fixes that followed:
+Full numbers, every scenario tested (local and on Render), and the several separate scaling
+problems this harness has found so far live in **`docs/LOAD_TEST_RESULTS.md`** — that's the
+detailed record, kept up to date as a reference. Short version: moving graph/room-state
+computation onto a tick took 500 devices from ~60% request failures to zero errors; a mass-leave
+bug (full-list scan per device leaving) is also fixed; Redis-backed durability now lets a restart
+resume a live session instead of losing it, verified against both a real device session and an
+automated restart mid-load-test. 1000 devices locally and 200+ devices on Render's free tier both
+still show real, separate, unresolved limits — see the results doc for which is which, and note
+that the 1000-device mechanism has changed since it was first found (no longer the engine's own
+tick cost — see the results doc's Open items).
 
-**Per-request graph recomputation (fixed).** Before moving the engine's graph/room-state
-computation onto a periodic tick, 500 devices across 5 rooms produced roughly 60% request
-failures and p99 live-poll latency in the 15-30 second range. The root cause and fix are
-described in `backend/src/inference.ts`'s own comments (`tick()`); the short version is that the
-engine was rebuilding its whole BLE graph and every room's membership from scratch on every
-single poll. After the fix, the same 500-device run produces **zero errors**, p99s under 200ms.
-
-The engine also logs a warning if any one tick takes more than half its 2-second budget
+The engine logs a warning if any one tick takes more than half its 2-second budget
 (`console.warn("[tick] slow: ...")`, in `inference.ts`), with a breakdown of where the time went
 (graph build, hop-distance maps, room computation, device-room resolution). If a load test shows
 errors climbing but the client-side table doesn't make it obvious why, check the server's own
 log for this line first.
 
-**Mass-leave scaling (fixed).** Pushing the same scenario to 1000 devices surfaced a second,
-unrelated bug: ending a session means every device calling `leave()` within a few seconds, and
-the engine's per-device batch cleanup used to scan the *entire* shared batch list for every
-single leave. The fix (grouping batches by device in a `Map` instead of one flat array) is in
-`backend/src/inference.ts` and `backend/src/engine/graph.ts`.
-
-**1000 devices is not yet clean.** Unlike the 500-device scenario, a 1000-device run still shows
-some errors, traced to `buildBleGraph` itself taking up to ~1 second during brief spikes — a
-different, already-scoped item (see the scaling plan's Phase 2 notes on algorithmic and payload
-costs), not something this harness needs to work around.
-
 ## What it doesn't cover
 
-- **The Postgres write path.** Running with `DATABASE_URL` unset (the documented default above)
-  deliberately isolates the in-memory inference cost. Re-running with a real `DATABASE_URL` set
-  in `.env.loadtest` measures the write path on top, but mixing the two in one run makes it hard
-  to tell which layer caused what — do them as separate runs.
+- **The Postgres write path, or the Redis checkpoint path.** Running with `DATABASE_URL` and
+  `REDIS_URL` both unset (the documented default above) deliberately isolates the in-memory
+  inference cost. Adding either to `.env.loadtest` measures that layer on top, but turning on
+  both at once makes it hard to tell which one caused what if something looks off — do them as
+  separate runs, and only combine them once each has already been measured alone.
 - **Physical realism.** The Wi-Fi fingerprints and BLE peer lists are synthetic and favorable
   (clean per-room clusters, no real-world interference or hardware variance). This measures
   throughput and latency, not whether the sensor-fusion inference is *accurate* at scale — that

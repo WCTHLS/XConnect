@@ -24,6 +24,8 @@ import { computeWifiCosineSimilarity } from "./engine/wifi.js";
 import { computeMotionAnomalyFlag } from "./engine/motion.js";
 import { buildBleGraph, computeHopDistances } from "./engine/graph.js";
 import { EnginePersistenceManager } from "./engine/persistence.js";
+import { RedisCheckpointManager } from "./engine/checkpoint.js";
+import type { RedisClient } from "./redis/index.js";
 
 // Re-export public utilities
 export { isUltrasonicTokenMatch };
@@ -77,10 +79,28 @@ export class PocInferenceEngine {
    * presenter.
    */
   private presenterHopMaps = new Map<string, Map<string, number>>();
+  /** Checkpoints activeRoomsByKey/roomMembership/roomEndedNotices to Redis so a restart can resume. */
+  private readonly checkpoint: RedisCheckpointManager;
 
-  constructor(options?: { db?: Db }) {
+  constructor(options?: { db?: Db; redis?: RedisClient; instanceId?: string }) {
     this.persistence = new EnginePersistenceManager(options?.db);
+    this.checkpoint = new RedisCheckpointManager(options?.redis, options?.instanceId);
     setInterval(() => this.tick(), TICK_INTERVAL_MS).unref();
+  }
+
+  /**
+   * Restores activeRoomsByKey, roomMembership and roomEndedNotices from Redis, if configured.
+   * Called once at boot, before traffic flows, so the tick picks up resumed state on its first
+   * run rather than computing off empty maps for one cycle. Returns the restored room occurrence
+   * IDs so the caller's own boot sweep (closing orphaned Postgres rows) can leave these alone —
+   * they aren't orphaned, they're exactly the ones Redis just proved are still current.
+   */
+  async restoreFromRedis(): Promise<string[]> {
+    const { activeRooms, roomMembership, roomEndedNotices } = await this.checkpoint.restore();
+    for (const [key, room] of activeRooms) this.activeRoomsByKey.set(key, room);
+    for (const [key, membership] of roomMembership) this.roomMembership.set(key, membership);
+    for (const [deviceId, notice] of roomEndedNotices) this.roomEndedNotices.set(deviceId, notice);
+    return [...activeRooms.values()].map((r) => r.roomId);
   }
 
   /**
@@ -119,6 +139,9 @@ export class PocInferenceEngine {
     }
 
     this.resolveDeviceRooms(now, activePresenters);
+    // Checkpoint after this tick's own writes (trim's staleness closes, resolveDeviceRooms) have
+    // settled, so a restart resumes from state at least as fresh as what was just computed.
+    this.checkpoint.checkpoint(this.activeRoomsByKey, this.roomMembership);
     const tDone = performance.now();
     // A warning, not routine telemetry: at TICK_INTERVAL_MS = 2s, a tick taking even half that is
     // worth knowing about well before it reaches the point of actually falling behind.
@@ -281,6 +304,11 @@ export class PocInferenceEngine {
     this.recentlyLeftByRoom.delete(room.roomId);
     const now = Date.now();
     const prefix = `${room.roomId}::`;
+    // Collected rather than written to Redis one at a time: ending a room notifies every device
+    // in it at once (up to a full room's worth), and firing an individual SET per device here —
+    // inside a single request handler, not the tick — was the actual mass-leave-shaped cost this
+    // change is fixing. One pipelined write at the end instead of N round trips.
+    const noticeDeviceIds = new Set<string>();
     for (const [membershipKey, membership] of this.roomMembership.entries()) {
       if (membershipKey.startsWith(prefix)) {
         const deviceId = membershipKey.slice(prefix.length);
@@ -290,6 +318,7 @@ export class PocInferenceEngine {
           (current.roomId !== room.code || current.sessionLabel !== room.sessionLabel);
         if (!movedToDifferentRoom) {
           this.roomEndedNotices.set(deviceId, { roomCode: room.code, endedAt: now });
+          noticeDeviceIds.add(deviceId);
         }
         membership.lastSeenAt = now;
         this.persistence.persistClosedMembership(membershipKey, membership);
@@ -299,10 +328,29 @@ export class PocInferenceEngine {
     for (const [deviceId, d] of [...this.devices.entries()]) {
       if (d.roomId === room.code && d.sessionLabel === room.sessionLabel) {
         this.roomEndedNotices.set(deviceId, { roomCode: room.code, endedAt: now });
+        noticeDeviceIds.add(deviceId);
         if (d.role === "presenter") this.devices.delete(deviceId);
       }
     }
+    this.checkpoint.setRoomEndedNotices(
+      [...noticeDeviceIds].map((deviceId) => ({ deviceId, roomCode: room.code, endedAt: now })),
+      ROOM_ENDED_NOTICE_TTL_MS
+    );
     this.persistence.endRoom(room.roomId, now).catch((err) => console.error("[db] failed to mark room ended:", err));
+  }
+
+  /**
+   * Clears a "your room was ended" notice both in memory and (if configured) in Redis. Gated on
+   * actually having one: this runs on every join() and every leave(), and almost none of those
+   * calls have a notice to clear — a device whose room wasn't just ended out from under it never
+   * had one set. Firing the Redis DEL unconditionally would mean a network round trip on nearly
+   * every join/leave regardless of traffic volume, the exact per-request-cost pattern the tick
+   * refactor exists to avoid elsewhere.
+   */
+  private clearRoomEndedNotice(deviceId: string) {
+    if (!this.roomEndedNotices.has(deviceId)) return;
+    this.roomEndedNotices.delete(deviceId);
+    this.checkpoint.clearRoomEndedNotice(deviceId);
   }
 
   /**
@@ -347,7 +395,7 @@ export class PocInferenceEngine {
   ) {
     const current = this.devices.get(deviceId);
     const now = Date.now();
-    this.roomEndedNotices.delete(deviceId);
+    this.clearRoomEndedNotice(deviceId);
     this.devices.set(deviceId, {
       deviceId,
       displayName: displayName || current?.displayName || undefined,
@@ -397,7 +445,7 @@ export class PocInferenceEngine {
       }
     }
     this.devices.delete(deviceId);
-    this.roomEndedNotices.delete(deviceId);
+    this.clearRoomEndedNotice(deviceId);
     this.batchesByDevice.delete(deviceId);
   }
 

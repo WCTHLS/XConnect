@@ -1,27 +1,35 @@
 import cors from "cors";
-import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, or } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, notInArray, or } from "drizzle-orm";
 import express from "express";
 import { z } from "zod";
 import { authEnabled, authenticate, forgetCachedUser, requireAdmin } from "./auth.js";
 import { db, schema, type Db } from "./db/index.js";
 import { PocInferenceEngine } from "./inference.js";
 import { pushEnabled, registerInstallation, sendToEmails } from "./notifications.js";
+import { redis } from "./redis/index.js";
 
 const app = express();
-const engine = new PocInferenceEngine({ db });
 const port = Number(process.env.PORT ?? process.env.API_PORT ?? 3000);
+// Namespaces this instance's Redis checkpoint keys by its own port, so an accidentally-still-running
+// second backend process (a leftover local test server, say) can never silently stomp on this one's
+// checkpoint by sharing the same keys — exactly what happened once during this feature's own testing.
+const engine = new PocInferenceEngine({ db, redis, instanceId: String(port) });
 
 console.log(db ? "🗄️  Postgres persistence enabled" : "⚠️  No DATABASE_URL set — running in-memory only (POC mode)");
+console.log(redis ? "🧷 Redis checkpointing enabled — engine state survives a restart" : "⚠️  No REDIS_URL set — engine state won't survive a restart (POC mode)");
 
-// PocInferenceEngine's "which occurrence is active for this room" tracking lives only in
-// memory, so a server restart silently orphans whatever was active at the time — those rows
+// PocInferenceEngine's "which occurrence is active for this room" tracking used to live only in
+// memory, so a server restart silently orphaned whatever was active at the time — those rows
 // would otherwise sit with ended_at: NULL forever, looking "active" in history indefinitely.
-// A fresh boot is itself a natural "nothing is actually active anymore" boundary, so close
-// them out right here rather than leaving stale rows behind.
+// Redis (when configured) now resumes exactly those rooms, so a fresh boot only needs to close
+// out whatever Redis *doesn't* know about — real orphans, not state that just got restored.
+const restoredRoomIds = await engine.restoreFromRedis();
 if (db) {
+  const conditions = [isNull(schema.rooms.endedAt)];
+  if (restoredRoomIds.length > 0) conditions.push(notInArray(schema.rooms.id, restoredRoomIds));
   db.update(schema.rooms)
     .set({ endedAt: new Date() })
-    .where(isNull(schema.rooms.endedAt))
+    .where(and(...conditions))
     .then((result) => {
       if (result.count > 0) console.log(`🧹 Closed ${result.count} room(s) left open from before this restart`);
     })
@@ -1286,7 +1294,15 @@ app.get("/api/admin/overview", (_request, response) => {
   return response.json({ rooms });
 });
 
-app.listen(port, "0.0.0.0", () => {
+const server = app.listen(port, "0.0.0.0", () => {
   console.log(`🚀 ConfPresence POC API listening on http://0.0.0.0:${port}`);
   console.log(`✨ Live Streaming Logs initialized. All connected device events will appear below.`);
 });
+
+// Node's default keepAliveTimeout (5s) is shorter than how often a device actually talks to us
+// (3s live polls are fine, but the 10s batch-upload cadence isn't) — every batch call was forcing
+// the server to close and reopen a fresh TCP connection, which at real device counts shows up as
+// thousands of short-lived sockets churning through TIME_WAIT rather than being reused. Raised
+// well past every client interval so a device's connection stays warm across its own requests.
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;

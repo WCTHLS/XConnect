@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import { createRemoteJWKSet, decodeJwt, jwtVerify, type JWTPayload } from "jose";
 import { db, schema } from "./db/index.js";
+import { redis } from "./redis/index.js";
 
 export type AuthUser = {
   id: string;
@@ -125,7 +126,31 @@ function claimString(payload: JWTPayload, ...keys: string[]): string | undefined
 }
 
 const USER_REFRESH_MS = 5 * 60 * 1000;
+const USER_CACHE_PREFIX = "auth:user:";
+/**
+ * L1 cache — checked first on every authenticated request, zero network cost. Redis (below) is
+ * an L2 behind it: surviving a restart means the first request after boot can still skip the
+ * Postgres upsert, instead of every cache being cold again the moment the process restarts.
+ */
 const userCache = new Map<string, { user: AuthUser; at: number }>();
+
+async function getCachedUser(id: string): Promise<AuthUser | undefined> {
+  const cached = userCache.get(id);
+  if (cached && Date.now() - cached.at < USER_REFRESH_MS) return cached.user;
+  if (!redis) return undefined;
+  const raw = await redis.get(`${USER_CACHE_PREFIX}${id}`);
+  if (!raw) return undefined;
+  const user = JSON.parse(raw) as AuthUser;
+  userCache.set(id, { user, at: Date.now() });
+  return user;
+}
+
+function setCachedUser(id: string, user: AuthUser) {
+  userCache.set(id, { user, at: Date.now() });
+  redis
+    ?.set(`${USER_CACHE_PREFIX}${id}`, JSON.stringify(user), "PX", USER_REFRESH_MS)
+    .catch((err) => console.error("[redis] failed to cache user:", err));
+}
 
 /** Upserts the person's row at most every USER_REFRESH_MS so authenticated polling never hits the DB per request. */
 async function resolveUser(payload: JWTPayload): Promise<AuthUser> {
@@ -135,8 +160,8 @@ async function resolveUser(payload: JWTPayload): Promise<AuthUser> {
   const name = claimString(payload, "name") ?? email?.split("@")[0];
   const allowlisted = Boolean(email && ADMIN_EMAILS.has(email.toLowerCase()));
 
-  const cached = userCache.get(id);
-  if (cached && Date.now() - cached.at < USER_REFRESH_MS) return cached.user;
+  const cached = await getCachedUser(id);
+  if (cached) return cached;
 
   let isAdmin = allowlisted;
   let preferredName: string | undefined;
@@ -158,13 +183,14 @@ async function resolveUser(payload: JWTPayload): Promise<AuthUser> {
   }
 
   const user: AuthUser = { id, email, name: preferredName ?? name, accountName: name, isAdmin };
-  userCache.set(id, { user, at: Date.now() });
+  setCachedUser(id, user);
   return user;
 }
 
 /** Drops a cached user so a just-changed name is visible on the very next request. */
 export function forgetCachedUser(id: string) {
   userCache.delete(id);
+  redis?.del(`${USER_CACHE_PREFIX}${id}`).catch((err) => console.error("[redis] failed to drop cached user:", err));
 }
 
 export async function authenticate(request: Request, response: Response, next: NextFunction) {
