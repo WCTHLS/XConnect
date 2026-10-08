@@ -145,6 +145,84 @@ didn't actually pick up where the old process left off — see `docs/LOAD_TEST_R
 that looked like the one time it happened (a Redis key collision with a leftover test process,
 not a flaw in the restore logic itself).
 
+## Realistic behavior: `loadtest-realistic.ts`
+
+`loadtest.ts` is the fixed baseline: every device joins once, sends uniform data, and stays to
+the end. Keep using it to compare against earlier numbers. `backend/src/loadtest-realistic.ts`
+models how a real room moves instead:
+
+- BLE peer counts and Wi-Fi AP visibility vary per batch, with occasional Wi-Fi dropout.
+- Each device has a motion profile, so `motionState`/`motionVariance` vary (some devices trend
+  toward the inactivity flag).
+- The room's ultrasonic token is emitted every batch but only heard about 75% of the time.
+- Attendees churn. Some departures come back on the same device after 5-75s (half going quiet,
+  half leaving explicitly); the rest are replaced by a new attendee.
+- Each presenter steps out once (goes quiet, no leave call) and rejoins the same room.
+- End-of-test leaves are spread out instead of all at once.
+
+Same prerequisites and same flags as `loadtest.ts`, plus:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--churn` | 2 | attendee departures per room per minute, on average (0 disables churn) |
+| `--return-rate` | 0.4 | fraction of departures that come back on the same device |
+| `--leave-spread` | 8000 | max random delay (ms) before each end-of-test leave |
+| `--presenter-rejoin` | true | set to `false` to keep presenters connected start to finish |
+
+```bash
+pnpm exec tsx src/loadtest-realistic.ts --url=http://localhost:3001 --devices=300 --rooms=5 --duration=150 --churn=6
+```
+
+The progress line and summary also report how many attendees were replaced, returned after going
+quiet, or returned after leaving, plus presenter rejoins. Expect `join` and `leave` counts above
+the device count. Make the run at least ~120s long so the 5-75s step-outs fit inside it.
+
+**A presenter step-out must never call `/api/session/leave`**: the server treats a presenter's
+leave as "end this room", which closes everyone's stay and starts a new occurrence on rejoin.
+
+## Checking attendance in Postgres after a run
+
+Throughput numbers don't show whether attendance was recorded correctly. After a run, check
+directly (replace the room id, or filter by `started_at`):
+
+```sql
+SELECT id, started_at, ended_at FROM rooms
+WHERE label LIKE 'loadtest-room-%' AND started_at > now() - interval '15 minutes';
+
+WITH run AS (SELECT * FROM room_membership WHERE room_id = '<room occurrence id>'),
+per_device AS (
+  SELECT device_id, role, count(*) AS stays, count(*) FILTER (WHERE ended_at IS NULL) AS open_stays
+  FROM run GROUP BY device_id, role
+)
+SELECT role, stays, count(*) AS devices, sum(open_stays) AS open_stays
+FROM per_device GROUP BY role, stays ORDER BY role, stays;
+```
+
+A correct run has one room occurrence per room, an `ended_at` on each, one stay per presenter,
+mostly one stay per attendee (two for those who returned), and zero open stays. If every attendee
+in one room has two stays with the same close time, that room's presenter went silent for more
+than about a minute (see `docs/LOAD_TEST_RESULTS.md` section 8).
+
+## Cleaning up after an aborted run
+
+Stopping the generator partway means the simulated devices never send leave. Attendee stays close
+on their own after the 45s grace, but **the room is never marked as ended**. It stays open in
+Postgres and admin history, and survives restarts via Redis. Against the still-running server:
+
+```bash
+curl -X POST http://localhost:3000/api/admin/session/end -H "Content-Type: application/json" -d '{"sessionId":"loadtest-session"}'
+```
+
+From Windows PowerShell, use `Invoke-RestMethod` instead, since `curl.exe` mangles the JSON
+quotes:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://<host>:3000/api/admin/session/end -ContentType "application/json" -Body '{"sessionId":"loadtest-session"}'
+```
+
+If the server is stopped, start it first: on boot it restores the room from Redis as active, so
+ending it while the server was down would not stick.
+
 ## What it found (project history)
 
 Full numbers, every scenario tested (local and on Render), and the several separate scaling

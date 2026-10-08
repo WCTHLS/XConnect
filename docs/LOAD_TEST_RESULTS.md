@@ -25,6 +25,15 @@ devices — the first confirmation outside a laptop. Pushing further on Render s
 finding that is **not a code problem**: a platform-level request-rate limit, covered in its own
 section below.
 
+**Update (October 7-8, 2026): first tests on dedicated cloud hardware, with the load generator
+and server on separate machines.** On a 2 vCPU Azure VM with Azure Postgres and Redis, one room
+holds up to 700 devices for a sustained 6 minutes and falls over somewhere between 700 and 800
+(section 7). Redis restart survival is confirmed against a real managed Postgres. A new
+`loadtest-realistic.ts` harness (section 8) adds churn, returning attendees, presenter step-outs
+and varied sensor data. At 700 devices with heavy churn it ran with zero errors and correct
+attendance records, and it surfaced one product behavior worth knowing about: a presenter silent
+for over a minute splits everyone's stay in that room.
+
 ---
 
 ## 1. Per-request to per-tick (local)
@@ -257,6 +266,159 @@ piling up in the OS accept queue, not a specific remaining code defect. See Open
 
 ---
 
+## 7. Azure VM testing: generator and server on separate machines (October 7-8, 2026)
+
+Every earlier local number had the load generator, server, Postgres and Redis competing for one
+laptop's CPU. This round put the server on its own cloud machine, which removes that
+self-competition for the first time.
+
+**Setup:**
+
+| Piece | Where |
+|---|---|
+| Backend | Azure VM, East US, 2 vCPU / 4 GiB general-purpose D-series (sized to match the company staging VM's `D2alds_v6`), Ubuntu 24.04, Node 20, run with `pnpm dev`, auth off |
+| Redis | Docker on the same VM (`redis:7-alpine`, bound to loopback) |
+| Postgres | Azure Database for PostgreSQL Flexible Server, Burstable B2s, Postgres 18, Canada Central. A different region from the VM (East US wasn't available on the trial subscription), so every DB call crosses regions |
+| Load generator | The laptop, in the US, hitting the VM's public IP over the internet |
+
+The roughly 57ms floor on every endpoint at low load is network round-trip time from the laptop
+to East US, not server work. Absolute latencies here are therefore not comparable to the local
+numbers above, only to each other.
+
+**Results with `loadtest.ts` (everyone joins once and stays to the end):**
+
+| Devices | Rooms | Duration | Errors | Notes |
+|---|---|---|---|---|
+| 100 | 5 | 30s | 0 | p50 ~57ms everywhere (pure network floor), p99 under 190ms |
+| 500 | 1 | 30s | 0 | p50 57-221ms, p99 156-413ms, max 735ms |
+| 600 | 1 | 150s | 0 | p50 120-307ms (`leave` highest), p99 197-573ms, max 2,292ms |
+| 700 | 1 | 350s | 5 (all `batch`) | Held for nearly 6 minutes. p50 ~205-215ms (`leave` 304ms), p99 1.1-1.4s, max 5,143ms. Errors were isolated blips, never climbing |
+| 800 | 1 | 150s | 1,315 | Clean for ~70-80s, then errors jumped 24 to 1,158 in one 10s interval, then plateaued. p50 ~304-344ms, one `poll_device` took 54,514ms |
+| 1000 | 1 | 150s | 497 (302 `batch`, 195 `poll_device`) | Errors climbing from ~30s in, a sharper jump around 100-110s. p50 632-837ms, p99 1.6-3.9s, one `poll_device` took 44,994ms |
+| 1000 | 5 | 150s | 30,718 | Clean for ~70s (23,413 ok, 0 failed), then collapsed within 10-20s (failed rose by ~4,000 every 10s while ok barely moved), then partially recovered. All network errors |
+
+**What this shows:**
+
+- **The single-room limit on this VM is between 700 and 800 devices.** 700 held for 350 seconds;
+  800 collapsed partway through a 150-second run.
+- **It looks like a load threshold, not something accumulating over time.** If memory, sockets or
+  connections were slowly building up, a 6-minute run at 700 should have shown errors creeping
+  upward. They stayed flat at a handful. Past the threshold the server suddenly can't keep up and
+  the backlog snowballs, which matches the clean-then-collapse shape at 800 and 1000.
+- **1000 devices across 5 rooms was far worse than 1000 in one room** (about 30,700 errors vs.
+  about 500). That is the opposite of what room-size-driven inference cost would predict, and is
+  not explained yet. The collapse shape (clean, sudden mass failure, partial recovery) fits a
+  finite resource running out rather than computation gradually falling behind.
+- **No `[tick] slow:` warnings were found in the server log** around the collapses, so the
+  engine's per-tick computation is again ruled out, consistent with section 6.
+- **Postgres active connections peaked at 28** during the 1000-device, 5-room collapse (Azure
+  portal metric), against a per-process pool of 20. Not a runaway connection storm. Postgres's
+  own `max_connections` on this tier and the VM's CPU/memory during the collapse were not checked.
+- **Headroom shrinks well before the limit.** Median latency went ~57ms (100 devices) to ~120ms
+  (600) to ~210ms (700), with p99 over a second at 700.
+
+**Restart survival, verified against Azure Postgres.** 600 devices in 1 room, server killed and
+restarted with `pnpm dev` partway through the run. The client saw a burst of roughly 1,300
+errors around the restart (the server really was down). In Postgres, the room
+(`loadtest-room-1__muz17pll`) is one row from 04:23:55 to 04:26:33 UTC covering the whole test,
+and each device's `room_membership` row is one continuous span through the restart. The Redis
+restore picked the room back up instead of the boot sweep closing it, the same result as the
+local test in section 6, now on real managed infrastructure.
+
+Note: the server prints no dedicated "restored from Redis" line. `🧷 Redis checkpointing enabled`
+prints on every boot, and the only restart-related line (`🧹 Closed N room(s) left open from before
+this restart`) is for rooms Redis did *not* know about. Silence is the success case. The
+database rows are the real evidence.
+
+## 8. Realistic-behavior harness: `loadtest-realistic.ts`
+
+`loadtest.ts` stays as the fixed baseline so its numbers remain comparable. The new
+`backend/src/loadtest-realistic.ts` models how a real room behaves (usage in `docs/LOAD_TESTING.md`):
+
+- BLE peer counts (30-100% of the room) and Wi-Fi AP visibility vary per batch, with occasional
+  Wi-Fi dropout.
+- Each device has a motion profile (sedentary / active / mixed) driving `motionState` and
+  `motionVariance`.
+- Every batch emits the room's ultrasonic token; it is only *heard* about 75% of the time.
+- Attendee churn (`--churn`, departures per room per minute). 40% of departures (`--return-rate`)
+  come back on the same device after 5-75s, half going quiet with no leave call and half leaving
+  explicitly first. The rest are replaced by a new attendee.
+- Each room's presenter steps out once (goes quiet for 5-75s, no leave call) and rejoins the same
+  room on the same device.
+- End-of-test leaves are spread over up to 8s instead of all at once.
+
+**Two things learned while building it:**
+
+1. **A presenter's explicit `leave` ends the room** (`inference.ts`, `leave()`): every attendee's
+   stay closes and the next join starts a new room occurrence. An early version of the harness
+   modeled a step-out as leave-then-rejoin and split every room in two. A real step-out (phone
+   locked, app backgrounded, signal lost) sends nothing, so the harness now goes quiet instead.
+2. **The first churn implementation applied the rate per attendee rather than per room**, giving
+   625 replacements in a 60-second, 300-device run instead of about 12. Fixed before any of the
+   numbers below.
+
+**Results:**
+
+| Where | Devices / rooms / duration | Churn | Errors | Notes |
+|---|---|---|---|---|
+| Local | 300 / 5 / 150s | 6 | 0 | 45 replaced, 11 returned after going quiet, 7 after leaving, 5 presenter rejoins |
+| Azure VM | 600 / 1 / 150s | 6 | 4 (3 `poll_device`, 1 `batch`) | p50 ~100ms, p99 under 500ms; two ~19s outliers near the end |
+| Azure VM | 700 / 1 / 350s | 50 | **0** of ~102,000 | 161 replaced, 47 returned after going quiet, 51 after leaving, 1 presenter rejoin. 960 joins, 912 leaves |
+
+Compared with the baseline 700-device run in section 7 (no churn):
+
+| | Baseline, 700 / 1 room | Realistic, 700 / 1 room, churn 50 |
+|---|---|---|
+| Errors | 5 | 0 |
+| p50, most endpoints | ~205-215ms | ~136-164ms |
+| p99, most endpoints | 1.1-1.4s | 2.1-3.2s |
+| `leave` p50 | 304ms | 61ms |
+
+The median improves because at any moment some attendees are away or between replacements, and
+because departures are spread out. The tail roughly doubles because of the constant
+join/leave/stay-closing work. **The baseline's slow `leave` was mostly an artifact of every device
+leaving in the same instant**; with realistic staggered departures it is about 60ms.
+
+**Attendance correctness, checked directly in Postgres after each run:**
+
+| Run | Room occurrences | Presenter | Attendees | Open stays |
+|---|---|---|---|---|
+| Local 300 / 5 rooms | 1 per room | 1 stay each | 273 with 1 stay, 51 with 2, 1 with 3 | 0 |
+| VM 600 / 1 room | 1 | 1 stay | 597 with 1 stay, 5 with 2 | 0 |
+| VM 700 / 1 room, churn 50 | 1 | 1 stay | 791 with 1 stay, 54 with 2 | 0 |
+
+- Replacements are new devices with their own single stay. A replacement that joins too late to
+  send a sensor batch gets no stay at all, which is correct: stays only open from sensor data.
+- An attendee who leaves explicitly and returns gets a second stay in the same occurrence.
+- An attendee who goes quiet keeps one stay for somewhat longer than the 45s membership grace,
+  because their last batches keep placing them in the room for a while, so only long silences
+  split.
+
+**Finding: a presenter silent for more than about a minute splits every attendee's stay.** In the
+local run, room 4's presenter sent nothing for over a minute. 46 of its 67 attendees had their
+stays closed at the same moment and reopened together 50 seconds later when the presenter came
+back. The room itself survived as one occurrence. Mechanism:
+
+1. A presenter only counts as active if heard from in the last 60s (`WINDOW_MS * 2`,
+   `inference.ts` `tick()`).
+2. Attendees are only placed into a room through an active presenter (`resolveDeviceRooms`), even
+   though their own BLE and Wi-Fi data still place them together.
+3. After the 45s grace, every unplaced attendee's stay closes (`trim()`).
+
+Impact: the attendee is not double-counted. Admin history groups the two stays under one person,
+and `/api/me/stats` counts one session. The gap itself is lost from their attendance time, and
+they briefly appear in the room's "Left" list. **Decision: accepted as-is for now**, not changed.
+
+**Finding: an abandoned room is never marked as ended.** A room with no activity for 15 minutes
+(`ROOM_AUTO_EXPIRY_MS`) is skipped in memory, but nothing writes its `ended_at`, and the Redis
+checkpoint carries it across restarts, so the boot sweep doesn't close it either. It stays "open"
+in the database and in admin history indefinitely. Surfaced when a test run was stopped partway
+(the simulated devices never sent leave). Workaround for load testing: after an aborted run, call
+`POST /api/admin/session/end` with `{"sessionId":"loadtest-session"}` against the running server.
+Production equivalent: a presenter's phone dying with nobody ending the room.
+
+---
+
 ## Open items
 
 - **The local single-room-concentration anomaly** (section 4) remains genuinely unexplained as a
@@ -279,3 +441,14 @@ piling up in the OS accept queue, not a specific remaining code defect. See Open
   payload slimming, ETags, batched device-upserts) may still help at the margin regardless.
 - **Render's real ceiling, and whether it changes on a paid tier**, is unmeasured. The free tier's
   rate limit makes it unsuitable for validating the full 500-1000 device target as-is.
+- **Update to the 1000-device item above (section 7):** splitting the generator and server onto
+  separate machines did not make 1000 devices clean. On a 2 vCPU Azure VM the single-room limit is
+  700-800, and the failure is a sudden collapse rather than gradual degradation. Still to check:
+  the VM's CPU and memory during a collapse (Azure portal metrics), and Postgres's
+  `max_connections` on the Burstable tier. A larger VM size is the quickest way to tell whether
+  this is plain CPU capacity.
+- **Why 1000 devices across 5 rooms collapsed far worse than 1000 in one room** (section 7) is
+  unexplained.
+- **Abandoned rooms are never marked as ended** (section 8). Small, real production bug; not fixed.
+- **Presenter silence over ~60s splits attendee stays** (section 8). Accepted as current behavior;
+  revisit if attendance time accuracy during presenter outages matters.
