@@ -37,6 +37,18 @@
         <category android:name="android.intent.category.BROWSABLE"/>
         <data android:scheme="exp+confpresence-zero"/>
       </intent-filter>
+      <intent-filter>
+        <action android:name="android.intent.action.VIEW"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <category android:name="android.intent.category.BROWSABLE"/>
+        <data android:scheme="xconnect"/>
+      </intent-filter>
+      <intent-filter>
+        <action android:name="android.intent.action.VIEW"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <category android:name="android.intent.category.BROWSABLE"/>
+        <data android:scheme="com.googleusercontent.apps.113829759136-bh8qvak0thcvkl4o1cscmbfhe2iijs08"/>
+      </intent-filter>
     </activity>
   </application>
 </manifest>

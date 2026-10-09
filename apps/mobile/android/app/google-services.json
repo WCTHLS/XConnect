@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "113829759136",
+    "project_id": "xconnect-2b9a3",
+    "storage_bucket": "xconnect-2b9a3.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:113829759136:android:0399b578ce990fb82361c5",
+        "android_client_info": {
+          "package_name": "com.confpresence.zero"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "113829759136-bh8qvak0thcvkl4o1cscmbfhe2iijs08.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.confpresence.zero",
+            "certificate_hash": "5e8f16062ea3cd2c4a0d547876baa6f38cabf625"
+          }
+        },
+        {
+          "client_id": "113829759136-9ccv531dfgru6tukhavvkkbutn03t6m5.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBgd-oXAxfR40aF6ljY0Kid9aN203U3sDw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "113829759136-9ccv531dfgru6tukhavvkkbutn03t6m5.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

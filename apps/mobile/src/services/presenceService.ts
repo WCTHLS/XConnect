@@ -6,6 +6,7 @@ import { requireBleModule, subscribeToPeers, type NativePeer } from "../native/c
 import { getWifiFingerprint } from "../native/confPresenceWifi";
 import { isUltrasonicAvailable, requireUltrasonicModule, subscribeToUltrasonicTokens } from "../native/confPresenceUltrasonic";
 import { AppLogger } from "./appLogger";
+import { authFetch } from "./auth";
 
 const MOTION_SAMPLE_INTERVAL_MS = 200; // ~5Hz, coarse activity level, not gesture recognition
 
@@ -14,13 +15,48 @@ const MOTION_SAMPLE_INTERVAL_MS = 200; // ~5Hz, coarse activity level, not gestu
 // silently point "Cloud" at a local dev URL with no indication in the UI.
 const DEFAULT_API_URL = "https://xconnect-api.onrender.com";
 const BATCH_INTERVAL_MS = 10_000;
+/** Ceiling on how long leaving is allowed to block the UI before giving up on a clean goodbye. */
+const LEAVE_TIMEOUT_MS = 4_000;
 // How long a heard ultrasonic token stays valid before we treat it as stale and stop
 // resending it. Must be well under the server's freshness window (45s) so the gate can
 // actually expire client-side once the presenter stops broadcasting, instead of getting
 // perpetually refreshed by resending the same old observation every batch.
 const ULTRASONIC_OBSERVATION_TTL_MS = 15_000;
 
-async function requestBlePermissions(): Promise<boolean> {
+/** The server refused this device as presenter because the room already has a live one. */
+export class RoomRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RoomRejectedError";
+  }
+}
+
+export async function checkBlePermissions(): Promise<boolean> {
+  if (Platform.OS !== "android") return true;
+  try {
+    if (Platform.Version >= 31) {
+      const scan = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN);
+      const adv = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE);
+      const conn = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT);
+      return scan && adv && conn;
+    } else {
+      return await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
+    }
+  } catch {
+    return false;
+  }
+}
+
+export async function checkAudioPermissions(): Promise<boolean> {
+  if (Platform.OS !== "android") return true;
+  try {
+    return await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
+  } catch {
+    return false;
+  }
+}
+
+export async function requestBlePermissions(): Promise<boolean> {
   if (Platform.OS !== "android") return true;
 
   try {
@@ -57,7 +93,7 @@ async function requestBlePermissions(): Promise<boolean> {
   }
 }
 
-async function requestAudioPermissions(): Promise<boolean> {
+export async function requestAudioPermissions(): Promise<boolean> {
   if (Platform.OS !== "android") return true;
   try {
     const granted = await PermissionsAndroid.request(
@@ -114,7 +150,22 @@ export class PresenceService {
   private currentUltrasonicToken?: string;
   private isRunning = false;
 
-  constructor(private readonly onStatus: (status: PresenceStatus) => void) {}
+  private rejectionReported = false;
+
+  constructor(
+    private readonly onStatus: (status: PresenceStatus) => void,
+    private readonly onRoomRejected?: (message: string) => void
+  ) {}
+
+  /** The server refused this presenter because the room already has a live one. Reported once per start. */
+  private async handleRoomRejected(res: Response) {
+    if (this.rejectionReported) return;
+    this.rejectionReported = true;
+    const data = await res.json().catch(() => null);
+    const who = data?.presenterName ? ` (${data.presenterName})` : "";
+    AppLogger.log("WARN", `Room already has a presenter${who}`, "warn");
+    this.onRoomRejected?.(`This room already has a presenter${who}. Pick a different room, or wait for them to leave.`);
+  }
 
   private emitStatus(stateOverride?: "idle" | "starting" | "running" | "error", error?: string) {
     this.onStatus({
@@ -129,7 +180,18 @@ export class PresenceService {
   }
 
   async start(config: StartConfig) {
+    // A second start() while one is already running (e.g. resuming a stale presenter
+    // session, then switching to attendee) must not leave the first session's BLE/ultrasonic/
+    // timer running underneath the new one — tear it down first so only one role is ever live.
+    if (this.isRunning) {
+      await this.stop();
+    }
+    // Plain console.log (not AppLogger, which only feeds the in-app log viewer, not the Metro
+    // terminal) so a session/room mismatch between two test devices is verifiable by just
+    // reading each device's own Metro output, instead of assuming what values were actually sent.
+    console.log(`[SESSION] role=${config.role} roomId=${config.roomId} sessionId=${config.sessionId} deviceId=${config.deviceId}`);
     this.config = config;
+    this.rejectionReported = false;
     this.isRunning = true;
     this.lastWifiApCount = 0;
     this.lastKnownWifiFingerprint = [];
@@ -150,10 +212,20 @@ export class PresenceService {
       throw new Error("Nearby devices / Bluetooth permissions are required. Please grant permissions in your phone settings.");
     }
 
-    // Attempt join asynchronously without blocking local BLE hardware activation
-    this.joinSession(config).catch(() => {
-      // Offline / connecting
-    });
+    // Awaited (but still tolerant of offline failure) rather than fire-and-forget: a caller that
+    // starts polling live state once start() resolves must never be able to race this exact
+    // request — otherwise a poll can land on the server before the join does and see stale state
+    // (e.g. a "room ended" notice from a previous session under this same room) that the join
+    // itself was about to clear. A room-conflict rejection is NOT tolerated the way offline is:
+    // it must abort start() here, before BLE/ultrasonic setup below, so a rejected presenter never
+    // ends up advertising itself as live over BLE/ultrasonic despite the server having refused it.
+    try {
+      await this.joinSession(config);
+    } catch (err) {
+      this.isRunning = false;
+      this.emitStatus("idle");
+      throw err;
+    }
 
     await this.rotateAndAdvertise(true);
     const ble = requireBleModule();
@@ -233,8 +305,14 @@ export class PresenceService {
       }
     }
 
+    // Awaited, not fire-and-forget. The server removes the device the moment this lands, so
+    // anything that asks "is this device still in a room?" right after stop() — the attendee
+    // resume check, the presenter's my-active-rooms poll — would otherwise race the request and
+    // get a stale "yes". Bounded by a timeout so an unreachable server delays leaving by a few
+    // seconds at most instead of hanging the UI: the server reaps an unreporting device anyway,
+    // so a failed leave is slow, not wrong.
     if (this.config) {
-      this.leaveSession(this.config).catch(() => {});
+      await this.leaveSession(this.config);
     }
 
     try {
@@ -268,6 +346,7 @@ export class PresenceService {
 
     const now = Date.now();
     const isNew = !this.activePeerCache.has(peerPrefix);
+    const sizeBefore = this.activePeerCache.size;
     this.peers.set(peerPrefix, peer);
     this.activePeerCache.set(peerPrefix, { peer, lastSeenAt: now });
     this.cleanExpiredPeers(now);
@@ -276,7 +355,13 @@ export class PresenceService {
       AppLogger.log("BLE", `Heard Peer: ${peerPrefix} (RSSI: ${peer.rssi} dBm)`);
     }
 
-    this.emitStatus();
+    // A re-advertisement from an already-known peer (every ~100ms per device) doesn't change
+    // anything emitStatus() publishes — only activePeerCache.size can move. Emitting on every
+    // packet regardless was tens of no-op React re-renders per second with a few devices in
+    // range, saturating the JS thread badly enough to make UI taps get dropped.
+    if (this.activePeerCache.size !== sizeBefore) {
+      this.emitStatus();
+    }
   }
 
   private async rotateAndAdvertise(force = false) {
@@ -401,7 +486,7 @@ export class PresenceService {
 
     const tStart = Date.now();
     try {
-      const res = await fetch(`${targetUrl}/api/observations`, {
+      const res = await authFetch(`${targetUrl}/api/observations`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body)
@@ -409,6 +494,8 @@ export class PresenceService {
       const latency = Date.now() - tStart;
       if (res.ok) {
         AppLogger.log("API", `Synced batch to cloud -> 200 OK (${latency}ms)`);
+      } else if (res.status === 409) {
+        await this.handleRoomRejected(res);
       } else {
         AppLogger.log("WARN", `Sync returned status ${res.status} (${latency}ms)`, "warn");
       }
@@ -422,33 +509,51 @@ export class PresenceService {
     this.emitStatus();
   }
 
+  /** Network/offline failures are tolerated (BLE still starts) — only a 409 room conflict throws. */
   private async joinSession(config: StartConfig) {
     const targetUrl = config.apiUrl || DEFAULT_API_URL;
+    let res: Response;
     try {
-      const res = await fetch(`${targetUrl}/api/session/join`, {
+      res = await authFetch(`${targetUrl}/api/session/join`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(config)
       });
-      if (res.ok) {
-        AppLogger.log("API", `Session joined: ${config.sessionId} as ${config.role}`);
-      }
     } catch (err: any) {
       AppLogger.log("WARN", `Session join pending server wake: ${err?.message || "Offline"}`, "warn");
+      return;
+    }
+    if (res.ok) {
+      AppLogger.log("API", `Session joined: ${config.sessionId} as ${config.role}`);
+      return;
+    }
+    if (res.status === 409) {
+      const data = await res.json().catch(() => null);
+      const who = data?.presenterName ? ` (${data.presenterName})` : "";
+      AppLogger.log("WARN", `Room already has a presenter${who}`, "warn");
+      throw new RoomRejectedError(`This room already has a presenter${who}. Pick a different room, or wait for them to leave.`);
     }
   }
 
   private async leaveSession(config: StartConfig) {
     const targetUrl = config.apiUrl || DEFAULT_API_URL;
+    // Callers await this, so it must always settle. A dead or unreachable server would otherwise
+    // leave the caller (and the "Leaving..." overlay) waiting on the platform's default socket
+    // timeout, which can be tens of seconds.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), LEAVE_TIMEOUT_MS);
     try {
-      await fetch(`${targetUrl}/api/session/leave`, {
+      await authFetch(`${targetUrl}/api/session/leave`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ deviceId: config.deviceId })
+        body: JSON.stringify({ deviceId: config.deviceId }),
+        signal: controller.signal
       });
       AppLogger.log("API", "Session left");
     } catch {
-      // Ignore
+      AppLogger.log("API", "Leave request failed or timed out; the server will reap this device instead");
+    } finally {
+      clearTimeout(timeout);
     }
   }
 }

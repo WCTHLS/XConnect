@@ -3,6 +3,7 @@
   "private": true,
   "packageManager": "pnpm@10.14.0",
   "scripts": {
+    "dev:backend": "pnpm --filter @confpresence/api dev",
     "dev:api": "pnpm --filter @confpresence/api dev",
     "typecheck": "pnpm -r typecheck"
   }

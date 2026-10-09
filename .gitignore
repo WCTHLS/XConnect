@@ -16,6 +16,9 @@ coverage/
 *.env
 !.env.example
 
+# Local Bicep parameter files (hold real connection strings)
+infra/*.local.bicepparam
+
 # Build outputs & Release binaries
 outputs/
 *.apk

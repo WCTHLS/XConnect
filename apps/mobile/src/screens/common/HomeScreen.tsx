@@ -1,0 +1,1185 @@
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  Animated,
+  Easing,
+} from 'react-native';
+import Svg, { Path, Circle, Rect } from 'react-native-svg';
+import { useTheme } from '../../theme/useTheme';
+import { palette } from '../../theme/colors';
+import { MobileScreen, Role } from '../../components/navigation/BottomNav';
+import type { LiveRoomState, MyInvite, ParticipantRole } from '@confpresence/shared';
+import { InviteCard } from '../../components/ui/InviteCard';
+import { InviteDetailSheet } from '../../components/ui/InviteDetailSheet';
+import { AssignmentCard } from '../../components/ui/AssignmentCard';
+
+/**
+ * Date and time down to the minute. The components are listed explicitly rather than using
+ * `toLocaleString()`, which appends seconds on most locales — meaningless for a scheduled event,
+ * and it pushes the line past the width these rows have.
+ */
+function formatEventWhen(iso: string): string {
+  return new Date(iso).toLocaleString([], {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
+interface HomeScreenProps {
+  displayName: string;
+  role: Role;
+  onNavigate: (screen: MobileScreen) => void;
+  serverConnected: boolean | null;
+  serverEnv: 'cloud' | 'local' | 'custom';
+  rooms: string[];
+  selectedRoom: string;
+  onSelectRoom: (room: string) => void;
+  onStartPresence: () => void;
+  /** Rooms the server confirms this signed-in user is already presenting, if any — drives the
+   * rejoin/end card in place of the normal room-selector + Start Broadcasting flow. */
+  myActiveRooms: LiveRoomState[];
+  onRejoinMyRoom: (room: LiveRoomState) => void;
+  onEndMyRoom: (room: LiveRoomState) => void;
+  /** What's actually running right now, which is not always the same as `role` — a session keeps
+   * running while you navigate away, and the __DEV__ role switcher can change `role` underneath a
+   * live one. This is how Home knows to show "still presenting/attending" instead of Start
+   * Broadcasting / Begin Detection, which would restart (and interrupt) the live session. */
+  activePresence: {
+    role: ParticipantRole;
+    roomId: string;
+    sessionId: string;
+    /** Attendee only: a room is actually verified, rather than detection merely running. */
+    confirmed: boolean;
+  } | null;
+  /** Whether detection has already confirmed a room for the active attendee session — decides
+   * whether "Go to Room" resumes straight into the confirmed view or back into discovery/search. */
+  hasDetectedRoom: boolean;
+  /** Unanswered check-in invitations for this account. An RSVP prompt, not attendance. */
+  invites: MyInvite[];
+  /** Resolves to whether the reply saved, so the edit sheet stays open on a failure. */
+  onRespondToInvite: (inviteId: number, response: 'accepted' | 'declined') => Promise<boolean>;
+  /** Starts an accepted presenter assignment: the assigned room under its assigned session. */
+  onStartAssignedRoom: (roomCode: string, sessionId: string) => void;
+}
+
+export const HomeScreen: React.FC<HomeScreenProps> = ({
+  displayName,
+  role,
+  onNavigate,
+  serverConnected,
+  serverEnv,
+  rooms,
+  selectedRoom,
+  onSelectRoom,
+  onStartPresence,
+  myActiveRooms,
+  onRejoinMyRoom,
+  onEndMyRoom,
+  activePresence,
+  hasDetectedRoom,
+  invites,
+  onRespondToInvite,
+  onStartAssignedRoom,
+}) => {
+  const { colors, theme } = useTheme();
+  const isDark = theme === 'dark';
+
+  // Orb animations
+  const orbScale = useRef(new Animated.Value(1)).current;
+  const ring1 = useRef(new Animated.Value(0)).current;
+  const ring2 = useRef(new Animated.Value(0)).current;
+
+  // Mini radar pulse in quad-sensor box
+  const miniPulse = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    // Pulse orb
+    const pulseAnim = Animated.loop(
+      Animated.sequence([
+        Animated.timing(orbScale, {
+          toValue: 1.06,
+          duration: 1400,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(orbScale, {
+          toValue: 1,
+          duration: 1400,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    pulseAnim.start();
+
+    // Orb ring waves
+    const startRing = (anim: Animated.Value, initialDelay: number) => {
+      let timeoutId: any;
+      let loopAnim: Animated.CompositeAnimation | null = null;
+
+      const run = () => {
+        anim.setValue(0);
+        loopAnim = Animated.loop(
+          Animated.sequence([
+            Animated.timing(anim, {
+              toValue: 1,
+              duration: 2400,
+              easing: Easing.out(Easing.ease),
+              useNativeDriver: true,
+            }),
+            Animated.timing(anim, {
+              toValue: 0,
+              duration: 0,
+              useNativeDriver: true,
+            }),
+          ])
+        );
+        loopAnim.start();
+      };
+
+      if (initialDelay > 0) {
+        timeoutId = setTimeout(run, initialDelay);
+      } else {
+        run();
+      }
+
+      return () => {
+        if (timeoutId) clearTimeout(timeoutId);
+        if (loopAnim) loopAnim.stop();
+      };
+    };
+
+    const stopR1 = startRing(ring1, 0);
+    const stopR2 = startRing(ring2, 800);
+
+    // Mini radar
+    const mini = Animated.loop(
+      Animated.timing(miniPulse, {
+        toValue: 1,
+        duration: 2000,
+        easing: Easing.out(Easing.ease),
+        useNativeDriver: true,
+      })
+    );
+    mini.start();
+
+    return () => {
+      pulseAnim.stop();
+      stopR1();
+      stopR2();
+      mini.stop();
+    };
+  }, [orbScale, ring1, ring2, miniPulse]);
+
+  const renderOrbRing = (anim: Animated.Value) => {
+    const scale = anim.interpolate({
+      inputRange: [0, 1],
+      outputRange: [1, 1.7],
+    });
+    const opacity = anim.interpolate({
+      inputRange: [0, 0.4, 1],
+      outputRange: [0.45, 0.25, 0],
+    });
+
+    return (
+      <Animated.View
+        style={[
+          styles.orbRing,
+          {
+            transform: [{ scale }],
+            opacity,
+          },
+        ]}
+      />
+    );
+  };
+
+  const miniScale = miniPulse.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.8, 1.6],
+  });
+  const miniOpacity = miniPulse.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [0.6, 0.3, 0],
+  });
+
+  // Invites still waiting on an answer become action cards; the rest become the reply history
+  // that replaces the old placeholder "recent sessions" list for attendees.
+  const pendingInvites = invites.filter(i => i.status === 'pending');
+  const answeredInvites = invites.filter(i => i.status !== 'pending');
+  // Rooms this person agreed to host. Shown only in the presenter role: the card's whole purpose
+  // is the start-broadcasting shortcut, which is meaningless to an attendee.
+  //
+  // Excludes any assignment that is already live under this account, whether that is the room
+  // currently being broadcast (activePresence) or one the server-truth rejoin poll found open on
+  // another device (myActiveRooms) — otherwise a force-close/reopen while hosting an assigned
+  // room shows this "Start Broadcasting" card stacked on top of the "Already Hosting" rejoin
+  // card for the exact same room, offering two ways to do the same thing.
+  const sameRoom = (a?: string, b?: string) => Boolean(a) && Boolean(b) && a!.trim().toLowerCase() === b!.trim().toLowerCase();
+  const acceptedAssignments =
+    role === 'presenter'
+      ? invites.filter(i => {
+          if (i.inviteRole !== 'presenter' || i.status !== 'accepted' || !i.roomCode) return false;
+          const currentlyBroadcastingThis =
+            activePresence?.role === 'presenter' &&
+            sameRoom(activePresence.roomId, i.roomCode) &&
+            sameRoom(activePresence.sessionId, i.sessionId);
+          const alreadyLiveElsewhere = myActiveRooms.some(
+            r => sameRoom(r.roomId, i.roomCode!) && sameRoom(r.sessionId, i.sessionId)
+          );
+          return !currentlyBroadcastingThis && !alreadyLiveElsewhere;
+        })
+      : [];
+
+  // Held by id rather than by value so the sheet re-reads the invite from props — otherwise a
+  // changed reply would leave the open sheet showing the answer it had when it was opened.
+  const [openInviteId, setOpenInviteId] = useState<number | null>(null);
+  const openInvite = answeredInvites.find(i => i.id === openInviteId) ?? null;
+
+  return (
+    <ScrollView
+      style={[styles.container, { backgroundColor: colors.surf }]}
+      contentContainerStyle={styles.content}
+      showsVerticalScrollIndicator={false}
+    >
+      {/* Top Bar — XConnect branding + Live Connected badge */}
+      <View style={styles.topBar}>
+        <View style={styles.brandRow}>
+          <View style={styles.miniLogoBadge}>
+            {/* Reproduces assets/icon.svg's glyph (same viewBox/paths, scaled down) rather than
+                importing the .svg directly — Metro isn't configured with an SVG transformer, and
+                every other icon in this codebase is hand-authored react-native-svg JSX already. */}
+            <Svg width={20} height={20} viewBox="0 0 1024 1024">
+              <Path d="M 284 284 L 512 512 L 740 740" fill="none" stroke="#FFFFFF" strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
+              <Path d="M 740 284 L 512 512 L 284 740" fill="none" stroke={palette.mintPresence} strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
+              <Circle cx={284} cy={284} r={102} fill="#FFFFFF" />
+              <Circle cx={740} cy={740} r={102} fill="#FFFFFF" />
+              <Circle cx={740} cy={284} r={102} fill={palette.mintPresence} />
+              <Circle cx={284} cy={740} r={102} fill={palette.mintPresence} />
+              <Circle cx={512} cy={512} r={64} fill="#102A2A" />
+              <Circle cx={512} cy={512} r={24} fill="#FFFFFF" />
+            </Svg>
+          </View>
+          <Text style={[styles.brandTitle, { color: isDark ? '#FFFFFF' : '#0F2F2C' }]}>
+            Connect
+          </Text>
+        </View>
+
+        <View style={styles.connectedBadge}>
+          <View style={styles.liveGreenDot} />
+          <Text style={styles.connectedText}>
+            {serverConnected === false ? 'OFFLINE' : 'CONNECTED'}
+          </Text>
+        </View>
+      </View>
+
+      {/* Role indicator — read-only. Role is chosen at sign-in and fixed until sign-out, so this
+          states which mode the app is in rather than offering a switch. */}
+      <View style={[styles.roleBanner, { backgroundColor: isDark ? '#131C2E' : '#F1F5F9' }]}>
+        <Text style={[styles.roleBannerText, { color: palette.mintPresence }]}>
+          {role === 'attendee' ? 'ATTENDEE' : role === 'presenter' ? 'PRESENTER' : 'ADMIN'}
+        </Text>
+        <Text style={[styles.roleBannerHint, { color: colors.muted }]}>
+          Signed in as
+        </Text>
+      </View>
+
+      {/* Outstanding check-in invites, above everything else because they are the one thing on
+          this screen that is waiting on the person rather than the other way round. */}
+      {pendingInvites.map(invite => (
+        <InviteCard key={invite.id} invite={invite} onRespond={onRespondToInvite} />
+      ))}
+
+      {acceptedAssignments.map(invite => (
+        <AssignmentCard key={invite.id} invite={invite} onStart={onStartAssignedRoom} />
+      ))}
+
+      {/* Presence Core Orb — purely decorative status display, never interactive. The pulsing
+          rings scale up to 1.7x mid-animation (130px -> ~221px). orbBounds is sized to that max
+          extent with overflow:hidden, so the animation is physically clipped at its own box
+          instead of relying only on pointerEvents to stop it swallowing taps meant for the
+          controls around it — a future tweak to scale/opacity can't silently reopen that bug. */}
+      <View style={styles.orbSection} pointerEvents="none">
+        <View style={styles.orbBounds}>
+          <View style={styles.orbContainer}>
+            {renderOrbRing(ring1)}
+            {renderOrbRing(ring2)}
+
+            <Animated.View
+              style={[
+                styles.centerOrb,
+                {
+                  transform: [{ scale: orbScale }],
+                },
+              ]}
+            >
+              <Svg width={44} height={44} viewBox="0 0 44 44" fill="none">
+                <Path
+                  d="M8 8L36 36M36 8L8 36"
+                  stroke={palette.mintPresence}
+                  strokeWidth={5}
+                  strokeLinecap="round"
+                />
+                <Circle
+                  cx={22}
+                  cy={22}
+                  r={8}
+                  stroke={palette.skyMesh}
+                  strokeWidth={1.2}
+                  strokeDasharray="3 2"
+                  opacity={0.7}
+                />
+              </Svg>
+            </Animated.View>
+          </View>
+        </View>
+
+        <Text style={styles.orbStatusText}>Space Ready · 18ms</Text>
+      </View>
+
+      {/* Role Action Card */}
+      <View style={styles.actionCardSection}>
+        {role === 'attendee' && (
+          <View
+            style={[
+              styles.actionCard,
+              {
+                backgroundColor: colors.card,
+                borderColor: colors.border,
+              },
+            ]}
+          >
+            <View style={styles.cardHeaderRow}>
+              <View style={styles.radarIconBox}>
+                <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+                  <Circle cx={12} cy={12} r={3} fill="#0284C7" />
+                  <Circle
+                    cx={12}
+                    cy={12}
+                    r={7}
+                    stroke="#0284C7"
+                    strokeWidth={1.5}
+                    strokeDasharray="3 2"
+                    opacity={0.7}
+                  />
+                  <Circle
+                    cx={12}
+                    cy={12}
+                    r={11}
+                    stroke="#38BDF8"
+                    strokeWidth={1}
+                    strokeDasharray="2 3"
+                    opacity={0.4}
+                  />
+                </Svg>
+              </View>
+              <View>
+                <Text style={[styles.actionCardTitle, { color: colors.txt }]}>
+                  {activePresence?.role !== 'attendee'
+                    ? 'Find My Room'
+                    : activePresence.confirmed
+                    ? 'Still Checked In'
+                    : 'Looking for Your Room'}
+                </Text>
+                <Text style={[styles.actionCardSub, { color: colors.muted }]}>
+                  {activePresence?.role !== 'attendee'
+                    ? 'Zero-touch automatic detection'
+                    : activePresence.confirmed
+                    ? `Checked into ${activePresence.roomId}`
+                    : 'Detection running · no room verified yet'}
+                </Text>
+              </View>
+            </View>
+
+            {activePresence?.role === 'attendee' ? (
+              // Detection is already running in the background — resume the in-progress screen
+              // instead of offering Begin Detection again, which
+              // would restart it (see the comment on `activePresence` in App.tsx). Only claim a
+              // room when one is actually confirmed; otherwise this is still just scanning.
+              <TouchableOpacity
+                activeOpacity={0.85}
+                onPress={() =>
+                  onNavigate(activePresence.confirmed && hasDetectedRoom ? 'attendeeConfirmed' : 'attendeeDiscovery')
+                }
+                style={styles.primaryActionButton}
+              >
+                <Text style={styles.primaryActionText}>
+                  {activePresence.confirmed ? 'Go to Room' : 'View Detection'}
+                </Text>
+              </TouchableOpacity>
+            ) : (
+              <>
+                {/* Quad-Sensor Active Box */}
+                <View style={[styles.quadSensorBox, { backgroundColor: isDark ? '#162338' : '#F0F9FF' }]}>
+                  <View style={styles.miniRadarWrapper}>
+                    <Animated.View
+                      style={[
+                        styles.miniRadarPulse,
+                        {
+                          transform: [{ scale: miniScale }],
+                          opacity: miniOpacity,
+                        },
+                      ]}
+                    />
+                    <View style={styles.miniRadarCore}>
+                      <View style={styles.miniRadarDot} />
+                    </View>
+                  </View>
+                  <View>
+                    <Text style={styles.quadTitle}>Quad-sensor active</Text>
+                    <Text style={[styles.quadSub, { color: colors.muted }]}>
+                      BLE · Ultrasonic · Wi-Fi · IMU
+                    </Text>
+                  </View>
+                </View>
+
+                <TouchableOpacity
+                  activeOpacity={0.85}
+                  onPress={() => {
+                    onStartPresence();
+                    onNavigate('attendeeDiscovery');
+                  }}
+                  style={styles.primaryActionButton}
+                >
+                  <Text style={styles.primaryActionText}>Begin Detection</Text>
+                </TouchableOpacity>
+              </>
+            )}
+          </View>
+        )}
+
+        {role === 'presenter' && (
+          <View
+            style={[
+              styles.actionCard,
+              {
+                backgroundColor: colors.card,
+                borderColor: colors.border,
+              },
+            ]}
+          >
+            <View style={styles.cardHeaderRow}>
+              <View
+                style={[
+                  styles.radarIconBox,
+                  {
+                    backgroundColor: 'rgba(51,209,172,0.12)',
+                    borderColor: 'rgba(51,209,172,0.3)',
+                  },
+                ]}
+              >
+                <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+                  <Circle cx={12} cy={8} r={4} stroke="#33D1AC" strokeWidth={2} />
+                  <Path
+                    d="M4 20c0-4 3.6-7 8-7s8 3 8 7"
+                    stroke="#33D1AC"
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                  />
+                  <Path
+                    d="M19 8l2 2-2 2"
+                    stroke="#33D1AC"
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                  />
+                </Svg>
+              </View>
+              <View>
+                <Text style={[styles.actionCardTitle, { color: colors.txt }]}>
+                  {activePresence?.role === 'presenter'
+                    ? 'Currently Presenting'
+                    : myActiveRooms.length > 0
+                    ? 'Already Hosting'
+                    : 'Host / Anchor Room'}
+                </Text>
+                <Text style={[styles.actionCardSub, { color: colors.muted }]}>
+                  {activePresence?.role === 'presenter'
+                    ? `Broadcasting is running for ${activePresence.roomId}`
+                    : myActiveRooms.length > 0
+                    ? 'The server shows a room still open under your account'
+                    : 'Broadcast presence gate'}
+                </Text>
+              </View>
+            </View>
+
+            {activePresence?.role === 'presenter' ? (
+              // Broadcasting is already running in the background — jump back to the dashboard
+              // instead of offering Start Broadcasting again, which
+              // would interrupt and restart the live room (see `activePresence` in App.tsx).
+              <TouchableOpacity
+                activeOpacity={0.85}
+                onPress={() => onNavigate('presenterDashboard')}
+                style={styles.primaryActionButton}
+              >
+                <Text style={styles.primaryActionText}>Go to Dashboard</Text>
+              </TouchableOpacity>
+            ) : myActiveRooms.length > 0 ? (
+              // Server-truth check found a room this account is still presenting (possibly from
+              // another device, or before a force-close/reinstall) — offer to resume or end it
+              // instead of the normal room-selector, so a presenter can never abandon it by
+              // accident while starting a new one.
+              myActiveRooms.map(r => (
+                <View
+                  key={`${r.sessionId}::${r.roomId}`}
+                  style={[
+                    styles.hostedRoomCard,
+                    { backgroundColor: isDark ? '#162338' : '#F0F9FF', borderColor: colors.border },
+                  ]}
+                >
+                  <Text style={[styles.hostedRoomName, { color: colors.txt }]}>{r.roomId}</Text>
+                  <Text style={[styles.hostedRoomMeta, { color: colors.muted }]}>
+                    Session {r.sessionId} · {r.members?.length ?? r.estimatedMemberDeviceIds.length} live
+                  </Text>
+                  <View style={styles.hostedRoomButtonRow}>
+                    <TouchableOpacity
+                      activeOpacity={0.85}
+                      onPress={() => onRejoinMyRoom(r)}
+                      style={[styles.primaryActionButton, styles.hostedRoomButton]}
+                    >
+                      <Text style={styles.primaryActionText}>Rejoin as Host</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      activeOpacity={0.85}
+                      onPress={() => onEndMyRoom(r)}
+                      style={[styles.hostedRoomButton, styles.hostedRoomEndButton, { borderColor: colors.border }]}
+                    >
+                      <Text style={[styles.hostedRoomEndText, { color: colors.muted }]}>End Room</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))
+            ) : (
+              <>
+                {/* Room selector chips */}
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.roomChipsScroll}
+                >
+                  {rooms.map(r => (
+                    <TouchableOpacity
+                      key={r}
+                      onPress={() => onSelectRoom(r)}
+                      style={[
+                        styles.roomChip,
+                        {
+                          backgroundColor:
+                            selectedRoom === r
+                              ? 'rgba(51,209,172,0.15)'
+                              : isDark
+                              ? '#1A2638'
+                              : '#F1F5F9',
+                          borderColor:
+                            selectedRoom === r
+                              ? palette.mintPresence
+                              : colors.border,
+                        },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.roomChipText,
+                          {
+                            color:
+                              selectedRoom === r
+                                ? palette.mintPresence
+                                : colors.sub,
+                          },
+                        ]}
+                      >
+                        {r.toUpperCase()}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+
+                <TouchableOpacity
+                  activeOpacity={0.85}
+                  onPress={() => onNavigate('presenterSetup')}
+                  style={styles.primaryActionButton}
+                >
+                  <Text style={styles.primaryActionText}>Start Broadcasting</Text>
+                </TouchableOpacity>
+              </>
+            )}
+          </View>
+        )}
+
+        {role === 'admin' && (
+          <View
+            style={[
+              styles.actionCard,
+              {
+                backgroundColor: colors.card,
+                borderColor: colors.border,
+              },
+            ]}
+          >
+            <View style={styles.cardHeaderRow}>
+              <View
+                style={[
+                  styles.radarIconBox,
+                  {
+                    backgroundColor: 'rgba(245,158,11,0.12)',
+                    borderColor: 'rgba(245,158,11,0.3)',
+                  },
+                ]}
+              >
+                <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+                  <Rect
+                    x={3}
+                    y={3}
+                    width={8}
+                    height={8}
+                    rx={2}
+                    stroke={palette.amberWarn}
+                    strokeWidth={2}
+                  />
+                  <Rect
+                    x={13}
+                    y={3}
+                    width={8}
+                    height={8}
+                    rx={2}
+                    stroke={palette.amberWarn}
+                    strokeWidth={2}
+                  />
+                  <Rect
+                    x={3}
+                    y={13}
+                    width={8}
+                    height={8}
+                    rx={2}
+                    stroke={palette.amberWarn}
+                    strokeWidth={2}
+                  />
+                  <Rect
+                    x={13}
+                    y={13}
+                    width={8}
+                    height={8}
+                    rx={2}
+                    stroke={palette.amberWarn}
+                    strokeWidth={2}
+                  />
+                </Svg>
+              </View>
+              <View>
+                <Text style={[styles.actionCardTitle, { color: colors.txt }]}>
+                  Admin Multi-Room Matrix
+                </Text>
+                <Text style={[styles.actionCardSub, { color: colors.muted }]}>
+                  Live enterprise presence overview
+                </Text>
+              </View>
+            </View>
+
+            <TouchableOpacity
+              activeOpacity={0.85}
+              onPress={() => onNavigate('adminOverview')}
+              style={styles.primaryActionButton}
+            >
+              <Text style={styles.primaryActionText}>Open Admin Matrix</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </View>
+
+      {/* Attendees and presenters see what they replied to past invites. Admins get nothing
+          here: their past sessions are the History tab's job, with real data behind it. */}
+      {(role === 'attendee' || role === 'presenter') && (
+        <View style={styles.recentSection}>
+          <Text style={[styles.recentTitle, { color: colors.sub }]}>YOUR INVITE REPLIES</Text>
+
+          {answeredInvites.length === 0 ? (
+            <View
+              style={[
+                styles.inviteHistoryEmpty,
+                { backgroundColor: colors.card, borderColor: colors.border },
+              ]}
+            >
+              <Text style={[styles.inviteHistoryEmptyText, { color: colors.muted }]}>
+                {pendingInvites.length > 0
+                  ? 'Answer the invite above and your reply will be listed here.'
+                  : role === 'presenter'
+                  ? "You haven't been invited to host anything yet."
+                  : "You haven't been asked to check in to anything yet."}
+              </Text>
+            </View>
+          ) : (
+            answeredInvites.map(invite => {
+              const isHostingInvite = invite.inviteRole === 'presenter';
+              const isExpired = invite.status === 'expired';
+              const accepted = invite.status === 'accepted';
+              // Expired always means "never got an answer, and now it's too late" — the server
+              // only ever flips a still-pending invite to expired, so there is no prior reply to
+              // show or to let someone change. Muted grey rather than the accept/decline colors,
+              // and not tappable: opening the edit sheet would offer a "change your reply" action
+              // that the server will now refuse.
+              const tone = isExpired ? '#94A3B8' : accepted ? palette.mintPresence : palette.roseError;
+              // Wording follows the INVITE's own role, not the viewer's current role — a
+              // presenter account could in principle hold an old attendee-type reply too, and
+              // "GOING" would misdescribe an accepted room assignment.
+              const statusLabel = isExpired
+                ? 'EXPIRED'
+                : isHostingInvite
+                ? accepted
+                  ? 'HOSTING'
+                  : 'DECLINED'
+                : accepted
+                ? 'GOING'
+                : 'NOT GOING';
+              return (
+                <TouchableOpacity
+                  key={invite.id}
+                  activeOpacity={isExpired ? 1 : 0.8}
+                  disabled={isExpired}
+                  onPress={() => setOpenInviteId(invite.id)}
+                  style={[
+                    styles.inviteHistoryRow,
+                    { backgroundColor: colors.card, borderColor: colors.border },
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.inviteHistoryIcon,
+                      {
+                        backgroundColor: isExpired
+                          ? 'rgba(148,163,184,0.15)'
+                          : accepted
+                          ? 'rgba(51,209,172,0.15)'
+                          : 'rgba(239,68,68,0.15)',
+                      },
+                    ]}
+                  >
+                    <Svg width={14} height={14} viewBox="0 0 24 24" fill="none">
+                      {isExpired ? (
+                        <>
+                          <Circle cx={12} cy={12} r={9} stroke={tone} strokeWidth={2} />
+                          <Path d="M12 7v5l3 2" stroke={tone} strokeWidth={2} strokeLinecap="round" />
+                        </>
+                      ) : (
+                        <Path
+                          d={accepted ? 'M5 13l4 4L19 7' : 'M6 6l12 12M18 6L6 18'}
+                          stroke={tone}
+                          strokeWidth={2.5}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      )}
+                    </Svg>
+                  </View>
+
+                  <View style={styles.inviteHistoryBody}>
+                    <Text style={[styles.inviteHistorySession, { color: colors.txt }]} numberOfLines={1}>
+                      {/* A hosting invite is about the ROOM; the session is secondary context,
+                          same lead-with-the-room rule the pending InviteCard uses. */}
+                      {isHostingInvite
+                        ? `${(invite.roomCode ?? '').toUpperCase()} · ${invite.sessionId}`
+                        : invite.sessionId}
+                    </Text>
+                    {/* The event's own date/time is what the person actually cares about; when
+                        they happened to tap reply is only a fallback for invites with no
+                        schedule set. */}
+                    <Text style={[styles.inviteHistoryMeta, { color: colors.muted }]} numberOfLines={1}>
+                      {invite.eventAt
+                        ? formatEventWhen(invite.eventAt)
+                        : invite.respondedAt
+                        ? `Replied ${new Date(invite.respondedAt).toLocaleDateString()}`
+                        : 'Replied'}
+                    </Text>
+                    <Text style={[styles.inviteHistoryStatus, { color: tone }]}>{statusLabel}</Text>
+                  </View>
+
+                  {/* Nothing to change on an expired invite that was never answered — omitted
+                      rather than shown-but-disabled, since a pencil that does nothing invites a
+                      confused tap. */}
+                  {!isExpired && (
+                    <TouchableOpacity
+                      activeOpacity={0.7}
+                      onPress={() => setOpenInviteId(invite.id)}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                      style={[
+                        styles.inviteHistoryEditButton,
+                        { backgroundColor: colors.cardSecondary, borderColor: colors.border },
+                      ]}
+                    >
+                      <Svg width={15} height={15} viewBox="0 0 24 24" fill="none">
+                        <Path
+                          d="M4 20h4l10-10a2.1 2.1 0 0 0-3-3L5 17v3z"
+                          stroke={colors.sub}
+                          strokeWidth={2}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </Svg>
+                    </TouchableOpacity>
+                  )}
+                </TouchableOpacity>
+              );
+            })
+          )}
+        </View>
+      )}
+
+      <InviteDetailSheet
+        invite={openInvite}
+        onClose={() => setOpenInviteId(null)}
+        onRespond={onRespondToInvite}
+      />
+    </ScrollView>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+  content: {
+    paddingBottom: 28,
+  },
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: 14,
+    paddingBottom: 10,
+  },
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  miniLogoBadge: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: '#102A2A',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  brandTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: -0.3,
+  },
+  connectedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: 'rgba(51,209,172,0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(51,209,172,0.25)',
+  },
+  liveGreenDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: palette.mintPresence,
+  },
+  connectedText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: palette.mintPresence,
+    letterSpacing: 0.5,
+  },
+  roleBanner: {
+    flexDirection: 'row-reverse',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginHorizontal: 20,
+    marginTop: 6,
+    marginBottom: 10,
+    paddingVertical: 8,
+    borderRadius: 12,
+  },
+  roleBannerText: {
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  roleBannerHint: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  orbSection: {
+    alignItems: 'center',
+    paddingVertical: 14,
+  },
+  orbBounds: {
+    // Sized to the ring's max scaled extent (130 * 1.7 ~= 221px) so the pulse animation is
+    // clipped at this box no matter how its scale/opacity values change later.
+    width: 230,
+    height: 230,
+    borderRadius: 115,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  orbContainer: {
+    width: 130,
+    height: 130,
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  orbRing: {
+    position: 'absolute',
+    width: 130,
+    height: 130,
+    borderRadius: 65,
+    borderWidth: 1.5,
+    borderColor: 'rgba(51,209,172,0.3)',
+  },
+  centerOrb: {
+    width: 90,
+    height: 90,
+    borderRadius: 45,
+    backgroundColor: 'rgba(51,209,172,0.12)',
+    borderWidth: 2,
+    borderColor: 'rgba(51,209,172,0.4)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: palette.mintPresence,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.3,
+    shadowRadius: 15,
+    elevation: 4,
+  },
+  orbStatusText: {
+    marginTop: 10,
+    fontSize: 12,
+    fontWeight: '700',
+    color: palette.mintPresence,
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
+  actionCardSection: {
+    paddingHorizontal: 20,
+    marginTop: 4,
+  },
+  actionCard: {
+    borderRadius: 20,
+    borderWidth: 1,
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  cardHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 12,
+  },
+  radarIconBox: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: 'rgba(2,132,199,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(2,132,199,0.25)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  actionCardTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  actionCardSub: {
+    fontSize: 11,
+    marginTop: 1,
+  },
+  quadSensorBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 14,
+    gap: 10,
+    marginBottom: 14,
+  },
+  miniRadarWrapper: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  miniRadarPulse: {
+    position: 'absolute',
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(56,189,248,0.6)',
+  },
+  miniRadarCore: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: 'rgba(56,189,248,0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  miniRadarDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: palette.skyMesh,
+  },
+  quadTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#0284C7',
+  },
+  quadSub: {
+    fontSize: 11,
+    marginTop: 1,
+  },
+  roomChipsScroll: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingBottom: 12,
+  },
+  roomChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 999,
+    borderWidth: 1.5,
+  },
+  roomChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  primaryActionButton: {
+    backgroundColor: palette.mintPresence,
+    paddingVertical: 14,
+    borderRadius: 14,
+    alignItems: 'center',
+    shadowColor: palette.mintPresence,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  primaryActionText: {
+    color: '#0F2F2C',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  hostedRoomCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    padding: 14,
+    marginBottom: 14,
+  },
+  hostedRoomName: {
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  hostedRoomMeta: {
+    fontSize: 12,
+    marginTop: 2,
+    marginBottom: 12,
+  },
+  hostedRoomButtonRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  hostedRoomButton: {
+    flex: 1,
+    paddingVertical: 12,
+  },
+  hostedRoomEndButton: {
+    backgroundColor: 'transparent',
+    borderRadius: 14,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  hostedRoomEndText: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  recentSection: {
+    marginTop: 18,
+    paddingHorizontal: 20,
+  },
+  recentTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    marginBottom: 10,
+  },
+  inviteHistoryEmpty: {
+    borderRadius: 14,
+    borderWidth: 1.5,
+    padding: 16,
+    alignItems: 'center',
+  },
+  inviteHistoryEmptyText: {
+    fontSize: 12,
+    lineHeight: 18,
+    textAlign: 'center',
+  },
+  inviteHistoryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 8,
+  },
+  inviteHistoryIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  inviteHistoryBody: {
+    flex: 1,
+  },
+  inviteHistorySession: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  inviteHistoryMeta: {
+    fontSize: 11,
+    marginTop: 1,
+  },
+  inviteHistoryStatus: {
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+    marginTop: 4,
+  },
+  // Matches the display-name edit control on the Profile screen, so "tap the pencil to change
+  // this one thing" reads the same way in both places.
+  inviteHistoryEditButton: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+});

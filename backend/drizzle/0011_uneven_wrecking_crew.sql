@@ -1,0 +1,1 @@
+ALTER TABLE "room_membership" ADD COLUMN "avg_confidence" real;

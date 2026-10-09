@@ -1,80 +1,237 @@
-import { registerRootComponent } from "expo";
-import { StatusBar } from "expo-status-bar";
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
-  Alert,
-  Button,
-  KeyboardAvoidingView,
   Platform,
   SafeAreaView,
-  ScrollView,
+  StatusBar,
   StyleSheet,
-  Switch,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View
-} from "react-native";
-import type { ParticipantRole, RoomMemberInfo } from "@confpresence/shared";
-import { PresenceService, type PresenceStatus } from "./src/services/presenceService";
-import { getOrCreateDeviceId } from "./src/services/deviceIdentity";
-import { AppLogger } from "./src/services/appLogger";
-import { LogsModal } from "./src/components/LogsModal";
-import { AdminScreen } from "./src/screens/AdminScreen";
+  View,
+} from 'react-native';
+import { registerRootComponent } from 'expo';
+import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
+import * as SecureStore from 'expo-secure-store';
+import type { ParticipantRole, RoomMemberInfo, LiveRoomState, MyInvite } from '@confpresence/shared';
+import { getAcousticTokenForRoom } from '@confpresence/shared';
+import { PresenceService, RoomRejectedError, type PresenceStatus } from './src/services/presenceService';
+import { getOrCreateDeviceId } from './src/services/deviceIdentity';
+import { authConfigured, authFetch, signOut, useAuthSession } from './src/services/auth';
+import { registerForPushNotifications } from './src/services/pushNotifications';
+import type { HistoryDetail, SessionOccurrence } from './src/services/sessionHistory';
+import { ThemeProvider, useTheme } from './src/theme/useTheme';
+import { BottomNav, MobileScreen, Role } from './src/components/navigation/BottomNav';
+import { DevScreenSwitcher } from './src/components/navigation/DevScreenSwitcher';
+import { AppAlert, AppAlertHost } from './src/components/ui/AppAlert';
+import { BusyOverlay } from './src/components/ui/BusyOverlay';
+import { AdminOnlyNotice } from './src/components/ui/AdminOnlyNotice';
 
-const DEFAULT_SESSION = "poc-session";
-const DEFAULT_ROOMS = ["room-a", "room-b", "auditorium"];
-const CLOUD_API_URL = "https://xconnect-ytoj.onrender.com";
-const LOCAL_API_URL = "http://192.168.0.201:3000";
+// Screens
+import { LaunchScreen } from './src/screens/auth/LaunchScreen';
+import { OnboardingScreen } from './src/screens/auth/OnboardingScreen';
+import { PermissionsScreen } from './src/screens/auth/PermissionsScreen';
+import { LoginScreen } from './src/screens/auth/LoginScreen';
+import { CreateAccountScreen } from './src/screens/auth/CreateAccountScreen';
+import { HomeScreen } from './src/screens/common/HomeScreen';
+import { ProfileScreen } from './src/screens/common/ProfileScreen';
+import { PresenterSetupScreen } from './src/screens/presenter/PresenterSetupScreen';
+import { PresenterDashboardScreen } from './src/screens/presenter/PresenterDashboardScreen';
+import { PresenterRosterScreen } from './src/screens/presenter/PresenterRosterScreen';
+import { SessionEndScreen } from './src/screens/presenter/SessionEndScreen';
+import { AttendeeDiscoveryScreen } from './src/screens/attendee/AttendeeDiscoveryScreen';
+import { AttendeeConfirmedScreen } from './src/screens/attendee/AttendeeConfirmedScreen';
+import { NotCheckedInScreen } from './src/screens/attendee/NotCheckedInScreen';
+import { AttendeeOutOfRangeScreen } from './src/screens/attendee/AttendeeOutOfRangeScreen';
+import { AdminOverviewScreen } from './src/screens/admin/AdminOverviewScreen';
+import { AdminRoomDetailScreen } from './src/screens/admin/AdminRoomDetailScreen';
+import { AdminHistoryScreen } from './src/screens/admin/AdminHistoryScreen';
+import { AdminNotifyScreen } from './src/screens/admin/AdminNotifyScreen';
+import { AdminCheckInScreen, type InviteRoster, type InviteSendResult } from './src/screens/admin/AdminCheckInScreen';
+import { DiagnosticsScreen } from './src/screens/admin/DiagnosticsScreen';
+import { EdgeStateScreen } from './src/screens/admin/EdgeStateScreen';
 
-export default function App() {
-  const [role, setRole] = useState<ParticipantRole>("attendee");
+const DEFAULT_SESSION = 'poc-session';
+const DEFAULT_ROOMS = ['Hall A', 'Workshop 1', 'Auditorium', 'Room B'];
+const CLOUD_API_URL = 'https://xconnect-ytoj.onrender.com';
+const LOCAL_API_URL = 'http://192.168.0.201:3000';
+const SESSION_ID_KEY = 'xconnect.sessionId_v1';
+const ROLE_KEY = 'xconnect.role_v1';
+
+/** An explicit role/room/session override for togglePresence, bypassing whatever's currently
+ * selected in state — used when joining a specific detected/rejoined room directly. */
+type ActiveSessionSnapshot = {
+  role: ParticipantRole;
+  roomId: string;
+  sessionId: string;
+  updatedAt: number;
+};
+
+/** Turns an admin endpoint's failure into something an admin can act on. 403 is the common one
+ * (signed in, but not an admin account); 503 is the server telling us history needs Postgres,
+ * which its own `error` string already explains better than a status code would. */
+/** Room codes are free-typed text throughout this app ("Hall A" vs "hall a"), so anywhere two
+ * room names are compared for identity, whitespace and case must not cause a false mismatch. */
+function sameRoomName(a?: string, b?: string): boolean {
+  return Boolean(a) && Boolean(b) && a!.trim().toLowerCase() === b!.trim().toLowerCase();
+}
+
+/** Wraps AppAlert's callback-style buttons in a Promise, so a caller can `await` the person's
+ * choice instead of continuing inside an onPress handler. Resolves false for either button
+ * styled "cancel" and for the hardware back button (AppAlert only dismisses on backdrop tap when
+ * a cancel button exists, and routes that tap through the cancel button itself). */
+function confirmAsync(title: string, message: string, confirmLabel: string): Promise<boolean> {
+  return new Promise(resolve => {
+    AppAlert.alert(title, message, [
+      { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+      { text: confirmLabel, style: 'destructive', onPress: () => resolve(true) },
+    ]);
+  });
+}
+
+function describeAdminError(status: number, data: any): string {
+  if (status === 403) return 'This account is not an admin.';
+  if (typeof data?.error === 'string') return data.error;
+  return data?.error ? JSON.stringify(data.error) : `Server returned ${status}`;
+}
+
+const NAV_SCREENS: MobileScreen[] = [
+  'home',
+  'profile',
+  'presenterSetup',
+  'presenterDashboard',
+  'presenterRoster',
+  'sessionEnd',
+  'attendeeDiscovery',
+  'attendeeConfirmed',
+  'attendeeOutOfRange',
+  'adminOverview',
+  'adminRoomDetail',
+  'adminHistory',
+  'adminNotify',
+  'adminCheckIn',
+  'diagnostics',
+  'edgeState',
+];
+
+function MainApp() {
+  const { colors, theme, hasOnboarded, markOnboarded } = useTheme();
+  const isDark = theme === 'dark';
+
+  // Navigation State
+  const [screen, setScreen] = useState<MobileScreen>('launch');
+  const [role, setRole] = useState<Role>('attendee');
+  const [selectedAdminRoom, setSelectedAdminRoom] = useState<LiveRoomState | null>(null);
+  const [adminRooms, setAdminRooms] = useState<LiveRoomState[]>([]);
+  const [adminError, setAdminError] = useState<string | null>(null);
+  // Running max of members.length seen per room across admin polls this session — the server
+  // doesn't track a peak, so this is a real (if session-scoped, not lifetime) observed high.
+  const [adminRoomPeaks, setAdminRoomPeaks] = useState<Record<string, number>>({});
+  // Server-truth check for "do I already have a room open anywhere" — drives the presenter
+  // Home screen's Rejoin/End card instead of the old local-device rejoin snapshot.
+  const [myActiveRooms, setMyActiveRooms] = useState<LiveRoomState[]>([]);
+  // Check-in invites addressed to this account that haven't been answered yet.
+  const [myInvites, setMyInvites] = useState<MyInvite[]>([]);
+  // What's actually running right now, independent of the currently-selected role tab — see the
+  // comment in togglePresence for why this needs to be tracked separately from `role`.
+  const [activePresence, setActivePresence] = useState<{
+    role: ParticipantRole;
+    roomId: string;
+    sessionId: string;
+    /**
+     * Attendee only: whether a room has actually been verified, as opposed to merely scanning for
+     * one. Starting detection is NOT the same as being in a room — without this distinction the
+     * "My Activity" tab treats "scanning began" as "confirmed present" and renders a dwell-time
+     * counter against whatever stale roomId happened to be in state. Always true for a presenter,
+     * where starting to broadcast genuinely is being live.
+     */
+    confirmed: boolean;
+  } | null>(null);
+  // Drives the "My Activity" tab when not actively attending: 'checking' while asking the server
+  // for a still-live membership within its grace window, 'empty' once confirmed there isn't one.
+  // ('resumed' isn't tracked separately — a successful check calls togglePresence, which flips
+  // activePresence.role to 'attendee' and the normal confirmed screen takes over from there.)
+  const [attendeeCheckState, setAttendeeCheckState] = useState<'checking' | 'empty'>('checking');
+  // True only while a stop is in flight. service.stop() now awaits the leave request, so this is
+  // a real wait the user would otherwise see as an unresponsive tap.
+  const [stopping, setStopping] = useState(false);
+  // Whether the signed-in account is actually an admin, per the server. null = not known yet
+  // (offline, or the first /api/me hasn't landed), which is treated as "don't block" so a slow
+  // network never locks a real admin out of their own screens. The server enforces this for
+  // real via requireAdmin; this only stops the UI offering screens that would 403.
+  const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
+
+  // Mirrors of state that the 3s polling callback needs to read. They are refs, not dependencies,
+  // because putting `screen` or `activePresence` in fetchLiveRoom's dep array would rebuild the
+  // callback (and tear down and restart the interval) on every navigation and every presence
+  // change — turning a steady 3s poll into a burst of requests.
+  const screenRef = useRef<MobileScreen>('launch');
+  const activePresenceRef = useRef<typeof activePresence>(null);
+
+  // Backend & Session State
   const [sessionId, setSessionId] = useState(DEFAULT_SESSION);
-  const [serverEnv, setServerEnv] = useState<"cloud" | "local" | "custom">("cloud");
+  const [serverEnv, setServerEnv] = useState<'cloud' | 'local' | 'custom'>('cloud');
   const [serverUrl, setServerUrl] = useState(CLOUD_API_URL);
-  const [serverHealth, setServerHealth] = useState<"checking" | "online" | "offline">("checking");
-  const [showServerConfig, setShowServerConfig] = useState(false);
-  const [displayName, setDisplayName] = useState("");
+  const [serverHealth, setServerHealth] = useState<'checking' | 'online' | 'offline'>('checking');
+  const [serverConnected, setServerConnected] = useState<boolean | null>(null);
+  const [displayName, setDisplayName] = useState('');
   const [rooms, setRooms] = useState<string[]>(DEFAULT_ROOMS);
-  const [roomId, setRoomId] = useState("room-a");
-  const [detectedRoom, setDetectedRoom] = useState("");
-  const [newRoomText, setNewRoomText] = useState("");
-  const [showAddRoom, setShowAddRoom] = useState(false);
-  const [deviceId, setDeviceId] = useState("");
-  const [status, setStatus] = useState<PresenceStatus>({ state: "idle", peerCount: 0 });
+  const [roomId, setRoomId] = useState('Hall A');
+  // Detection OUTPUTS — written only from what the server reports this device's sensors matched,
+  // never from local input. The attendee counterpart to the presenter-authored roomId/sessionId
+  // above: an attendee is told which room (and which session it belongs to) it's physically in,
+  // rather than asserting either, so there is no stale local claim to leak into a join.
+  const [detectedRoom, setDetectedRoom] = useState('');
+  const [detectedSession, setDetectedSession] = useState('');
+  const [deviceId, setDeviceId] = useState('');
   const [running, setRunning] = useState(false);
   const runningRef = useRef(false);
+  const [status, setStatus] = useState<PresenceStatus>({ state: 'idle', peerCount: 0 });
   const [roomMembers, setRoomMembers] = useState<RoomMemberInfo[]>([]);
-  const [serverConnected, setServerConnected] = useState<boolean | null>(null);
-  const [isAutoDetecting, setIsAutoDetecting] = useState(false);
-  const [showLogs, setShowLogs] = useState(false);
-  const [logCount, setLogCount] = useState(0);
-  const [view, setView] = useState<"main" | "admin">("main");
+  const [sessionStartTime, setSessionStartTime] = useState<number>(Date.now());
+  const [sessionDurationMs, setSessionDurationMs] = useState<number>(0);
+  // Frozen at the moment presenting stops, same reason sessionDurationMs is: the "3-Second Live
+  // Polling Interval" effect wipes roomMembers to [] as soon as running flips false, and
+  // SessionEndScreen's summary (attendee count, acoustic/wifi match %) is computed from
+  // roomMembers live at render time — without a snapshot, the report would show correct numbers
+  // for one paint and then collapse to zero as that cleanup effect lands.
+  const [sessionEndMembers, setSessionEndMembers] = useState<RoomMemberInfo[]>([]);
 
-  useEffect(() => {
-    return AppLogger.subscribe((logs) => {
-      setLogCount(logs.length);
-    });
+  // Auth Hook
+  const { session: authSession, ready: authReady } = useAuthSession();
+  const signedIn = Boolean(authSession);
+  const savedNameRef = useRef('');
+
+  const nav = useCallback((s: MobileScreen) => {
+    // Kept in step here rather than in an effect, so a poll firing in the same tick as a
+    // navigation reads where we are going, not where we were.
+    screenRef.current = s;
+    setScreen(s);
   }, []);
 
-  const service = useMemo(() => new PresenceService(setStatus), []);
+  useEffect(() => {
+    activePresenceRef.current = activePresence;
+  }, [activePresence]);
 
+  const roomRejectedRef = useRef<(message: string) => void>(() => {});
+  const service = useMemo(
+    () => new PresenceService(setStatus, message => roomRejectedRef.current(message)),
+    []
+  );
+
+  // Health check
   const checkHealth = async (url: string) => {
-    setServerHealth("checking");
+    setServerHealth('checking');
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 2500);
       const res = await fetch(`${url}/health`, { signal: controller.signal });
       clearTimeout(timer);
       if (res.ok) {
-        setServerHealth("online");
+        setServerHealth('online');
         setServerConnected(true);
       } else {
-        setServerHealth("offline");
+        setServerHealth('offline');
         setServerConnected(false);
       }
     } catch {
-      setServerHealth("offline");
+      setServerHealth('offline');
       setServerConnected(false);
     }
   };
@@ -88,28 +245,295 @@ export default function App() {
     };
   }, [service]);
 
-  const fetchLiveRoom = async () => {
+  // Persist sessionId across app restarts, same pattern as deviceId — without this, reopening
+  // the app after a force-quit always resets to DEFAULT_SESSION, so a server-truth "am I still
+  // present" check (the attendee resume check below, and the presenter rejoin poll) would query
+  // the wrong session label for anyone using a non-default one and wrongly report nothing found.
+  const sessionIdLoadedRef = useRef(false);
+  useEffect(() => {
+    SecureStore.getItemAsync(SESSION_ID_KEY)
+      .then(stored => {
+        if (stored) setSessionId(stored);
+      })
+      .catch(() => {
+        // No stored value (or read failed) — keep the DEFAULT_SESSION default.
+      })
+      .finally(() => {
+        sessionIdLoadedRef.current = true;
+      });
+  }, []);
+
+  useEffect(() => {
+    // Skip the very first write: without this, the initial DEFAULT_SESSION render would
+    // overwrite a real stored value in the instant before the load above resolves.
+    if (!sessionIdLoadedRef.current) return;
+    void SecureStore.setItemAsync(SESSION_ID_KEY, sessionId).catch(() => {
+      // Best-effort: worst case, this doesn't survive the next restart.
+    });
+  }, [sessionId]);
+
+  // Role is chosen once at sign-in and fixed for the life of the session, so it has to survive a
+  // restart the same way sessionId does — otherwise force-quitting the app silently demotes a
+  // presenter or admin to attendee with no way back short of signing out again.
+  const roleLoadedRef = useRef(false);
+  useEffect(() => {
+    SecureStore.getItemAsync(ROLE_KEY)
+      .then(stored => {
+        if (stored === 'attendee' || stored === 'presenter' || stored === 'admin') setRole(stored);
+      })
+      .catch(() => {
+        // No stored value (or read failed) — keep the attendee default.
+      })
+      .finally(() => {
+        roleLoadedRef.current = true;
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!roleLoadedRef.current) return;
+    void SecureStore.setItemAsync(ROLE_KEY, role).catch(() => {
+      // Best-effort: worst case, this doesn't survive the next restart.
+    });
+  }, [role]);
+
+  // Sync Preferred Name
+  useEffect(() => {
+    if (!signedIn) return;
+    let cancelled = false;
+    const fallback = authSession?.name ?? '';
+    authFetch(`${serverUrl}/api/me`)
+      .then(res => res.json())
+      .then(me => {
+        if (cancelled) return;
+        const name = me?.name ?? fallback;
+        savedNameRef.current = name;
+        setDisplayName(name);
+        // Same response already carries it, so this costs no extra request. With sign-in turned
+        // off entirely the server reports isAdmin: true, keeping POC mode open.
+        setIsAdmin(typeof me?.isAdmin === 'boolean' ? me.isAdmin : null);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        savedNameRef.current = fallback;
+        setDisplayName(fallback);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [signedIn, serverUrl, authSession]);
+
+  // Registers this device for push notifications once signed in. Re-runs on serverUrl change
+  // too, since registration is a POST to that specific server, same as every other API call here.
+  useEffect(() => {
+    if (!signedIn) return;
+    void registerForPushNotifications(serverUrl);
+  }, [signedIn, serverUrl]);
+
+  const saveDisplayName = async (newName: string) => {
+    try {
+      const res = await authFetch(`${serverUrl}/api/me`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ preferredName: newName.trim() }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok) {
+        savedNameRef.current = data?.name ?? newName.trim();
+        setDisplayName(savedNameRef.current);
+      }
+    } catch (err: any) {
+      throw new Error(err?.message || 'Network error');
+    }
+  };
+
+  // Switch server environment
+  const handleSelectServerEnv = (env: 'cloud' | 'local' | 'custom', customUrl?: string) => {
+    setServerEnv(env);
+    const newUrl = env === 'cloud' ? CLOUD_API_URL : env === 'local' ? LOCAL_API_URL : (customUrl || CLOUD_API_URL);
+    setServerUrl(newUrl);
+    checkHealth(newUrl);
+  };
+
+  // Toggle Presence Engine. Returns whether it actually succeeded, so a caller that navigates on
+  // "start broadcasting" (e.g. PresenterSetupScreen) can wait for that before moving to the
+  // dashboard, instead of navigating optimistically and ending up there even when the server
+  // rejected the join (room already has a presenter) and never actually started anything.
+  /**
+   * Set whenever presence stops for a reason the user caused or saw (tapping Leave, ending a
+   * room, being told the room ended). The attendee resume check below must not fire after one of
+   * those: stopping flips `running`, which re-runs that effect, and it would ask the server "am I
+   * still live?" while the leave request it races is still in flight — getting "yes" and putting
+   * the person straight back into the room they just left. Cleared on the next deliberate start.
+   * A ref, not state, so it never triggers a render, and it resets on reload, which is correct:
+   * a fresh launch inside the grace window SHOULD still resume.
+   */
+  const stoppedDeliberatelyRef = useRef(false);
+
+  const togglePresence = async (overrideRunning?: boolean, explicitSnapshot?: ActiveSessionSnapshot): Promise<boolean> => {
+    const targetRunning = overrideRunning ?? !runningRef.current;
+    if (targetRunning) {
+      try {
+        const activeRole = (explicitSnapshot?.role ?? role) as ParticipantRole;
+        // roomId/sessionId are PRESENTER-authored config (the room chips, the custom room field,
+        // the Session Identifier input). An attendee must never assert them as its own: those
+        // values are whatever a previous presenter session or a default left behind, and claiming
+        // them tells the server this device belongs to a room it knows nothing about. An attendee
+        // only ever asserts a room it was explicitly handed via an already-detected snapshot.
+        const isScanningStart = activeRole === 'attendee' && !explicitSnapshot;
+        const activeRoom = explicitSnapshot?.roomId ?? (isScanningStart ? undefined : roomId);
+        const activeSession = explicitSnapshot?.sessionId ?? sessionId;
+
+        setSessionStartTime(Date.now());
+        // A fresh attendee detection must start from a clean slate — detection results are only
+        // ever cleared on STOP, not on start, so without this a stale result from an earlier
+        // detection this app session would show up instantly as already-detected the moment Begin
+        // Detection is tapped, before any real scanning happens.
+        if (isScanningStart) {
+          setDetectedRoom('');
+          setDetectedSession('');
+          setRoomMembers([]);
+        }
+
+        // Close out any OTHER room this account is still presenting before starting this one.
+        // presenceService.start() already leaves a room this device thinks it's running — but
+        // that local "am I running" flag resets on every fresh app process, so it does nothing
+        // after a force-close: the old room's device record is simply abandoned, live on the
+        // server (and visible to attendees/admin) until its 15-minute auto-expiry. Asking the
+        // server directly closes that gap regardless of what this device remembers.
+        if (activeRole === 'presenter') {
+          try {
+            const res = await authFetch(`${serverUrl}/api/me/active-rooms`);
+            if (res.ok) {
+              const data = await res.json().catch(() => null);
+              const liveElsewhere: LiveRoomState[] = (Array.isArray(data?.rooms) ? data.rooms : []).filter(
+                (r: LiveRoomState) => !(sameRoomName(r.roomId, activeRoom) && sameRoomName(r.sessionId, activeSession))
+              );
+              if (liveElsewhere.length > 0) {
+                // A found room might genuinely still have people in it — closing it is a real
+                // action, not housekeeping, so it's confirmed rather than done silently. Naming
+                // each room and its live attendee count so the choice is informed, not a guess.
+                const roomList = liveElsewhere
+                  .map(r => {
+                    const attendeeCount = (r.members ?? []).filter(m => m.role === 'attendee').length;
+                    return `${r.roomId.toUpperCase()} (${attendeeCount} attendee${attendeeCount === 1 ? '' : 's'})`;
+                  })
+                  .join(', ');
+                const proceed = await confirmAsync(
+                  'Still Hosting Another Room',
+                  `You're still hosting ${roomList}. Starting ${activeRoom?.toUpperCase()} will end ${
+                    liveElsewhere.length === 1 ? 'it' : 'them'
+                  } and disconnect anyone still there.`,
+                  `End & Start ${activeRoom?.toUpperCase()}`
+                );
+                if (!proceed) return false;
+                await Promise.all(
+                  liveElsewhere.map(r =>
+                    authFetch(`${serverUrl}/api/me/rooms/end`, {
+                      method: 'POST',
+                      headers: { 'content-type': 'application/json' },
+                      body: JSON.stringify({ sessionId: r.sessionId, roomId: r.roomId }),
+                    }).catch(() => {})
+                  )
+                );
+              }
+            }
+          } catch {
+            // Offline or unreachable — proceed with starting the new room regardless; there's
+            // nothing actionable to confirm if the check itself couldn't be made.
+          }
+        }
+
+        await service.start({
+          role: activeRole,
+          roomId: activeRoom,
+          sessionId: activeSession,
+          displayName: displayName || 'Participant',
+          deviceId: deviceId || (await getOrCreateDeviceId()),
+          apiUrl: serverUrl,
+        });
+
+        runningRef.current = true;
+        setRunning(true);
+        // A deliberate start re-arms the resume check for the next stop.
+        stoppedDeliberatelyRef.current = false;
+        // Snapshot of what's ACTUALLY running, independent of whatever role tab you switch to
+        // afterward — switching the tab only changes `role`, it doesn't stop this session, so
+        // Home needs a way to know "you're still presenting/attending" no matter which tab it's
+        // showing right now, instead of misleadingly offering Start Broadcasting / Begin Detection
+        // again (which would interrupt and restart the live session).
+        setActivePresence({
+          role: activeRole,
+          // Empty while merely scanning — there is no room yet, and `confirmed` below is what
+          // gates every reader of this field.
+          roomId: activeRoom ?? '',
+          sessionId: activeSession,
+          // An explicit snapshot means a specific room was already established — Verify & Enter on
+          // a server-detected room, or the resume check finding a still-live membership. A bare
+          // attendee start is just "scanning began", with no room confirmed yet.
+          confirmed: activeRole === 'presenter' || Boolean(explicitSnapshot),
+        });
+        return true;
+      } catch (err: any) {
+        AppAlert.alert('Session Error', err?.message || 'Could not initiate presence service');
+        return false;
+      }
+    } else {
+      setSessionDurationMs(Date.now() - sessionStartTime);
+      setSessionEndMembers(roomMembers);
+      runningRef.current = false;
+      setRunning(false);
+      setActivePresence(null);
+      stoppedDeliberatelyRef.current = true;
+      // Cleared here as well as by the poll: setRunning(false) un-gates the myActiveRooms poll
+      // immediately, so without this the list shows the just-ended room until the next poll
+      // returns. service.stop() now awaits the leave, so this is presentation, not a race fix.
+      setMyActiveRooms([]);
+      setStopping(true);
+      try {
+        // Awaited all the way to the server's acknowledgement (or a 4s timeout), so by the time
+        // this resolves nothing can observe this device as still being in the room.
+        await service.stop();
+      } finally {
+        setStopping(false);
+      }
+      return true;
+    }
+  };
+
+  // Real-Time Live Room & Headcount Polling
+  const fetchLiveRoom = useCallback(async () => {
     if (!runningRef.current) return;
 
     try {
+      const effDeviceId = deviceId || (await getOrCreateDeviceId());
       const url =
-        role === "presenter"
-          ? `${serverUrl}/api/rooms/${roomId}/live?sessionId=${sessionId}`
-          : `${serverUrl}/api/devices/${deviceId}/live?sessionId=${sessionId}`;
+        role === 'presenter'
+          ? `${serverUrl}/api/rooms/${encodeURIComponent(roomId)}/live?sessionId=${encodeURIComponent(sessionId)}&deviceId=${encodeURIComponent(effDeviceId)}`
+          : `${serverUrl}/api/devices/${encodeURIComponent(effDeviceId)}/live?sessionId=${encodeURIComponent(sessionId)}`;
 
-      const res = await fetch(url);
+      const res = await authFetch(url);
       if (!runningRef.current) return;
 
       if (res.ok) {
         setServerConnected(true);
-        setServerHealth("online");
+        setServerHealth('online');
         const data = await res.json();
         if (!runningRef.current) return;
 
-        if (data.roomId && data.roomId !== "unknown") {
+        // Session was ended
+        if (data.roomEnded === true) {
+          void togglePresence(false);
+          nav('home');
+          AppAlert.alert('Room ended', 'This session has ended.');
+          return;
+        }
+
+        // The detection response carries the matched room's OWN session label, which is how an
+        // attendee learns a session code it has no other way to know. Capture both together —
+        // confirming a detection has to declare the pair, or the join lands under the wrong label.
+        if (data.roomId && data.roomId !== 'unknown') {
           setDetectedRoom(data.roomId);
-        } else {
-          setDetectedRoom("");
+          if (data.sessionId) setDetectedSession(data.sessionId);
         }
 
         let fetchedMembers: RoomMemberInfo[] = [];
@@ -119,916 +543,970 @@ export default function App() {
           fetchedMembers = data.estimatedMemberDeviceIds.map((id: string) => ({
             deviceId: id,
             displayName: id,
-            role: "attendee"
+            role: 'attendee',
           }));
         }
 
-        // Optimistic Host Inclusion for Presenter
-        if (role === "presenter") {
-          const hasMe = fetchedMembers.some((m) => m.deviceId === deviceId);
-          if (!hasMe) {
+        // Host inclusion for presenter
+        if (role === 'presenter') {
+          const hasHost = fetchedMembers.some(m => m.deviceId === effDeviceId);
+          if (!hasHost) {
             fetchedMembers.unshift({
-              deviceId,
-              displayName: displayName.trim() || deviceId,
-              role: "presenter",
-              confidence: 1.0
+              deviceId: effDeviceId,
+              displayName: displayName.trim() || 'Host',
+              role: 'presenter',
+              confidence: 1.0,
+              durationMs: Date.now() - sessionStartTime,
             });
           }
         }
 
-        if (runningRef.current) {
-          setRoomMembers(fetchedMembers);
+        setRoomMembers(fetchedMembers);
+
+        // Range tracking for a confirmed attendee. The server is the judge: it already holds a
+        // membership open for ROOM_MEMBERSHIP_GRACE_MS after a device stops reporting, so a
+        // momentary BLE dropout does not reach this code. Dropping out of `members` therefore
+        // means genuinely out of range, not a flicker, and no extra debounce is needed here.
+        if (activePresenceRef.current?.role === 'attendee' && activePresenceRef.current.confirmed) {
+          const stillInRoom = fetchedMembers.some(m => m.deviceId === effDeviceId);
+          if (!stillInRoom && screenRef.current === 'attendeeConfirmed') {
+            nav('attendeeOutOfRange');
+          } else if (stillInRoom && screenRef.current === 'attendeeOutOfRange') {
+            // Walked back in — return them without making them tap anything.
+            nav('attendeeConfirmed');
+          }
         }
       } else {
-        if (!runningRef.current) return;
         setServerConnected(false);
-        setServerHealth("offline");
-        if (role === "presenter") {
-          setRoomMembers([{
-            deviceId,
-            displayName: displayName.trim() || deviceId,
-            role: "presenter",
-            confidence: 1.0
-          }]);
-        }
+        setServerHealth('offline');
       }
     } catch {
-      if (!runningRef.current) return;
-      setServerConnected(false);
-      setServerHealth("offline");
-      if (role === "presenter") {
-        setRoomMembers([{
-          deviceId,
-          displayName: displayName.trim() || deviceId,
-          role: "presenter",
-          confidence: 1.0
-        }]);
+      if (runningRef.current) {
+        setServerConnected(false);
+        setServerHealth('offline');
       }
     }
-  };
+  }, [role, roomId, sessionId, serverUrl, deviceId, displayName, sessionStartTime, nav]);
 
+  // 3-Second Live Polling Interval
   useEffect(() => {
     if (!running) {
       runningRef.current = false;
       setRoomMembers([]);
-      setDetectedRoom("");
-      setServerConnected(null);
+      setDetectedRoom('');
+      setDetectedSession('');
       return;
     }
 
     runningRef.current = true;
-    if (role === "presenter" && deviceId) {
-      setRoomMembers([{
-        deviceId,
-        displayName: displayName.trim() || deviceId,
-        role: "presenter",
-        confidence: 1.0
-      }]);
-    }
-    fetchLiveRoom();
-    const interval = setInterval(() => fetchLiveRoom(), 3000);
-    return () => clearInterval(interval);
-  }, [running, role, roomId, sessionId, serverUrl, deviceId]);
-
-  const togglePresence = async (enabled: boolean) => {
-    runningRef.current = enabled;
-    setRunning(enabled);
-    try {
-      if (enabled) {
-        await service.start({
-          sessionId,
-          roomId: role === "presenter" ? roomId : undefined,
-          role,
+    if (role === 'presenter' && deviceId) {
+      setRoomMembers([
+        {
           deviceId,
-          displayName: displayName.trim() || undefined,
-          apiUrl: serverUrl
-        });
-      } else {
-        await service.stop();
-        setRoomMembers([]);
-        setDetectedRoom("");
-        setServerConnected(null);
-      }
-    } catch (error) {
-      runningRef.current = false;
-      setRunning(false);
-      setRoomMembers([]);
-      setDetectedRoom("");
-      setServerConnected(null);
-      Alert.alert("Unable to start BLE", error instanceof Error ? error.message : "Unknown BLE error");
+          displayName: displayName.trim() || 'Host',
+          role: 'presenter',
+          confidence: 1.0,
+          durationMs: 0,
+        },
+      ]);
     }
-  };
 
-  const handleToggleSwitch = (enabled: boolean) => {
-    if (!enabled && role === "presenter") {
-      Alert.alert(
-        "Stop Sharing?",
-        "You're the presenter for this room — stopping closes it for everyone currently in it. Attendees will be disconnected and their attendance will be recorded as ended now.",
-        [
-          { text: "Cancel", style: "cancel" },
-          { text: "Stop & Close Room", style: "destructive", onPress: () => togglePresence(false) }
-        ]
-      );
+    const tick = () => {
+      void fetchLiveRoom();
+    };
+
+    tick();
+    const interval = setInterval(tick, 3000);
+    return () => clearInterval(interval);
+  }, [running, role, roomId, sessionId, fetchLiveRoom, deviceId, displayName]);
+
+  // Deliberately no attendee-side room/session discovery poll here. An attendee never asserts a
+  // room: detection is session-unscoped server-side, matching on BLE and ultrasonic proximity and
+  // returning the room along with its OWN session label. A poll that wrote `roomId` (as the old
+  // "Live Session Discovery" one did, from /api/sessions/active) picked an arbitrary first room
+  // globally and silently overwrote the shared room selection, which is exactly the
+  // attendee-asserts-a-stale-value shape that produced the ghost-attendee bug.
+
+  // Admin Live Overview Polling — every active room across every session, refreshed on the same
+  // 5s cadence the old single-screen admin view used. Runs whenever the admin role is selected,
+  // not just while on the overview/detail screens, so switching between them doesn't restart it.
+  useEffect(() => {
+    if (role !== 'admin') return;
+    // Confirmed non-admins are shown AdminOnlyNotice instead of these screens, so polling would
+    // only collect a 403 every 5s behind a screen nobody is looking at. `null` still polls: not
+    // knowing yet must not delay a real admin's first load.
+    if (isAdmin === false) return;
+    let cancelled = false;
+    const fetchOverview = async () => {
+      try {
+        const res = await authFetch(`${serverUrl}/api/admin/overview`);
+        if (cancelled) return;
+        if (!res.ok) {
+          setAdminError(res.status === 403 ? 'This account is not an admin.' : `Server returned ${res.status}`);
+          return;
+        }
+        const data = await res.json().catch(() => null);
+        if (cancelled) return;
+        setAdminError(null);
+        const rooms: LiveRoomState[] = Array.isArray(data?.rooms) ? data.rooms : [];
+        setAdminRooms(rooms);
+        setAdminRoomPeaks(prev => {
+          const next = { ...prev };
+          for (const r of rooms) {
+            const key = `${r.sessionId}::${r.roomId}`;
+            const count = r.members?.length ?? 0;
+            next[key] = Math.max(next[key] ?? 0, count);
+          }
+          return next;
+        });
+      } catch {
+        if (!cancelled) setAdminError('Unable to reach the server.');
+      }
+    };
+    void fetchOverview();
+    const interval = setInterval(fetchOverview, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+    // isAdmin is a dependency so the poll starts the moment /api/me confirms admin status,
+    // rather than waiting for some other state change to re-run this effect.
+  }, [role, serverUrl, isAdmin]);
+
+  // Presenter Rejoin flow (server-truth) — while a presenter is idle (not currently running),
+  // keep checking whether the server already has a live room open under this signed-in user.
+  // This replaces trusting the local device snapshot for "should I show a rejoin option": that
+  // snapshot goes stale 45s after a force-close and can't see a room from a different device or
+  // after a reinstall, while this asks the server directly every time.
+  useEffect(() => {
+    if (role !== 'presenter' || running) {
+      setMyActiveRooms([]);
       return;
     }
-    togglePresence(enabled);
-  };
-
-  const autoDetectServerIP = async () => {
-    setIsAutoDetecting(true);
-    const candidateIPs = [
-      serverUrl,
-      "http://192.168.0.195:3000",
-      "http://192.168.0.146:3000",
-      "http://192.168.0.110:3000",
-      "http://192.168.0.100:3000",
-      "http://192.168.1.195:3000",
-      "http://10.0.2.2:3000"
-    ];
-    const unique = Array.from(new Set(candidateIPs));
-
-    for (const base of unique) {
+    let cancelled = false;
+    const fetchMyActiveRooms = async () => {
       try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 1200);
-        const res = await fetch(`${base}/health`, { signal: controller.signal });
-        clearTimeout(timeoutId);
-        if (res.ok) {
-          const data = await res.json();
-          if (data.ok) {
-            setServerUrl(base);
-            setServerConnected(true);
-            setServerHealth("online");
-            setIsAutoDetecting(false);
-            Alert.alert("Local Server Discovered! ðŸ’»", `Connected to laptop API server at:\n${base}`);
-            return;
-          }
+        const res = await authFetch(`${serverUrl}/api/me/active-rooms`);
+        if (cancelled || !res.ok) return;
+        const data = await res.json().catch(() => null);
+        if (cancelled) return;
+        setMyActiveRooms(Array.isArray(data?.rooms) ? data.rooms : []);
+      } catch {
+        // Transient network errors just mean the rejoin card doesn't show this round.
+      }
+    };
+    void fetchMyActiveRooms();
+    const interval = setInterval(fetchMyActiveRooms, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [role, running, serverUrl]);
+
+  // Attendee server-truth resume check — mirrors the presenter rejoin check above, but attendee
+  // membership isn't a durable ownership claim the way a presenter's room is: it's live
+  // sensor-verified presence that decays within the server's own grace window
+  // (ROOM_MEMBERSHIP_GRACE_MS) once this device stops reporting. Fires as soon as you're viewing
+  // as attendee and not already actively attending — including right on app launch, since `role`
+  // defaults to 'attendee' — so reopening the app within the grace window resumes automatically
+  // rather than requiring a visit to "My Activity" specifically. Asks the server (the same
+  // /api/devices/:deviceId/live endpoint the live-polling loop uses) whether this device is still
+  // within that window for some room, and either resumes properly into it (togglePresence, so it
+  // behaves exactly like a normal live session from then on) or settles on "not currently
+  // present" once confirmed there's nothing left to resume. One-shot rather than a repeating
+  // poll: once the window has lapsed nothing will change again without the user re-detecting.
+  useEffect(() => {
+    if (role !== 'attendee' || running || activePresence?.role === 'attendee') return;
+    // Just left (or the room ended): settle straight on "not present" instead of asking the
+    // server, whose answer would still be racing the leave request.
+    if (stoppedDeliberatelyRef.current) {
+      setAttendeeCheckState('empty');
+      return;
+    }
+    let cancelled = false;
+    setAttendeeCheckState('checking');
+    (async () => {
+      try {
+        const effDeviceId = deviceId || (await getOrCreateDeviceId());
+        const res = await authFetch(
+          `${serverUrl}/api/devices/${encodeURIComponent(effDeviceId)}/live?sessionId=${encodeURIComponent(sessionId)}`
+        );
+        if (cancelled) return;
+        const data = res.ok ? await res.json().catch(() => null) : null;
+        const stillPresent =
+          data && !data.roomEnded && data.roomId && data.roomId !== 'unknown' &&
+          Array.isArray(data.members) && data.members.some((m: RoomMemberInfo) => m.deviceId === effDeviceId);
+        if (cancelled) return;
+        if (stillPresent) {
+          setDetectedRoom(data.roomId);
+          if (data.sessionId) setDetectedSession(data.sessionId);
+          setRoomMembers(data.members);
+          // Resume under the room's own session, same reason Verify & Enter does.
+          await togglePresence(true, {
+            role: 'attendee',
+            roomId: data.roomId,
+            sessionId: data.sessionId || sessionId,
+            updatedAt: Date.now(),
+          });
+        } else {
+          setAttendeeCheckState('empty');
         }
       } catch {
-        // Probe next candidate
+        if (!cancelled) setAttendeeCheckState('empty');
       }
-    }
-    setIsAutoDetecting(false);
-    setServerHealth("offline");
-    Alert.alert("Auto-Detect Failed", "Could not reach laptop API on local Wi-Fi. Make sure `pnpm --filter @confpresence/api dev` is running on your laptop.");
-  };
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [role, running, serverUrl, sessionId]);
 
-  const handleAddRoom = () => {
-    const trimmed = newRoomText.trim().toLowerCase().replace(/\s+/g, "-");
-    if (!trimmed) {
-      setShowAddRoom(false);
+  // Outstanding check-in invites for this account. Polled slowly (30s) rather than on the 5s
+  // cadence the live screens use: an invite is sent minutes or hours ahead, so it has none of the
+  // urgency of presence data, and the push notification is what makes it feel immediate. The
+  // poll exists so an invite still arrives for someone whose device was never registered for
+  // push, or who had notifications turned off.
+  useEffect(() => {
+    if (!signedIn) {
+      setMyInvites([]);
       return;
     }
-    if (!rooms.includes(trimmed)) {
-      setRooms([...rooms, trimmed]);
-      setRoomId(trimmed);
+    let cancelled = false;
+    const fetchInvites = async () => {
+      try {
+        const res = await authFetch(`${serverUrl}/api/me/invites`);
+        if (cancelled || !res.ok) return;
+        const data = await res.json().catch(() => null);
+        if (cancelled) return;
+        setMyInvites(Array.isArray(data?.invites) ? data.invites : []);
+      } catch {
+        // Offline or unreachable: keep whatever we last had rather than clearing the card.
+      }
+    };
+    void fetchInvites();
+    const interval = setInterval(fetchInvites, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [signedIn, serverUrl]);
+
+  /** Returns whether the reply actually saved, so callers don't dismiss their UI on a failure —
+   *  the same reason togglePresence returns a boolean rather than firing and forgetting. */
+  const handleRespondToInvite = useCallback(
+    async (inviteId: number, response: 'accepted' | 'declined'): Promise<boolean> => {
+      let res: Response;
+      try {
+        res = await authFetch(`${serverUrl}/api/me/invites/respond`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ inviteId, response }),
+        });
+      } catch (err: any) {
+        AppAlert.alert('Could not send your reply', err?.message || 'Could not reach the server.');
+        return false;
+      }
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        AppAlert.alert('Could not send your reply', data?.error ? String(data.error) : 'Please try again.');
+        return false;
+      }
+      // Update in place rather than dropping it: an answered invite stops being a prompt and
+      // becomes part of the reply history on Home, so it has to stay in the list. Applied
+      // locally so the change is instant instead of waiting up to 30s for the next poll.
+      setMyInvites(prev =>
+        prev.map(i =>
+          i.id === inviteId ? { ...i, status: response, respondedAt: new Date().toISOString() } : i
+        )
+      );
+      return true;
+    },
+    [serverUrl]
+  );
+
+  // The launch animation runs on its own fixed timer (or can be skipped early by a tap),
+  // completely independent of how long SecureStore/auth-session restoration actually takes to
+  // resolve. Routing the moment the animation finishes used to read hasOnboarded/signedIn
+  // before they'd settled from their initial "still loading" values (null / not-yet-ready),
+  // which could send an already-signed-in user to the login screen on a slow cold start or a
+  // skipped animation. Splitting "animation finished" from "we actually know where to go"
+  // fixes that: this effect only navigates once every piece of state it needs has resolved.
+  const [launchAnimationDone, setLaunchAnimationDone] = useState(false);
+  const handleLaunchComplete = () => setLaunchAnimationDone(true);
+
+  useEffect(() => {
+    if (screen !== 'launch') return;
+    if (!launchAnimationDone || hasOnboarded === null || !authReady) return;
+    if (hasOnboarded === false) {
+      nav('onboarding');
+    } else {
+      nav(signedIn ? 'home' : 'login');
     }
-    setNewRoomText("");
-    setShowAddRoom(false);
+  }, [screen, launchAnimationDone, hasOnboarded, authReady, signedIn]);
+
+  // Ends the currently-selected admin room via the real backend action — the only primitive
+  // this API exposes is ending the whole room occurrence (attendees included); there's no way
+  // to remove just the presenter and keep the room open, which is why the admin UI only offers
+  // one real close action rather than a separate (and undeliverable) "evict presenter" button.
+  const handleEndAdminRoom = async () => {
+    if (!selectedAdminRoom) return;
+    try {
+      const res = await authFetch(`${serverUrl}/api/admin/rooms/end`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: selectedAdminRoom.sessionId, roomId: selectedAdminRoom.roomId }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.ended) {
+        setSelectedAdminRoom(null);
+        nav('adminOverview');
+      } else {
+        AppAlert.alert('Could not end room', 'The room may have already ended on its own.');
+      }
+    } catch (err: any) {
+      AppAlert.alert('Network error', err?.message || 'Could not reach the server.');
+    }
   };
 
-  const handleRemoveRoom = (roomToRemove: string) => {
-    if (rooms.length <= 1) {
-      Alert.alert("Notice", "You must keep at least one room.");
-      return;
-    }
-    const updated = rooms.filter((r) => r !== roomToRemove);
-    setRooms(updated);
-    if (roomId === roomToRemove) {
-      setRoomId(updated[0]);
+  // Ends one of the signed-in presenter's own live rooms (the server-truth rejoin card's "End
+  // Room" action) — separate from handleEndAdminRoom above, which is the admin's own room-close
+  // primitive and doesn't check ownership the way engine.endRoomIfOwner does.
+  const handleEndMyRoom = async (room: LiveRoomState) => {
+    try {
+      const res = await authFetch(`${serverUrl}/api/me/rooms/end`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: room.sessionId, roomId: room.roomId }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.ended) {
+        setMyActiveRooms(prev => prev.filter(r => !(r.sessionId === room.sessionId && r.roomId === room.roomId)));
+      } else {
+        AppAlert.alert('Could not end room', 'The room may have already ended on its own.');
+      }
+    } catch (err: any) {
+      AppAlert.alert('Network error', err?.message || 'Could not reach the server.');
     }
   };
 
-  const activeRoomTitle = role === "presenter" ? roomId : detectedRoom ? detectedRoom : "Searching...";
+  /**
+   * Starts an accepted presenter assignment. Adopts the assigned room AND session wholesale
+   * rather than letting the locally-selected values leak in — the point of the assignment is
+   * that the presenter never retypes either, so a typo cannot split the room attendees are
+   * being pointed at from the one actually being broadcast.
+   */
+  const handleStartAssignedRoom = async (assignedRoom: string, assignedSession: string) => {
+    // togglePresence takes the room/session to start from this explicit snapshot, not from the
+    // roomId/sessionId state — so those are only set once we know the switch actually happened.
+    // Setting them up front meant cancelling the "Still Hosting Another Room" prompt (declining
+    // to end the room you're already in) still left this screen pointed at the room you declined
+    // to switch to, with your actual still-live room now unreachable from here.
+    const ok = await togglePresence(true, {
+      role: 'presenter',
+      roomId: assignedRoom,
+      sessionId: assignedSession,
+      updatedAt: Date.now(),
+    });
+    if (ok) {
+      setRoomId(assignedRoom);
+      setSessionId(assignedSession);
+      nav('presenterDashboard');
+    }
+  };
 
-  if (view === "admin") {
-    return <AdminScreen serverUrl={serverUrl} sessionId={sessionId} onBack={() => setView("main")} />;
-  }
+  const handleRejoinMyRoom = async (room: LiveRoomState) => {
+    // Same ordering fix as handleStartAssignedRoom above, and for the same reason: don't adopt
+    // the target room's identity until togglePresence confirms the switch went through.
+    const ok = await togglePresence(true, { role: 'presenter', roomId: room.roomId, sessionId: room.sessionId, updatedAt: Date.now() });
+    if (ok) {
+      setRoomId(room.roomId);
+      setSessionId(room.sessionId);
+      nav('presenterDashboard');
+    }
+  };
+
+  /**
+   * Signing out has to tear down the live session too, not just the token. Two orderings matter
+   * here: presence is stopped BEFORE signOut(), because service.stop() fires a leave request that
+   * needs a valid token to be accepted — drop the token first and the device stays counted in the
+   * room until the server reaps it ~90s later. And role resets to the attendee default, since the
+   * next person to sign in on this device picks their own role at login and must not inherit this
+   * one's.
+   */
+  const handleSignOut = async () => {
+    if (runningRef.current) await togglePresence(false);
+    await signOut();
+    setRole('attendee');
+    setMyActiveRooms([]);
+    setScreen('login');
+  };
+
+  // Past-session lookups for the admin History tab. Both are useCallback'd because the screen
+  // runs its initial search from an effect keyed on the handler — a fresh arrow every render
+  // would re-fire that search on every parent re-render (and the 5s admin poll causes plenty).
+  const handleSearchHistory = useCallback(
+    async (code: string) => {
+      const url = code
+        ? `${serverUrl}/api/admin/sessions?code=${encodeURIComponent(code)}`
+        : `${serverUrl}/api/admin/sessions`;
+      const res = await authFetch(url);
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(describeAdminError(res.status, data));
+      }
+      return (Array.isArray(data?.sessions) ? data.sessions : []) as SessionOccurrence[];
+    },
+    [serverUrl]
+  );
+
+  const handleOpenOccurrence = useCallback(
+    async (occurrenceId: string) => {
+      const res = await authFetch(`${serverUrl}/api/admin/history?roomId=${encodeURIComponent(occurrenceId)}`);
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(describeAdminError(res.status, data));
+      }
+      return data as HistoryDetail;
+    },
+    [serverUrl]
+  );
+
+  const handleSendInvites = useCallback(
+    async (
+      inviteSessionId: string,
+      emails: string[],
+      title: string,
+      message: string,
+      eventAt: string | null,
+      inviteRole: 'attendee' | 'presenter',
+      roomCode: string | null
+    ): Promise<InviteSendResult> => {
+      const res = await authFetch(`${serverUrl}/api/admin/invites`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: inviteSessionId, emails, title, message, eventAt, inviteRole, roomCode }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(describeAdminError(res.status, data));
+      return {
+        invited: data.invited ?? 0,
+        pushed: data.pushed ?? [],
+        notReachableByPush: data.notReachableByPush ?? [],
+        pushError: data.pushError ?? null,
+      };
+    },
+    [serverUrl]
+  );
+
+  /** The attendance record for a room this account presented, for the presenter's own report.
+   *  Separate from the admin history fetch because that route is admin-gated. */
+  const handleFetchMyRoomHistory = useCallback(
+    async (room: string, session: string): Promise<HistoryDetail> => {
+      const res = await authFetch(
+        `${serverUrl}/api/me/room-history?roomId=${encodeURIComponent(room)}&sessionId=${encodeURIComponent(session)}`
+      );
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(describeAdminError(res.status, data));
+      return data as HistoryDetail;
+    },
+    [serverUrl]
+  );
+
+  /** This account's own attendance totals for the Profile card. Returns null on any failure so
+   *  the card can show that the figures aren't available rather than inventing them. */
+  const handleFetchMyStats = useCallback(async () => {
+    try {
+      const res = await authFetch(`${serverUrl}/api/me/stats`);
+      if (!res.ok) return null;
+      const data = await res.json().catch(() => null);
+      if (!data) return null;
+      return {
+        sessions: data.sessions ?? 0,
+        dwellMs: data.dwellMs ?? 0,
+        avgConfidence: typeof data.avgConfidence === 'number' ? data.avgConfidence : null,
+      };
+    } catch {
+      return null;
+    }
+  }, [serverUrl]);
+
+  /** Changes who a session invites, as opposed to what it says — a separate route because the
+   *  edit endpoint never adds or removes rows. */
+  const handleEditRecipients = useCallback(
+    async (edit: {
+      sessionId: string;
+      inviteRole: 'attendee' | 'presenter';
+      add?: string[];
+      remove?: string[];
+      roomCode?: string;
+    }): Promise<{ added: number; removed: number; skipped: string[]; pushError: string | null }> => {
+      const res = await authFetch(`${serverUrl}/api/admin/invites/recipients`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(edit),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(describeAdminError(res.status, data));
+      return {
+        added: data.added ?? 0,
+        removed: data.removed ?? 0,
+        skipped: data.skipped ?? [],
+        pushError: data.pushError ?? null,
+      };
+    },
+    [serverUrl]
+  );
+
+  const handleEditInvites = useCallback(
+    async (edit: {
+      sessionId: string;
+      newSessionId?: string;
+      title?: string;
+      message?: string;
+      eventAt?: string | null;
+      roomCode?: string;
+      reAsk?: boolean;
+    }): Promise<{ updated: number; sessionId: string; pushError: string | null }> => {
+      const res = await authFetch(`${serverUrl}/api/admin/invites`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(edit),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(describeAdminError(res.status, data));
+      return {
+        updated: data.updated ?? 0,
+        sessionId: data.sessionId ?? edit.sessionId,
+        pushError: data.pushError ?? null,
+      };
+    },
+    [serverUrl]
+  );
+
+  const handleFetchInvites = useCallback(
+    async (inviteSessionId: string): Promise<InviteRoster> => {
+      const url = inviteSessionId
+        ? `${serverUrl}/api/admin/invites?sessionId=${encodeURIComponent(inviteSessionId)}`
+        : `${serverUrl}/api/admin/invites`;
+      const res = await authFetch(url);
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(describeAdminError(res.status, data));
+      return {
+        invites: data.invites ?? [],
+        counts: data.counts ?? { total: 0, accepted: 0, declined: 0, pending: 0, expired: 0 },
+      };
+    },
+    [serverUrl]
+  );
+
+  // Every known account with an email, for the Notify screen's recipient picker — fetched once
+  // when that screen mounts, not polled, since the user list doesn't change fast enough to need it.
+  const handleFetchUsers = async () => {
+    const res = await authFetch(`${serverUrl}/api/admin/users`);
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      throw new Error(data?.error ? JSON.stringify(data.error) : `Server returned ${res.status}`);
+    }
+    return (data.users ?? []) as { id: string; email: string; name: string }[];
+  };
+
+  const showNav = NAV_SCREENS.includes(screen);
+
+  const renderHome = () => (
+    <HomeScreen
+      displayName={displayName}
+      role={role}
+      onNavigate={nav}
+      serverConnected={serverConnected}
+      serverEnv={serverEnv}
+      rooms={rooms}
+      selectedRoom={roomId}
+      onSelectRoom={setRoomId}
+      onStartPresence={() => void togglePresence(true)}
+      myActiveRooms={myActiveRooms}
+      onRejoinMyRoom={handleRejoinMyRoom}
+      onEndMyRoom={handleEndMyRoom}
+      activePresence={activePresence}
+      hasDetectedRoom={Boolean(detectedRoom)}
+      invites={myInvites}
+      onRespondToInvite={handleRespondToInvite}
+      onStartAssignedRoom={handleStartAssignedRoom}
+    />
+  );
+
+  const renderScreen = () => {
+    switch (screen) {
+      case 'launch':
+        return <LaunchScreen onComplete={handleLaunchComplete} />;
+      case 'onboarding':
+        return <OnboardingScreen onNavigate={nav} />;
+      case 'permissions':
+        return (
+          <PermissionsScreen
+            onNavigate={nav}
+            onGrantAll={async () => {
+              await markOnboarded();
+            }}
+          />
+        );
+      case 'login':
+        return (
+          <LoginScreen
+            role={role}
+            onSelectRole={setRole}
+            onNavigate={nav}
+            onSuccess={() => {
+              void markOnboarded();
+              nav('home');
+            }}
+          />
+        );
+      case 'createAccount':
+        return (
+          <CreateAccountScreen
+            role={role}
+            onSelectRole={setRole}
+            onNavigate={nav}
+            onSuccess={() => {
+              void markOnboarded();
+              nav('home');
+            }}
+          />
+        );
+      case 'home':
+        return renderHome();
+      case 'profile':
+        return (
+          <ProfileScreen
+            displayName={displayName}
+            onSaveDisplayName={saveDisplayName}
+            onFetchMyStats={handleFetchMyStats}
+            userEmail={authSession?.email}
+            role={role}
+            deviceId={deviceId}
+            serverEnv={serverEnv}
+            serverUrl={serverUrl}
+            onSelectServerEnv={handleSelectServerEnv}
+            onSignOut={handleSignOut}
+          />
+        );
+      case 'presenterSetup':
+        return (
+          <PresenterSetupScreen
+            rooms={rooms}
+            selectedRoom={roomId}
+            onSelectRoom={setRoomId}
+            sessionId={sessionId}
+            onSetSessionId={setSessionId}
+            onStartBroadcast={async (r, s) => {
+              setRoomId(r);
+              setSessionId(s);
+              return togglePresence(true, { role: 'presenter', roomId: r, sessionId: s, updatedAt: Date.now() });
+            }}
+            onNavigate={nav}
+          />
+        );
+      case 'presenterDashboard':
+        return (
+          <PresenterDashboardScreen
+            roomId={roomId}
+            sessionId={sessionId}
+            acousticToken={getAcousticTokenForRoom(roomId)}
+            roomMembers={roomMembers}
+            running={running}
+            onStopBroadcast={() => void togglePresence(false)}
+            onNavigate={nav}
+          />
+        );
+      case 'presenterRoster':
+        return (
+          <PresenterRosterScreen
+            roomId={roomId}
+            roomMembers={roomMembers}
+            onNavigate={nav}
+          />
+        );
+      case 'sessionEnd': {
+        // "Analysis" tab reuses this screen for two different things: a live in-progress summary
+        // while actually presenting, or the frozen last-ended report otherwise. Same stat
+        // computation either way, just fed from live roomMembers/elapsed-time vs. the snapshot
+        // taken in togglePresence's stop-branch.
+        const isLive = activePresence?.role === 'presenter';
+        const members = isLive ? roomMembers : sessionEndMembers;
+        const durationMsForDisplay = isLive ? Date.now() - sessionStartTime : sessionDurationMs;
+
+        const attendeesOnly = members.filter(m => m.role === 'attendee');
+        const ultraCount = attendeesOnly.filter(m => m.ultrasonicVerified).length;
+        const acousticPct = attendeesOnly.length > 0 ? Math.round((ultraCount / attendeesOnly.length) * 100) : 100;
+        const avgWifi = attendeesOnly.length > 0
+          ? Math.round(
+              (attendeesOnly.reduce((sum, m) => sum + (m.wifiSimilarity ?? 0.98), 0) / attendeesOnly.length) * 100
+            )
+          : 98;
+
+        return (
+          <SessionEndScreen
+            roomId={roomId}
+            sessionId={sessionId}
+            isLive={isLive}
+            totalAttendees={attendeesOnly.length}
+            durationMs={durationMsForDisplay}
+            startedAt={new Date(sessionStartTime).toISOString()}
+            endedAt={isLive ? null : new Date(sessionStartTime + sessionDurationMs).toISOString()}
+            acousticMatchPercent={acousticPct}
+            wifiSimilarityPercent={avgWifi}
+            onFetchRoomHistory={handleFetchMyRoomHistory}
+            onNavigate={nav}
+          />
+        );
+      }
+      case 'attendeeDiscovery':
+        return (
+          <AttendeeDiscoveryScreen
+            detectedRoom={detectedRoom}
+            acousticToken={status.ultrasonicToken}
+            peerCount={status.peerCount}
+            wifiApCount={status.wifiApCount}
+            ultrasonicState={status.ultrasonicState}
+            running={running}
+            onStopDetection={() => togglePresence(false)}
+            onJoinDetectedRoom={r => {
+              // Adopt the detected room AND the session the server said it belongs to, rather
+              // than joining under whatever local sessionId this device happened to carry — that
+              // local value is presenter config and has nothing to do with the room just matched.
+              return togglePresence(true, {
+                role: 'attendee',
+                roomId: r,
+                sessionId: detectedSession || sessionId,
+                updatedAt: Date.now(),
+              });
+            }}
+            onNavigate={nav}
+          />
+        );
+      case 'attendeeConfirmed':
+        // The "My Activity" tab routes here unconditionally, but this screen's dwell-time counter
+        // is a pure stopwatch off sessionStartTime with no awareness of whether the room is still
+        // live — sessionStartTime is only ever set when a NEW session starts, never cleared after
+        // leaving or a room ending. So without this guard, tapping the tab again after the session
+        // is over would re-render it counting up from a stale timestamp as if still live. The
+        // effect above resolves "not attending" into either a real resumed session (if the server
+        // still has this device within its grace window) or attendeeCheckState 'empty' — never
+        // silently show the stale live view in between.
+        // Scanning is deliberately NOT enough to show this screen: until a room is actually
+        // confirmed, roomId here would fall back to whatever stale value was left in state and
+        // present it as verified presence, complete with a running dwell counter.
+        if (activePresence?.role !== 'attendee' || !activePresence.confirmed) {
+          return (
+            <NotCheckedInScreen
+              state={
+                activePresence?.role === 'attendee'
+                  ? 'scanning'
+                  : attendeeCheckState === 'checking'
+                  ? 'checking'
+                  : 'idle'
+              }
+              onNavigate={nav}
+            />
+          );
+        }
+        return (
+          <AttendeeConfirmedScreen
+            // No `|| roomId` fallback: that presenter-authored value is exactly what used to get
+            // rendered as verified presence in a room this device was never actually in. Reaching
+            // here at all means activePresence.confirmed, so it carries the real joined room.
+            roomId={detectedRoom || activePresence.roomId}
+            sessionId={activePresence.sessionId}
+            hostName={roomMembers.find(m => m.role === 'presenter')?.displayName || 'Anchor Host'}
+            confidence={roomMembers.find(m => m.deviceId === deviceId)?.confidence ?? 1.0}
+            wifiSimilarity={roomMembers.find(m => m.deviceId === deviceId)?.wifiSimilarity}
+            wifiApCount={status.wifiApCount}
+            ultrasonicVerified={status.ultrasonicState === 'verified' || Boolean(roomMembers.find(m => m.deviceId === deviceId)?.ultrasonicVerified)}
+            // The server's own figure for this device, the same one the presenter roster and the
+            // persisted room_membership row are built from — so all three agree.
+            dwellMs={roomMembers.find(m => m.deviceId === deviceId)?.durationMs}
+            startedAt={roomMembers.find(m => m.deviceId === deviceId)?.startedAt}
+            onLeaveRoom={() => void togglePresence(false)}
+            onNavigate={nav}
+          />
+        );
+      case 'attendeeOutOfRange':
+        return (
+          <AttendeeOutOfRangeScreen
+            // The room the server actually matched, not the presenter-authored `roomId` this
+            // screen used to show — an attendee's local roomId has nothing to do with the room
+            // they were checked into.
+            roomId={detectedRoom || activePresence?.roomId || ''}
+            onLeave={() => void togglePresence(false)}
+            onNavigate={nav}
+          />
+        );
+      case 'adminOverview':
+        if (isAdmin === false) {
+          return (
+            <AdminOnlyNotice
+              feature="The live room monitor"
+              userEmail={authSession?.email}
+              onNavigate={nav}
+            />
+          );
+        }
+        return (
+          <AdminOverviewScreen
+            rooms={adminRooms}
+            error={adminError}
+            onSelectRoom={setSelectedAdminRoom}
+            onNavigate={nav}
+          />
+        );
+      case 'adminRoomDetail': {
+        if (isAdmin === false) {
+          return (
+            <AdminOnlyNotice
+              feature="Room details"
+              userEmail={authSession?.email}
+              onNavigate={nav}
+            />
+          );
+        }
+        // selectedAdminRoom is only the identity captured at the moment of selection — the
+        // actual displayed room is looked up fresh from adminRooms every render, so the roster
+        // updates on each 5s poll instead of freezing at whatever it looked like when tapped.
+        // A miss means the room ended (or never existed under this session/roomId anymore).
+        const liveSelectedRoom = selectedAdminRoom
+          ? adminRooms.find(r => r.sessionId === selectedAdminRoom.sessionId && r.roomId === selectedAdminRoom.roomId) ?? null
+          : null;
+        if (!liveSelectedRoom) {
+          return (
+            <AdminOverviewScreen
+              rooms={adminRooms}
+              error={adminError}
+              onSelectRoom={setSelectedAdminRoom}
+              onNavigate={nav}
+            />
+          );
+        }
+        return (
+          <AdminRoomDetailScreen
+            room={liveSelectedRoom}
+            peak={adminRoomPeaks[`${liveSelectedRoom.sessionId}::${liveSelectedRoom.roomId}`] ?? liveSelectedRoom.members?.length ?? 0}
+            onEndRoom={handleEndAdminRoom}
+            onNavigate={nav}
+          />
+        );
+      }
+      case 'adminHistory':
+        if (isAdmin === false) {
+          return (
+            <AdminOnlyNotice
+              feature="Session history"
+              userEmail={authSession?.email}
+              onNavigate={nav}
+            />
+          );
+        }
+        return (
+          <AdminHistoryScreen
+            onSearch={handleSearchHistory}
+            onOpenOccurrence={handleOpenOccurrence}
+            onNavigate={nav}
+          />
+        );
+      case 'adminCheckIn':
+        // Guarded here as well as on Notify: Check-In is reached from that screen, so without
+        // this a non-admin could still land on a form whose every request would 403.
+        if (isAdmin === false) {
+          return (
+            <AdminOnlyNotice
+              feature="Check-in invites"
+              userEmail={authSession?.email}
+              onNavigate={nav}
+            />
+          );
+        }
+        return (
+          <AdminCheckInScreen
+            defaultSessionId={sessionId}
+            onFetchUsers={handleFetchUsers}
+            onSendInvites={handleSendInvites}
+            onNavigate={nav}
+          />
+        );
+      case 'adminNotify':
+        if (isAdmin === false) {
+          return (
+            <AdminOnlyNotice
+              feature="Sending notifications"
+              userEmail={authSession?.email}
+              onNavigate={nav}
+            />
+          );
+        }
+        return (
+          <AdminNotifyScreen
+            onFetchInvites={handleFetchInvites}
+            onEditInvites={handleEditInvites}
+            onEditRecipients={handleEditRecipients}
+            onFetchUsers={handleFetchUsers}
+            onNavigate={nav}
+          />
+        );
+      case 'diagnostics':
+        return (
+          <DiagnosticsScreen
+            status={status}
+            deviceId={deviceId}
+            onNavigate={nav}
+          />
+        );
+      case 'edgeState':
+        return <EdgeStateScreen onNavigate={nav} />;
+      default:
+        return <LaunchScreen onComplete={handleLaunchComplete} />;
+    }
+  };
+
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar style="dark" />
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-        keyboardVerticalOffset={Platform.OS === "android" ? 24 : 0}
-      >
-        <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-          <Text style={styles.title}>XConnect</Text>
-          <Text style={styles.subtitle}>Zero-Hardware Quad-Sensor Presence Engine</Text>
-
-          <Text style={styles.label}>Role</Text>
-          <View style={styles.roleRow}>
-            <Button title="Attendee" onPress={() => setRole("attendee")} color={role === "attendee" ? "#126D7A" : "#75808A"} disabled={running}  />
-            <Button title="Presenter" onPress={() => setRole("presenter")} color={role === "presenter" ? "#126D7A" : "#75808A"} disabled={running} />
-            <Button title="Admin" onPress={() => setView("admin")} color="#173A63" />
-          </View>
-
-          <Text style={styles.label}>Your name (optional)</Text>
-          <TextInput
-            editable={!running}
-            value={displayName}
-            onChangeText={setDisplayName}
-            placeholder="e.g. Alice, Bob, Dr. Smith"
-            placeholderTextColor="#8C9BA5"
-            style={styles.input}
-            autoCapitalize="words"
-          />
-
-          <Text style={styles.label}>Session code</Text>
-          <TextInput
-            editable={!running}
-            value={sessionId}
-            onChangeText={setSessionId}
-            placeholder="e.g. poc-session"
-            placeholderTextColor="#8C9BA5"
-            style={styles.input}
-            autoCapitalize="none"
-          />
-
-          {/* Room Management Section - Presenter Only */}
-          {role === "presenter" && (
-            <View style={styles.roomSection}>
-              <View style={styles.roomHeaderRow}>
-                <Text style={styles.label}>Anchor Room ID</Text>
-                {!running && !showAddRoom && (
-                  <TouchableOpacity
-                    style={styles.addRoomBtn}
-                    onPress={() => setShowAddRoom(true)}
-                  >
-                    <Text style={styles.addRoomBtnText}>+ Add Room</Text>
-                  </TouchableOpacity>
-                )}
-              </View>
-
-              {/* Room Selection Chips */}
-              <View style={styles.roomChipsWrap}>
-                {rooms.map((r) => {
-                  const isSelected = r === roomId;
-                  return (
-                    <TouchableOpacity
-                      key={r}
-                      disabled={running}
-                      style={[styles.roomChip, isSelected && styles.roomChipSelected]}
-                      onPress={() => setRoomId(r)}
-                      activeOpacity={0.7}
-                    >
-                      <Text style={[styles.roomChipText, isSelected && styles.roomChipTextSelected]}>
-                        {r}
-                      </Text>
-                      {!running && rooms.length > 1 && (
-                        <TouchableOpacity
-                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                          style={styles.roomDeleteIcon}
-                          onPress={() => handleRemoveRoom(r)}
-                        >
-                          <Text style={[styles.roomDeleteText, isSelected && styles.roomDeleteTextSelected]}>{"\u2715"}</Text>
-                        </TouchableOpacity>
-                      )}
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-
-              {/* Add New Room Input Row */}
-              {!running && showAddRoom && (
-                <View style={styles.addRoomInputRow}>
-                  <TextInput
-                    value={newRoomText}
-                    onChangeText={setNewRoomText}
-                    placeholder="e.g. hall-b, workshop-1"
-                    placeholderTextColor="#8C9BA5"
-                    style={styles.addRoomInput}
-                    autoCapitalize="none"
-                    autoFocus
-                  />
-                  <TouchableOpacity style={styles.addRoomSaveBtn} onPress={handleAddRoom}>
-                    <Text style={styles.addRoomSaveText}>Save</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.addRoomCancelBtn}
-                    onPress={() => {
-                      setNewRoomText("");
-                      setShowAddRoom(false);
-                    }}
-                  >
-                    <Text style={styles.addRoomCancelText}>Cancel</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-            </View>
-          )}
-
-          <View style={styles.startRow}>
-            <View>
-              <Text style={styles.startTitle}>Share presence</Text>
-              <Text style={styles.help}>The POC scans only while the app is open.</Text>
-            </View>
-            <Switch value={running} onValueChange={handleToggleSwitch} />
-          </View>
-
-          {/* Live Connected Devices & Presence Dashboard */}
-          <View style={styles.statsCard}>
-            <View style={styles.statsHeaderRow}>
-              <Text style={styles.statsHeader}>Live Connected Presence</Text>
-              <TouchableOpacity
-                style={styles.refreshButton}
-                onPress={() => fetchLiveRoom()}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.refreshButtonText}>{"\u{1F504} Refresh"}</Text>
-              </TouchableOpacity>
-            </View>
-            <View style={styles.statsGrid}>
-              <View style={styles.statBox}>
-                <Text style={styles.statNumber} numberOfLines={1}>
-                  {running && roomMembers.length > 0
-                    ? Math.max(0, roomMembers.length - 1)
-                    : 0}
-                </Text>
-                <Text style={styles.statLabel} numberOfLines={1}>BLE Peers</Text>
-              </View>
-              <View style={styles.statBox}>
-                <Text style={styles.statNumber} numberOfLines={1}>{status.wifiApCount ?? 0}</Text>
-                <Text style={styles.statLabel} numberOfLines={1}>Wi-Fi APs</Text>
-              </View>
-              <View style={styles.statBox}>
-                <Text
-                  style={[styles.statNumber, { fontSize: 11 }]}
-                  numberOfLines={1}
-                  adjustsFontSizeToFit
-                >
-                  {role === "presenter"
-                    ? (running ? "🔊 Pulse" : "🔊 Off")
-                    : status.ultrasonicState === "verified"
-                      ? "🔊 Gate OK"
-                      : running
-                        ? "🔊 Scan"
-                        : "🔊 Off"}
-                </Text>
-                <Text style={styles.statLabel} numberOfLines={1}>Ultrasonic</Text>
-              </View>
-              <View style={styles.statBox}>
-                <Text style={styles.statNumber} numberOfLines={1}>{roomMembers.length}</Text>
-                <Text style={styles.statLabel} numberOfLines={2}>
-                  {role === "presenter"
-                    ? `Room (${roomId})`
-                    : detectedRoom
-                      ? `Room (${detectedRoom})`
-                      : "Room (...)"}
-                </Text>
-              </View>
-            </View>
-
-            {/* In-Room Participants Table */}
-            {roomMembers.length > 0 && (
-              <View style={styles.tableContainer}>
-                <Text style={styles.tableTitle}>
-                  Confirmed In-Room Participants ({activeRoomTitle}):
-                </Text>
-
-                {/* Table Header Row */}
-                <View style={styles.tableHeaderRow}>
-                  <Text style={[styles.tableColHeader, { flex: 1.3 }]}>Participant Name</Text>
-                  <Text style={[styles.tableColHeader, { flex: 1.1 }]}>Device ID</Text>
-                  <Text style={[styles.tableColHeader, { width: 68, textAlign: "right" }]}>Role</Text>
-                </View>
-
-                {/* Table Content Rows */}
-                {roomMembers.map((member, index) => {
-                  const isMe = member.deviceId === deviceId;
-                  const isHost = member.role === "presenter";
-                  const confPct = Math.round((member.confidence ?? (isHost ? 1.0 : 0.95)) * 100);
-                  const wifiPct = member.wifiSimilarity != null ? Math.round(member.wifiSimilarity * 100) : null;
-
-                  return (
-                    <View key={member.deviceId || index} style={[styles.tableRow, isMe && styles.tableRowMe]}>
-                      <View style={styles.tableRowTop}>
-                        <Text style={[styles.tableCellName, { flex: 1.3 }]} numberOfLines={1}>
-                          {member.displayName || member.deviceId} {isMe ? "(You)" : ""}
-                        </Text>
-                        <Text style={[styles.tableCellId, { flex: 1.1 }]} numberOfLines={1}>
-                          {member.deviceId}
-                        </Text>
-                        <View style={{ width: 68, alignItems: "flex-end" }}>
-                          <Text style={[styles.roleBadge, isHost ? styles.roleBadgePresenter : styles.roleBadgeAttendee]}>
-                            {isHost ? "Host" : "User"}
-                          </Text>
-                        </View>
-                      </View>
-
-                      {/* Sensor Metrics Row: Coexistence badges for Confidence, BLE, Wi-Fi, Ultrasonic, & Motion */}
-                      <View style={styles.tableRowMetrics}>
-                        <Text style={styles.confText}>{"\u{1F3AF} " + confPct + "% Conf"}</Text>
-                        <Text style={styles.bleMeshText}>{"\u{1F4E1} BLE Active"}</Text>
-                        {isHost ? (
-                          <Text style={styles.wifiMatchText}>{"\u{1F4F6} Wi-Fi Anchor"}</Text>
-                        ) : wifiPct != null ? (
-                          <Text style={styles.wifiMatchText}>{"\u{1F4F6} Wi-Fi: " + wifiPct + "% match"}</Text>
-                        ) : null}
-                        {member.ultrasonicVerified && (
-                          <Text style={styles.ultrasonicMatchText}>{"\u{1F50A} Hard Gate Verified"}</Text>
-                        )}
-                        {member.motionAnomalyFlag && (
-                          <Text style={styles.anomalyText}>{"\u26A0\uFE0F Inactivity flag"}</Text>
-                        )}
-                      </View>
-                    </View>
-                  );
-                })}
-              </View>
-            )}
-          </View>
-
-          {/* Diagnostic Status Card */}
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Status: {status.state}</Text>
-            <Text style={styles.cardText}>Device ID: {deviceId || "Creating local ID..."}</Text>
-            <Text style={styles.cardText}>Name: {displayName.trim() || "(Not specified)"}</Text>
-            <Text style={styles.cardText}>Active Role: {role.toUpperCase()}</Text>
-            {role === "presenter" && <Text style={styles.cardText}>Anchor Room: {roomId}</Text>}
-            {role === "attendee" && (
-              <Text style={styles.cardText}>
-                Detected Room: {detectedRoom ? detectedRoom : "Searching for active presenter..."}
-              </Text>
-            )}
-            <Text style={styles.cardText}>Current rotating token: {status.rotatingId ?? "Not active"}</Text>
-            {role === "presenter" && (
-              <Text style={styles.cardText}>
-                Ultrasonic Gate: {running ? `Broadcasting ('${roomId}')` : "Idle"}
-              </Text>
-            )}
-            {role === "attendee" && (
-              <Text style={styles.cardText}>
-                Ultrasonic Gate: {status.ultrasonicState === "verified" ? `Verified ('${status.ultrasonicToken}') ✅` : running ? "Listening (18.5-19.5 kHz)" : "Idle"}
-              </Text>
-            )}
-            {status.error && <Text style={styles.error}>{status.error}</Text>}
-          </View>
-
-          {/* Server Connection Settings Card */}
-          <View style={styles.serverCard}>
-            <TouchableOpacity
-              style={styles.serverHeaderRow}
-              onPress={() => setShowServerConfig(!showServerConfig)}
-              activeOpacity={0.7}
-            >
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flex: 1 }}>
-                <Text style={styles.serverHeaderText}>{"\u{1F310} " + (serverEnv === "cloud" ? "\u2601\uFE0F Cloud Server (Default)" : serverEnv === "local" ? "\u{1F4BB} Local Laptop" : "\u2699\uFE0F Custom Server")}</Text>
-                {serverHealth === "online" && <Text style={{ fontSize: 11, color: "#2E7D32", fontWeight: "700" }}>{"\u{1F7E2} Online"}</Text>}
-                {serverHealth === "offline" && <Text style={{ fontSize: 11, color: "#C62828", fontWeight: "700" }}>{"\u{1F534} Offline"}</Text>}
-                {serverHealth === "checking" && <Text style={{ fontSize: 11, color: "#E65100", fontWeight: "600" }}>{"\u23F3"}</Text>}
-              </View>
-              <Text style={styles.serverToggleText}>{showServerConfig ? "\u25B2 Hide" : "\u25BC Change"}</Text>
-            </TouchableOpacity>
-
-            {/* Collapsible Environment Switcher & Auto-Detection */}
-            {showServerConfig && (
-              <View style={styles.serverInputWrap}>
-                <Text style={styles.serverHelp}>Select Server Environment:</Text>
-
-                {/* 1-Tap Preset Selector Chips */}
-                <View style={styles.envChipsRow}>
-                  <TouchableOpacity
-                    disabled={running}
-                    style={[styles.envChip, serverEnv === "cloud" && styles.envChipSelected]}
-                    onPress={() => {
-                      setServerEnv("cloud");
-                      setServerUrl(CLOUD_API_URL);
-                      checkHealth(CLOUD_API_URL);
-                    }}
-                  >
-                    <Text style={[styles.envChipText, serverEnv === "cloud" && styles.envChipTextSelected]}>{"\u2601\uFE0F Cloud (Default)"}</Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    disabled={running}
-                    style={[styles.envChip, serverEnv === "local" && styles.envChipSelected]}
-                    onPress={() => {
-                      setServerEnv("local");
-                      setServerUrl(LOCAL_API_URL);
-                      checkHealth(LOCAL_API_URL);
-                    }}
-                  >
-                    <Text style={[styles.envChipText, serverEnv === "local" && styles.envChipTextSelected]}>{"\u{1F4BB} Local Laptop"}</Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    disabled={running}
-                    style={[styles.envChip, serverEnv === "custom" && styles.envChipSelected]}
-                    onPress={() => setServerEnv("custom")}
-                  >
-                    <Text style={[styles.envChipText, serverEnv === "custom" && styles.envChipTextSelected]}>{"\u2699\uFE0F Custom"}</Text>
-                  </TouchableOpacity>
-                </View>
-
-                {/* Active URL Display & Custom Input */}
-                <TextInput
-                  editable={!running && serverEnv === "custom"}
-                  value={serverUrl}
-                  onChangeText={(val) => {
-                    setServerUrl(val);
-                    checkHealth(val);
-                  }}
-                  placeholder="https://xconnect-api.onrender.com"
-                  placeholderTextColor="#8C9BA5"
-                  style={[styles.serverInput, serverEnv !== "custom" && { backgroundColor: "#F5F7FA" }]}
-                  autoCapitalize="none"
-                />
-
-                {/* Status Banner */}
-                <View style={styles.serverStatusBanner}>
-                  <Text style={styles.serverStatusBannerText}>
-                    {serverHealth === "online"
-                      ? "\u{1F7E2} Connected & Ready for Presence Tracking"
-                      : serverHealth === "offline"
-                        ? "\u{1F534} Server unreachable. Check Wi-Fi or backend server."
-                        : "\u23F3 Checking connection..."}
-                  </Text>
-                </View>
-
-                {/* Smart Cloud Fallback button when Local is offline */}
-                {serverEnv !== "cloud" && serverHealth === "offline" && (
-                  <TouchableOpacity
-                    style={styles.switchCloudBtn}
-                    onPress={() => {
-                      setServerEnv("cloud");
-                      setServerUrl(CLOUD_API_URL);
-                      checkHealth(CLOUD_API_URL);
-                    }}
-                  >
-                    <Text style={styles.switchCloudBtnText}>{"\u2601\uFE0F Switch Back to Cloud (Recommended)"}</Text>
-                  </TouchableOpacity>
-                )}
-
-                {/* Auto-Detect Local Laptop Button */}
-                {serverEnv !== "cloud" && (
-                  <TouchableOpacity
-                    disabled={isAutoDetecting || running}
-                    style={styles.autoDetectBtn}
-                    onPress={autoDetectServerIP}
-                  >
-                    <Text style={styles.autoDetectBtnText}>
-                      {isAutoDetecting ? "\u{1F50D} Scanning Local Subnet..." : "\u{1F50D} Auto-Detect Local Laptop IP"}
-                    </Text>
-                  </TouchableOpacity>
-                )}
-              </View>
-            )}
-          </View>
-
-          <Text style={styles.note}>
-            Quad-sensor presence: XConnect fuses low-latency BLE mesh peer discovery, ambient Wi-Fi access point fingerprinting, IMU motion dynamics, and ultrasonic acoustic boundary gates for zero-hardware in-room presence verification.
-          </Text>
-        </ScrollView>
-      </KeyboardAvoidingView>
-
-      {/* Floating Diagnostics Log Button */}
-      <TouchableOpacity
-        style={styles.floatingLogBtn}
-        onPress={() => setShowLogs(true)}
-        activeOpacity={0.8}
-      >
-        <Text style={styles.floatingLogIcon}>{"\u{1F4DC}"}</Text>
-        <Text style={styles.floatingLogText}>Logs {logCount > 0 ? `(${logCount})` : ""}</Text>
-      </TouchableOpacity>
-
-      {/* Diagnostics Logs Modal Popup */}
-      <LogsModal visible={showLogs} onClose={() => setShowLogs(false)} />
+    <SafeAreaView
+      style={[
+        styles.safeArea,
+        {
+          backgroundColor: screen === 'launch' ? '#102A2A' : colors.surf, // matches assets/icon.svg
+          paddingTop:
+            Platform.OS === 'android' && screen !== 'launch'
+              ? (StatusBar.currentHeight ?? 24)
+              : 0,
+        },
+      ]}
+    >
+      <ExpoStatusBar style={screen === 'launch' || isDark ? 'light' : 'dark'} />
+      {__DEV__ && <DevScreenSwitcher currentRole={role} onSelectRole={setRole} onNavigate={nav} />}
+      <View style={styles.screenContainer}>{renderScreen()}</View>
+      {showNav && (
+        <BottomNav currentScreen={screen} onNavigate={nav} role={role} />
+      )}
+      <AppAlertHost />
+      <BusyOverlay visible={stopping} label="Leaving session…" />
     </SafeAreaView>
   );
 }
 
+export default function App() {
+  return (
+    <ThemeProvider>
+      <MainApp />
+    </ThemeProvider>
+  );
+}
+
+registerRootComponent(App);
+
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#F7FAFB",
-    paddingTop: Platform.OS === "android" ? 10 : 0
   },
-  container: { padding: 20, gap: 12 },
-  title: { fontSize: 28, fontWeight: "700", color: "#173A63" },
-  subtitle: { fontSize: 15, color: "#5D6873", marginBottom: 6, fontWeight: "600" },
-  label: { color: "#173A63", fontWeight: "700", marginTop: 4 },
-  input: {
-    borderColor: "#C8D3DA",
-    borderWidth: 1,
-    borderRadius: 8,
-    padding: 12,
-    backgroundColor: "#FFFFFF",
-    color: "#173A63",
-    fontSize: 16
-  },
-  roleRow: { flexDirection: "row", justifyContent: "space-between", gap: 12 },
-
-  // Room Management Styles
-  roomSection: { marginTop: 4, gap: 6 },
-  roomHeaderRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  addRoomBtn: { backgroundColor: "#E0F2F1", paddingVertical: 4, paddingHorizontal: 10, borderRadius: 6, borderWidth: 1, borderColor: "#80CBC4" },
-  addRoomBtnText: { color: "#00695C", fontSize: 12, fontWeight: "700" },
-  roomChipsWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 4 },
-  roomChip: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#FFFFFF",
-    paddingVertical: 7,
-    paddingHorizontal: 12,
-    borderRadius: 20,
-    borderWidth: 1.5,
-    borderColor: "#C8D3DA",
-    gap: 6
-  },
-  roomChipSelected: {
-    backgroundColor: "#126D7A",
-    borderColor: "#126D7A"
-  },
-  roomChipText: { fontSize: 13, color: "#173A63", fontWeight: "600" },
-  roomChipTextSelected: { color: "#FFFFFF", fontWeight: "700" },
-  roomDeleteIcon: { paddingHorizontal: 2 },
-  roomDeleteText: { fontSize: 11, color: "#75808A", fontWeight: "700" },
-  roomDeleteTextSelected: { color: "#B2EBF2" },
-  addRoomInputRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 6 },
-  addRoomInput: { flex: 1, borderColor: "#00695C", borderWidth: 1.5, borderRadius: 8, padding: 8, backgroundColor: "#FFFFFF", color: "#173A63", fontSize: 14 },
-  addRoomSaveBtn: { backgroundColor: "#00695C", paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8 },
-  addRoomSaveText: { color: "#FFFFFF", fontWeight: "700", fontSize: 13 },
-  addRoomCancelBtn: { paddingVertical: 8, paddingHorizontal: 8 },
-  addRoomCancelText: { color: "#5D6873", fontSize: 13 },
-
-  startRow: { marginTop: 6, flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: "#EAF3F7", padding: 14, borderRadius: 10 },
-  startTitle: { color: "#173A63", fontWeight: "700" },
-  help: { color: "#5D6873", maxWidth: 230, marginTop: 3 },
-  statsCard: {
-    backgroundColor: "#E6F4F1",
-    borderRadius: 10,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: "#B2DFDB",
-    marginTop: 4
-  },
-  statsHeaderRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 10
-  },
-  statsHeader: { fontSize: 15, fontWeight: "700", color: "#00695C" },
-  refreshButton: {
-    backgroundColor: "#FFFFFF",
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: "#80CBC4"
-  },
-  refreshButtonText: {
-    fontSize: 11,
-    fontWeight: "700",
-    color: "#00695C"
-  },
-  statsGrid: { flexDirection: "row", justifyContent: "space-between", gap: 6 },
-  statBox: {
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#FFFFFF",
-    paddingVertical: 10,
-    paddingHorizontal: 4,
-    borderRadius: 8,
+  screenContainer: {
     flex: 1,
-    borderWidth: 1,
-    borderColor: "#CFD8DC"
-  },
-  statNumber: { fontSize: 18, fontWeight: "800", color: "#126D7A" },
-  statLabel: { fontSize: 10.5, color: "#5D6873", marginTop: 4, textAlign: "center", fontWeight: "600" },
-
-  // Table View Styles
-  tableContainer: {
-    marginTop: 14,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: "#B2DFDB"
-  },
-  tableTitle: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: "#00695C",
-    marginBottom: 8
-  },
-  tableHeaderRow: {
-    flexDirection: "row",
-    backgroundColor: "#D7ECE8",
-    paddingVertical: 6,
-    paddingHorizontal: 8,
-    borderRadius: 6,
-    marginBottom: 4
-  },
-  tableColHeader: {
-    fontSize: 11,
-    fontWeight: "700",
-    color: "#004D40",
-    textTransform: "uppercase"
-  },
-  tableRow: {
-    backgroundColor: "#FFFFFF",
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    borderRadius: 6,
-    marginVertical: 3,
-    borderWidth: 1,
-    borderColor: "#E0E0E0",
-    gap: 4
-  },
-  tableRowTop: {
-    flexDirection: "row",
-    alignItems: "center"
-  },
-  tableRowMetrics: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    alignItems: "center",
-    gap: 6,
-    marginTop: 4,
-    paddingTop: 6,
-    borderTopWidth: 1,
-    borderTopColor: "#F0F4F8"
-  },
-  tableRowMe: {
-    backgroundColor: "#E0F2F1",
-    borderColor: "#80CBC4"
-  },
-  tableCellName: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: "#173A63"
-  },
-  tableCellId: {
-    fontSize: 11,
-    color: "#5D6873",
-    fontFamily: "monospace"
-  },
-  roleBadge: {
-    fontSize: 10,
-    fontWeight: "700",
-    paddingVertical: 2,
-    paddingHorizontal: 6,
-    borderRadius: 4,
-    overflow: "hidden"
-  },
-  roleBadgePresenter: {
-    backgroundColor: "#E0F7FA",
-    color: "#00838F"
-  },
-  roleBadgeAttendee: {
-    backgroundColor: "#ECEFF1",
-    color: "#455A64"
-  },
-  confText: {
-    fontSize: 10.5,
-    fontWeight: "700",
-    color: "#00695C",
-    backgroundColor: "#E0F2F1",
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4
-  },
-  bleMeshText: {
-    fontSize: 10.5,
-    fontWeight: "700",
-    color: "#4A148C",
-    backgroundColor: "#F3E5F5",
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4
-  },
-  wifiMatchText: {
-    fontSize: 10.5,
-    fontWeight: "700",
-    color: "#0D47A1",
-    backgroundColor: "#E3F2FD",
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4
-  },
-  ultrasonicMatchText: {
-    fontSize: 10.5,
-    color: "#004D40",
-    fontWeight: "700",
-    backgroundColor: "#B2DFDB",
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4
-  },
-  anomalyText: {
-    fontSize: 10.5,
-    fontWeight: "700",
-    color: "#B45309",
-    backgroundColor: "#FEF3C7",
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4
-  },
-
-  card: { backgroundColor: "#FFFFFF", borderRadius: 10, padding: 16, gap: 6, borderWidth: 1, borderColor: "#D9E3E8" },
-  cardTitle: { fontWeight: "700", color: "#126D7A", fontSize: 15 },
-  cardText: { color: "#2C3E50", fontSize: 13 },
-  error: { color: "#A31D33", fontSize: 13, marginTop: 4 },
-
-  // Server Connection Settings Styles
-  serverCard: { backgroundColor: "#F0F4F8", borderRadius: 8, padding: 12, borderWidth: 1, borderColor: "#D0DCE5" },
-  serverHeaderRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  serverHeaderText: { fontSize: 12, color: "#173A63", fontWeight: "600" },
-  serverToggleText: { fontSize: 12, color: "#00695C", fontWeight: "700" },
-  serverInputWrap: { marginTop: 8, gap: 6 },
-  serverHelp: { fontSize: 11, color: "#5D6873", fontWeight: "600" },
-  envChipsRow: { flexDirection: "row", gap: 8, marginTop: 2, marginBottom: 4 },
-  envChip: {
-    flex: 1,
-    paddingVertical: 6,
-    paddingHorizontal: 8,
-    backgroundColor: "#FFFFFF",
-    borderRadius: 6,
-    borderWidth: 1.5,
-    borderColor: "#C8D3DA",
-    alignItems: "center"
-  },
-  envChipSelected: {
-    backgroundColor: "#126D7A",
-    borderColor: "#126D7A"
-  },
-  envChipText: { fontSize: 11, color: "#173A63", fontWeight: "700" },
-  envChipTextSelected: { color: "#FFFFFF" },
-  serverInput: {
-    borderColor: "#B0C4D3",
-    borderWidth: 1,
-    borderRadius: 6,
-    padding: 8,
-    backgroundColor: "#FFFFFF",
-    color: "#173A63",
-    fontSize: 12
-  },
-  serverStatusBanner: {
-    paddingVertical: 4,
-    paddingHorizontal: 8,
-    borderRadius: 4,
-    backgroundColor: "#E8F5E9"
-  },
-  serverStatusBannerText: {
-    fontSize: 11,
-    color: "#2E7D32",
-    fontWeight: "600"
-  },
-  switchCloudBtn: {
-    backgroundColor: "#00796B",
-    paddingVertical: 7,
-    borderRadius: 6,
-    alignItems: "center",
-    marginTop: 2
-  },
-  switchCloudBtnText: {
-    color: "#FFFFFF",
-    fontSize: 11,
-    fontWeight: "700"
-  },
-  autoDetectBtn: {
-    backgroundColor: "#455A64",
-    paddingVertical: 7,
-    borderRadius: 6,
-    alignItems: "center",
-    marginTop: 2
-  },
-  autoDetectBtnText: {
-    color: "#FFFFFF",
-    fontSize: 11,
-    fontWeight: "700"
-  },
-
-  note: { marginTop: 6, fontSize: 12, lineHeight: 17, color: "#5D6873" },
-  // Floating Diagnostics Button
-  floatingLogBtn: {
-    position: "absolute",
-    bottom: 20,
-    right: 18,
-    backgroundColor: "#161B22",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 24,
-    borderWidth: 1.5,
-    borderColor: "#00E5FF",
-    elevation: 8,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 5
-  },
-  floatingLogIcon: {
-    fontSize: 14
-  },
-  floatingLogText: {
-    color: "#F0F6FC",
-    fontSize: 12,
-    fontWeight: "800"
   },
 });
-
-registerRootComponent(App);

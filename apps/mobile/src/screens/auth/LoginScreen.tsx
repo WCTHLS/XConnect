@@ -1,0 +1,434 @@
+import React, { useRef, useState } from 'react';
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  StyleSheet,
+  ActivityIndicator,
+  ScrollView,
+} from 'react-native';
+import Svg, { Path, Circle } from 'react-native-svg';
+import { useTheme } from '../../theme/useTheme';
+import { palette } from '../../theme/colors';
+import { GoogleLogo, MicrosoftLogo } from '../../components/BrandIcons';
+import {
+  emailSignInAvailable,
+  googleSignInAvailable,
+  microsoftSignInAvailable,
+  sendPasswordReset,
+  signInWithEmail,
+  signInWithGoogle,
+  signInWithMicrosoft,
+} from '../../services/auth';
+import { MobileScreen, Role } from '../../components/navigation/BottomNav';
+import { RolePicker } from '../../components/ui/RolePicker';
+import { useKeyboardAwareScroll } from '../../hooks/useKeyboardAwareScroll';
+
+// Named rather than read back off styles.container: StyleSheet.create's return value is an
+// opaque style ID on native builds, not the object itself, so its paddingBottom isn't something
+// that can be read back out at runtime to add the keyboard's height on top of it.
+const CONTENT_BOTTOM_PADDING = 56;
+
+interface LoginScreenProps {
+  role: Role;
+  /** Applied only once sign-in actually succeeds — see the comment in `run`. */
+  onSelectRole: (role: Role) => void;
+  onNavigate: (screen: MobileScreen) => void;
+  onSuccess?: () => void;
+}
+
+export const LoginScreen: React.FC<LoginScreenProps> = ({
+  role,
+  onSelectRole,
+  onNavigate,
+  onSuccess,
+}) => {
+  const { colors, theme } = useTheme();
+  const isDark = theme === 'dark';
+
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  // Held locally until sign-in succeeds, so a failed attempt (or backing out to Create Account)
+  // doesn't leave the app committed to a role nobody ended up signing in under.
+  const [pickedRole, setPickedRole] = useState<Role>(role);
+
+  const { scrollRef, focusHandlerFor, keyboardPadding } = useKeyboardAwareScroll();
+  const emailRef = useRef<TextInput>(null);
+  const passwordRef = useRef<TextInput>(null);
+
+  /** `entersApp` is false for actions that succeed without signing anyone in (password reset),
+   * which must not commit the picked role or navigate away from this screen. */
+  const run = async (
+    action: () => Promise<{ ok: boolean; error?: string }>,
+    entersApp: boolean = true
+  ) => {
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const result = await action();
+      if (!result.ok && result.error) {
+        setError(result.error);
+      } else if (result.ok && entersApp) {
+        onSelectRole(pickedRole);
+        onSuccess?.();
+        onNavigate('home');
+      }
+      return result;
+    } catch (err: any) {
+      setError(err?.message ?? 'Sign in failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleEmailSignIn = () => {
+    if (!email.trim() || !password) {
+      setError('Please enter email and password.');
+      return;
+    }
+    void run(() => signInWithEmail(email.trim(), password));
+  };
+
+  const handleForgotPassword = async () => {
+    if (!email.trim()) {
+      setError('Enter your email above first.');
+      return;
+    }
+    const res = await run(() => sendPasswordReset(email.trim()), false);
+    if (res?.ok) setInfo('Password reset email sent.');
+  };
+
+  return (
+    <ScrollView
+      ref={scrollRef}
+      style={{ flex: 1, backgroundColor: colors.surf }}
+      contentContainerStyle={[styles.container, { paddingBottom: CONTENT_BOTTOM_PADDING + keyboardPadding }]}
+      keyboardShouldPersistTaps="handled"
+      showsVerticalScrollIndicator={false}
+    >
+        {/* Header Branding */}
+        <View style={styles.header}>
+          <View style={styles.logoBadge}>
+            {/* Reproduces assets/icon.svg's glyph (same viewBox/paths, scaled down) rather than
+                importing the .svg directly — Metro isn't configured with an SVG transformer, and
+                every other icon in this codebase is hand-authored react-native-svg JSX already. */}
+            <Svg width={38} height={38} viewBox="0 0 1024 1024">
+              <Path d="M 284 284 L 512 512 L 740 740" fill="none" stroke="#FFFFFF" strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
+              <Path d="M 740 284 L 512 512 L 284 740" fill="none" stroke={palette.mintPresence} strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
+              <Circle cx={284} cy={284} r={102} fill="#FFFFFF" />
+              <Circle cx={740} cy={740} r={102} fill="#FFFFFF" />
+              <Circle cx={740} cy={284} r={102} fill={palette.mintPresence} />
+              <Circle cx={284} cy={740} r={102} fill={palette.mintPresence} />
+              <Circle cx={512} cy={512} r={64} fill="#102A2A" />
+              <Circle cx={512} cy={512} r={24} fill="#FFFFFF" />
+            </Svg>
+          </View>
+          <Text style={[styles.title, { color: colors.txt }]}>XConnect</Text>
+          <Text style={[styles.subtitle, { color: colors.sub }]}>
+            ENTERPRISE PRESENCE PLATFORM
+          </Text>
+        </View>
+
+        {error ? (
+          <View style={styles.errorBanner}>
+            <Text style={styles.errorText}>{error}</Text>
+          </View>
+        ) : null}
+
+        {info ? (
+          <View style={styles.infoBanner}>
+            <Text style={styles.infoText}>{info}</Text>
+          </View>
+        ) : null}
+
+        {/* Role — picked before any sign-in method, since all of them commit it on success */}
+        <View style={styles.roleSection}>
+          <RolePicker value={pickedRole} onChange={setPickedRole} disabled={busy} />
+        </View>
+
+        {/* OAuth Buttons */}
+        <View style={styles.oauthSection}>
+          {googleSignInAvailable && (
+            <TouchableOpacity
+              activeOpacity={0.8}
+              style={[
+                styles.oauthButton,
+                {
+                  backgroundColor: colors.card,
+                  borderColor: colors.border,
+                },
+              ]}
+              onPress={() => void run(signInWithGoogle)}
+              disabled={busy}
+            >
+              <GoogleLogo size={20} />
+              <Text style={[styles.oauthText, { color: colors.txt }]}>
+                Continue with Google
+              </Text>
+            </TouchableOpacity>
+          )}
+
+          {microsoftSignInAvailable && (
+            <TouchableOpacity
+              activeOpacity={0.8}
+              style={[
+                styles.oauthButton,
+                {
+                  backgroundColor: colors.card,
+                  borderColor: colors.border,
+                },
+              ]}
+              onPress={() => void run(signInWithMicrosoft)}
+              disabled={busy}
+            >
+              <MicrosoftLogo size={20} />
+              <Text style={[styles.oauthText, { color: colors.txt }]}>
+                Continue with Microsoft 365
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        <View style={styles.dividerRow}>
+          <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
+          <Text style={[styles.dividerText, { color: colors.muted }]}>
+            or continue with email
+          </Text>
+          <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
+        </View>
+
+        {/* Email & Password Form */}
+        <View style={styles.form}>
+          <View style={styles.inputGroup}>
+            <Text style={[styles.inputLabel, { color: colors.sub }]}>EMAIL ADDRESS</Text>
+            <TextInput
+              ref={emailRef}
+              onFocus={focusHandlerFor(emailRef)}
+              style={[
+                styles.input,
+                {
+                  backgroundColor: colors.card,
+                  borderColor: colors.border,
+                  color: colors.txt,
+                },
+              ]}
+              placeholder="Enter your email"
+              placeholderTextColor={colors.muted}
+              autoCapitalize="none"
+              keyboardType="email-address"
+              value={email}
+              onChangeText={setEmail}
+            />
+          </View>
+
+          <View style={styles.inputGroup}>
+            <View style={styles.passwordLabelRow}>
+              <Text style={[styles.inputLabel, { color: colors.sub }]}>PASSWORD</Text>
+              <TouchableOpacity onPress={handleForgotPassword}>
+                <Text style={[styles.forgotText, { color: palette.mintPresence }]}>
+                  Forgot?
+                </Text>
+              </TouchableOpacity>
+            </View>
+            <TextInput
+              ref={passwordRef}
+              onFocus={focusHandlerFor(passwordRef)}
+              style={[
+                styles.input,
+                {
+                  backgroundColor: colors.card,
+                  borderColor: colors.border,
+                  color: colors.txt,
+                },
+              ]}
+              placeholder="Enter your password"
+              placeholderTextColor={colors.muted}
+              secureTextEntry
+              value={password}
+              onChangeText={setPassword}
+            />
+          </View>
+
+          <TouchableOpacity
+            activeOpacity={0.85}
+            onPress={handleEmailSignIn}
+            disabled={busy}
+            style={styles.signInButton}
+          >
+            {busy ? (
+              <ActivityIndicator color="#0F2F2C" />
+            ) : (
+              <Text style={styles.signInButtonText}>Sign In</Text>
+            )}
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.footer}>
+          <TouchableOpacity onPress={() => onNavigate('createAccount')}>
+            <Text style={[styles.footerText, { color: colors.sub }]}>
+              Don't have an account?{' '}
+              <Text style={{ color: palette.mintPresence, fontWeight: '700' }}>
+                Create Account
+              </Text>
+            </Text>
+          </TouchableOpacity>
+        </View>
+    </ScrollView>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    paddingHorizontal: 24,
+    paddingTop: 36,
+    paddingBottom: CONTENT_BOTTOM_PADDING,
+  },
+  header: {
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  logoBadge: {
+    width: 60,
+    height: 60,
+    borderRadius: 18,
+    backgroundColor: '#102A2A',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  title: {
+    fontSize: 22,
+    fontWeight: '800',
+    letterSpacing: -0.4,
+    marginBottom: 6,
+  },
+  subtitle: {
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 18,
+  },
+  errorBanner: {
+    backgroundColor: 'rgba(239,68,68,0.15)',
+    borderWidth: 1,
+    borderColor: palette.roseError,
+    padding: 12,
+    borderRadius: 12,
+    marginBottom: 16,
+  },
+  errorText: {
+    color: palette.roseError,
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  infoBanner: {
+    backgroundColor: 'rgba(51,209,172,0.15)',
+    borderWidth: 1,
+    borderColor: palette.mintPresence,
+    padding: 12,
+    borderRadius: 12,
+    marginBottom: 16,
+  },
+  infoText: {
+    color: palette.mintPresence,
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  roleSection: {
+    marginBottom: 22,
+  },
+  oauthSection: {
+    gap: 12,
+    marginBottom: 20,
+  },
+  oauthButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    gap: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  oauthText: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  dividerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 20,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+  },
+  dividerText: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  form: {
+    gap: 16,
+  },
+  inputGroup: {
+    gap: 6,
+  },
+  passwordLabelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  inputLabel: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  forgotText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  input: {
+    paddingHorizontal: 16,
+    paddingVertical: 13,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  signInButton: {
+    backgroundColor: palette.mintPresence,
+    paddingVertical: 15,
+    borderRadius: 14,
+    alignItems: 'center',
+    marginTop: 8,
+    shadowColor: palette.mintPresence,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  signInButtonText: {
+    color: '#0F2F2C',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  footer: {
+    alignItems: 'center',
+    marginTop: 28,
+  },
+  footerText: {
+    fontSize: 13,
+  },
+});

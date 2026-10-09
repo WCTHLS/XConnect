@@ -55,6 +55,7 @@ export interface UwbTokenRequest {
 export interface RoomMemberInfo {
   deviceId: string;
   displayName: string;
+  email?: string;
   role: ParticipantRole;
   confidence?: number;
   wifiSimilarity?: number;
@@ -64,6 +65,66 @@ export interface RoomMemberInfo {
   ultrasonicVerified?: boolean;
   /** Milliseconds this device has been continuously assigned to this room. Resets if the device drops out of the room's cluster for longer than the grace period. */
   durationMs?: number;
+  startedAt?: string;
+  endedAt?: string | null;
+}
+
+/**
+ * An admin's check-in invitation to one person for one session label.
+ *
+ * This is an RSVP, never an attendance record. "accepted" means someone said they plan to be
+ * there; whether they actually were still comes only from sensor-verified room membership.
+ *
+ * "expired" is lazily computed server-side once an invite's `eventAt` has passed while it was
+ * still "pending" — it can no longer be accepted, declined, or (if already answered before
+ * expiring) changed. An accepted/declined invite is never auto-expired: a session running late
+ * shouldn't erase someone's real answer.
+ */
+export type InviteStatus = "pending" | "accepted" | "declined" | "expired";
+
+/**
+ * What an invite asks of someone. An attendee invite asks them to confirm they will be there; a
+ * presenter invite is a room assignment, so it carries `roomCode` and accepting it lets them
+ * start broadcasting that room without retyping it.
+ */
+export type InviteRole = "attendee" | "presenter";
+
+/** One row of the admin's response roster. */
+export interface SessionInvite {
+  id: number;
+  sessionId: string;
+  email: string;
+  /** The person's account name, falling back to their email when they have never signed in. */
+  displayName: string;
+  status: InviteStatus;
+  /** When the event is scheduled for, if the admin set one. Informational only. */
+  eventAt: string | null;
+  /** Shared by every invite in the same session batch; returned so the admin edit form can
+   *  prefill without a second request. */
+  title?: string | null;
+  message?: string | null;
+  inviteRole: InviteRole;
+  /** The room a presenter is assigned to. Always null on an attendee invite. */
+  roomCode: string | null;
+  createdAt: string;
+  respondedAt: string | null;
+}
+
+/** An invitation as the invited person sees it. Pending ones are shown as a prompt to answer;
+ *  answered ones become their reply history. */
+export interface MyInvite {
+  id: number;
+  sessionId: string;
+  title?: string | null;
+  message?: string | null;
+  status: InviteStatus;
+  /** When the event is scheduled for, if the admin set one. */
+  eventAt: string | null;
+  inviteRole: InviteRole;
+  /** The room this presenter is assigned to. Always null on an attendee invite. */
+  roomCode: string | null;
+  createdAt: string;
+  respondedAt: string | null;
 }
 
 export interface LiveRoomState {
@@ -73,6 +134,14 @@ export interface LiveRoomState {
   presenterName?: string;
   estimatedMemberDeviceIds: string[];
   members?: RoomMemberInfo[];
+  /**
+   * Attendees who left this still-active room mid-session (an explicit leave, or the same 45s
+   * silent-disconnect window that covers a dropped connection), most recent first. Each carries
+   * its real startedAt/endedAt/durationMs for the stay that just closed, same shape as `members`
+   * so the two can share rendering. Empty once the room itself ends: that attendance has already
+   * moved into the persisted history by then.
+   */
+  leftMembers?: RoomMemberInfo[];
   updatedAt: string;
 }
 
@@ -112,4 +181,40 @@ export function getAcousticTokenForRoom(roomId?: string): string {
 
   const alpha = clean.replace(/[^a-z0-9]/gi, "").toUpperCase();
   return (alpha || "RM-A").slice(0, 6);
+}
+
+/**
+ * Resolves an acoustic token (e.g. "WK-1", "HL-A", "AUD") back to a human-readable room name.
+ */
+export function getRoomForAcousticToken(token?: string, knownRooms?: string[]): string | undefined {
+  if (!token || !token.trim()) return undefined;
+  const upperToken = token.trim().toUpperCase();
+
+  // 1. Check against known rooms list
+  if (knownRooms && Array.isArray(knownRooms)) {
+    const match = knownRooms.find(r => getAcousticTokenForRoom(r) === upperToken);
+    if (match) return match;
+  }
+
+  // 2. Heuristic resolution for standard prefixes
+  if (upperToken.startsWith("WK-")) {
+    return `Workshop ${upperToken.slice(3)}`;
+  }
+  if (upperToken.startsWith("HL-")) {
+    return `Hall ${upperToken.slice(3)}`;
+  }
+  if (upperToken.startsWith("RM-")) {
+    return `Room ${upperToken.slice(3)}`;
+  }
+  if (upperToken.startsWith("ST-")) {
+    return `Stage ${upperToken.slice(3)}`;
+  }
+  if (upperToken === "AUD") {
+    return "Auditorium";
+  }
+  if (upperToken === "CONF") {
+    return "Conference Hall";
+  }
+
+  return upperToken;
 }

@@ -1,0 +1,11 @@
+# Host-installed packages would overwrite the Linux ones the image installs (and on Windows
+# they're junctions to the wrong platform's binaries).
+**/node_modules
+
+# Never send real credentials into the build context.
+**/.env
+**/.env.*
+
+.git
+apps
+docs

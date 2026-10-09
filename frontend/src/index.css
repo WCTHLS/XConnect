@@ -1,0 +1,190 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  --color-obsidian: #0B0F17;
+  --color-slate-card: #161F30;
+  --color-slate-border: #223147;
+  --color-emerald-presence: #10B981;
+  --color-emerald-light: #059669;
+  --color-sky-mesh: #38BDF8;
+  --color-sky-dark: #0284C7;
+  --color-teal-ultra: #2DD4BF;
+  --color-amber-warn: #F59E0B;
+  --color-rose-error: #EF4444;
+}
+
+/* ─── Cinematic Intro ────────────────────────────────────────── */
+
+@keyframes x-appear {
+  0%   { opacity: 0; transform: scale(0.55) rotate(-6deg); filter: blur(14px); }
+  60%  { opacity: 1; transform: scale(1.04) rotate(1deg); filter: blur(0px); }
+  100% { opacity: 1; transform: scale(1) rotate(0deg); filter: blur(0px); }
+}
+
+@keyframes x-zoom {
+  0%   { transform: scale(1); opacity: 1; filter: brightness(1) blur(0px); }
+  65%  { transform: scale(16); opacity: 1; filter: brightness(3) blur(0px); }
+  90%  { transform: scale(32); opacity: 0.4; filter: brightness(6) blur(2px); }
+  100% { transform: scale(48); opacity: 0; filter: brightness(8) blur(6px); }
+}
+
+@keyframes ring-burst {
+  0%   { transform: scale(0.8); opacity: 0.7; }
+  100% { transform: scale(2.6); opacity: 0; }
+}
+
+@keyframes intro-flash {
+  0%, 55% { opacity: 0; }
+  70%      { opacity: 0.85; }
+  100%     { opacity: 0; }
+}
+
+/* ─── Presence & UI Animations ───────────────────────────────── */
+
+@keyframes pulse-orb {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 40px rgba(16,185,129,0.35), 0 0 80px rgba(16,185,129,0.12); }
+  50%       { transform: scale(1.07); box-shadow: 0 0 60px rgba(16,185,129,0.6), 0 0 120px rgba(16,185,129,0.2); }
+}
+
+@keyframes orb-ring {
+  0%   { transform: scale(1); opacity: 0.45; }
+  100% { transform: scale(1.7); opacity: 0; }
+}
+
+@keyframes radar-pulse {
+  0%   { transform: scale(0.85); opacity: 0.65; }
+  100% { transform: scale(1.55); opacity: 0; }
+}
+
+@keyframes live-dot {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.25; }
+}
+
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes float {
+  0%, 100% { transform: translate(-50%, -50%) translateY(0px); }
+  50%       { transform: translate(-50%, -50%) translateY(-5px); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes scale-in {
+  from { transform: scale(0.88); opacity: 0; }
+  to   { transform: scale(1); opacity: 1; }
+}
+
+@keyframes shield-pop {
+  0%   { transform: scale(0.4); opacity: 0; }
+  65%  { transform: scale(1.12); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes amber-glow {
+  0%, 100% { box-shadow: 0 0 16px rgba(245,158,11,0.3); }
+  50%       { box-shadow: 0 0 36px rgba(245,158,11,0.65); }
+}
+
+@keyframes slide-up {
+  from { transform: translateY(100%); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes counter-roll {
+  0%   { transform: translateY(0); opacity: 1; }
+  45%  { transform: translateY(-100%); opacity: 0; }
+  46%  { transform: translateY(100%); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes tab-enter {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes tab-indicator {
+  from { opacity: 0; transform: scaleX(0.4); }
+  to   { opacity: 1; transform: scaleX(1); }
+}
+
+@keyframes ping {
+  75%, 100% { transform: scale(1.9); opacity: 0; }
+}
+
+@keyframes card-press {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(0.975); }
+  100% { transform: scale(1); }
+}
+
+@keyframes log-in {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes session-card-in {
+  from { opacity: 0; transform: translateX(20px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes loading-pulse {
+  0%, 100% { opacity: 0.4; }
+  50%       { opacity: 1; }
+}
+
+/* ─── Launch Assembly Animations ─────────────────────────────── */
+
+/* Full-screen turquoise cover that zooms out (collapses to icon footprint) */
+@keyframes splash-cover-out {
+  0%   { transform: scale(1); border-radius: 0%; opacity: 1; }
+  55%  { border-radius: 50%; opacity: 1; }
+  85%  { transform: scale(0.28); border-radius: 50%; opacity: 0.6; }
+  100% { transform: scale(0); border-radius: 50%; opacity: 0; }
+}
+
+/* Icon appears from large scale */
+@keyframes splash-icon-appear {
+  0%   { transform: scale(4.5); opacity: 0; filter: blur(8px); }
+  50%  { opacity: 1; filter: blur(0px); }
+  80%  { transform: scale(0.96); }
+  100% { transform: scale(1); }
+}
+
+/* Radar/radio waves expand from center */
+@keyframes splash-wave {
+  0%   { transform: translate(-50%, -50%) scale(1); opacity: 0.7; }
+  100% { transform: translate(-50%, -50%) scale(3.6); opacity: 0; }
+}
+
+/* CONNECT slides in from right */
+@keyframes connect-slide-in {
+  from { transform: translateX(60px); opacity: 0; }
+  to   { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes wave-ring-expand {
+  0%   { transform: translate(-50%,-50%) scale(1); opacity: 0.65; }
+  100% { transform: translate(-50%,-50%) scale(4.2); opacity: 0; }
+}
+
+@keyframes logo-dissolve {
+  from { opacity: 1; filter: blur(0px); }
+  to   { opacity: 0; filter: blur(4px); }
+}
+
+/* ─── Global ─────────────────────────────────────────────────── */
+* { scrollbar-width: none; -ms-overflow-style: none; }
+*::-webkit-scrollbar { display: none; }
+html, body, #root { height: 100%; font-family: 'Inter', sans-serif; }
