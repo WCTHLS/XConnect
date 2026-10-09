@@ -4,7 +4,7 @@ import {
   Text,
   TouchableOpacity,
   StyleSheet,
-  ScrollView,
+  FlatList,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import type { LiveRoomState, RoomMemberInfo } from '@confpresence/shared';
@@ -182,11 +182,18 @@ export const AdminRoomDetailScreen: React.FC<AdminRoomDetailScreenProps> = ({
         </TouchableOpacity>
       </View>
 
-      <ScrollView
+      {/* Virtualized: only the rows near the screen exist as native views, so a room of 800+ costs
+          about the same as one of 20, and each poll only re-renders what's mounted. */}
+      <FlatList
+        data={rosterOrder}
+        keyExtractor={({ member, left }) => `${left ? 'left' : 'in'}:${member.deviceId}`}
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
-      >
-        {rosterOrder.length === 0 ? (
+        initialNumToRender={12}
+        maxToRenderPerBatch={12}
+        windowSize={5}
+        removeClippedSubviews
+        ListEmptyComponent={
           <View style={[styles.emptyCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
             <Text style={[styles.emptyText, { color: colors.muted }]}>
               {tab === 'left'
@@ -194,8 +201,8 @@ export const AdminRoomDetailScreen: React.FC<AdminRoomDetailScreenProps> = ({
                 : 'No presenter or attendees in this room right now.'}
             </Text>
           </View>
-        ) : (
-          rosterOrder.map(({ member: m, left }) => {
+        }
+        renderItem={({ item: { member: m, left } }) => {
             const isPresenter = m.role === 'presenter';
             const { joinedAt, duration } = left
               ? { joinedAt: m.startedAt ? formatClockTime(m.startedAt) : '—', duration: formatDuration(m.durationMs ?? 0) }
@@ -283,9 +290,8 @@ export const AdminRoomDetailScreen: React.FC<AdminRoomDetailScreenProps> = ({
                 </View>
               </View>
             );
-          })
-        )}
-      </ScrollView>
+        }}
+      />
     </View>
   );
 };

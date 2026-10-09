@@ -34,6 +34,13 @@ and varied sensor data. At 700 devices with heavy churn it ran with zero errors 
 attendance records, and it surfaced one product behavior worth knowing about: a presenter silent
 for over a minute splits everyone's stay in that room.
 
+**Update (October 9, 2026): the backend now also runs on Azure Container Apps** (section 9). With the
+load generator in the same Azure region, 1 vCPU / 2 GiB handles 700 devices with heavy churn and
+800 devices across 5 rooms with zero errors outside a deliberate outage. A restart with Redis keeps
+every room as one occurrence. Measurements taken from a laptop over HTTPS were wrong by about 100x
+and should not be used (section 9). The admin screens on the phone were also the slow part at
+800+ devices, not the server (section 10).
+
 ---
 
 ## 1. Per-request to per-tick (local)
@@ -419,6 +426,111 @@ Production equivalent: a presenter's phone dying with nobody ending the room.
 
 ---
 
+## 9. Azure Container Apps (October 9, 2026)
+
+The backend was deployed to Azure Container Apps on the personal trial, built from the repo's
+existing `Dockerfile`, to compare against the VM in section 7 and to test restart behavior with Redis.
+
+**Setup** (all in `infra/main.bicep`, deployed in two passes because the app can't start before its
+image is in the registry; secrets live in a gitignored `infra/main.local.bicepparam`):
+
+| Piece | Detail |
+|---|---|
+| Container registry | Basic tier, name generated per resource group (a clean name would claim a global Azure name the company deployment may want) |
+| Environment + log workspace | 30-day log retention |
+| API app | Exactly 1 replica (min = max = 1), external HTTPS ingress to port 3000, `DATABASE_URL` as a secret |
+| Redis | A second, separate container app (`redis:7-alpine`, 0.5 vCPU, 1 GiB, 1 replica) with internal-only TCP ingress. Separate on purpose: a Redis inside the API app would be replaced by every deploy or restart, at the moment the API needs it |
+| Postgres | The existing Canada Central server, opened to Azure services with a firewall rule (a Consumption-plan app has no fixed outbound IP) |
+
+CPU and memory must follow Azure's fixed pairs, memory = 2 GiB per vCPU (1 / 2, 2 / 4, 4 / 8).
+Rooms and the 2s tick live in one process's memory, so the app must stay at exactly one copy.
+
+**Measuring from the laptop gave wrong answers.** The same container, same flags (700 devices, 1
+room), measured from two places:
+
+| `poll_device` | From the laptop (HTTPS) | From the VM, same Azure region |
+|---|---|---|
+| Typical | 2,100 ms | **16 ms** |
+| p90 | 8,400 ms | 123 ms |
+| Requests completed in 300s | about 55,000 | about 90,000 (full demand) |
+
+The container's CPU never passed about 0.5 core in either configuration, while the laptop's
+`node.exe` sat at 50-60% of the whole machine doing HTTPS for 700 simulated devices. The server
+was fine and the generator was the limit. **Run load tests from a machine in the same region as
+the server.** Numbers in this section other than that comparison were measured from the VM.
+
+**Results from the VM** (`loadtest-realistic.ts`, zero errors in all of these):
+
+| Size | Devices / rooms / duration | Churn per room per min | `poll_device` typical / p90 / p99 / max |
+|---|---|---|---|
+| 2 vCPU / 4 GiB | 700 / 1 / 300s | 20 | 16 / 123 / 3,592 / 5,166 ms |
+| **1 vCPU / 2 GiB** | 700 / 1 / 300s | 50 | 22 / 205 / 393 / 884 ms |
+| **1 vCPU / 2 GiB, Redis on, one rolling restart mid-run** | 700 / 5 / 300s | 50 | 5 / 54 / 444 / 665 ms |
+| 1 vCPU / 2 GiB, Redis on, one hard stop (~40s) mid-run | 800 / 5 / 300s | 50 | 8 / 100 / 844 / 24,055 ms (the max is a request caught in the outage) |
+
+The extra core did not help (one Node process), and the 3-5 second tail seen once at 2 vCPU did
+not repeat at 1 vCPU. That tail may have been a one-off. Estimated CPU at 700 devices is roughly
+0.8 core at full demand, so 1 vCPU is workable but not roomy.
+
+**Restart survival with Redis, two cases, both checked in Postgres:**
+
+| | Rolling restart (`revision restart`) | Hard stop then start (`revision deactivate` / `activate`) |
+|---|---|---|
+| What Azure did | Started the new replica at 04:15:47 and stopped the old one at 04:15:52, so the two ran side by side for about 5s | Nothing served for about 40s |
+| Failed requests | **0** | 4,310 (4,270 `404`, 40 `503`), all inside the outage, none after |
+| Room occurrences | 1 per room (5 rooms) | 1 per room (5 rooms) |
+| Stays left open | 0 | 0 |
+| Stays closed together | 299 | 257 |
+| Where | Rooms 4 and 5 (about 125 each), rooms 1-3 (11-22 each) | Room 5 (144), rooms 1-4 (23-34 each) |
+| Reopened later | 216 of 299, median gap 1m20s, max 2m36s | 160 of 257, median gap 1m46s, min 50s, max 3m06s |
+
+**What the restart actually costs:**
+
+- **Rooms always survive.** The Redis restore did its job in every case.
+- **Most attendees are unaffected.** Roughly 540 of the 800 kept one unbroken stay through a 40s
+  outage, because it is shorter than the 45s membership grace.
+- **A subset get a split stay.** A closed stay's `ended_at` is saved as its *last-seen* time, not
+  the moment it was swept (`persistence.ts`, `persistClosedMembership`), so the many stays that
+  share one closing second all share the last checkpoint time before the restart. Only the
+  roomMembership and activeRooms maps are checkpointed, not the device records. After a restart a
+  stay is only refreshed once its attendee is placed in a presenter's cluster again, which needs
+  the presenter's next upload and fresh Bluetooth data from the attendees. If that takes longer
+  than 45s the stay is swept, and the attendee gets a second stay when they are placed.
+- **One or two rooms are hit much harder than the rest, both times.** Not explained. One candidate
+  is a presenter's random step-out (75-180s into the run) landing near the restart, which would
+  delay that room's placement. This has not been tested.
+- **A rolling restart briefly runs two copies,** so the single-replica rule is not strict during a
+  restart, and both copies write the same Redis keys for those seconds. No room split in this
+  test, but it is the first thing to look at if one ever does.
+
+Two deploy notes: the startup restore runs at boot, so if Redis is unreachable then, the process
+exits and Container Apps restarts it until Redis is up. The startup probe shows one failed check
+on every start (the server takes a few seconds to boot) and that is harmless.
+
+## 10. Admin screens on the phone at 800+ devices
+
+The admin Session History screen took about **21 seconds** to show attendees for an 846-attendee
+room. Measured with timing logs on the device:
+
+| Step | Time |
+|---|---|
+| Download (`/api/admin/history`, 296 KB) | 529 ms |
+| JSON parse | 9 ms |
+| Grouping attendees | about 18 ms |
+| **Tap "Show attendees" until rows are drawn** | **21,098 ms** |
+
+The server returns that endpoint in about 0.75s, and the history list endpoint in 0.43s, so the
+slowness was drawing about 846 cards (about 25 views each) at once in a plain `ScrollView`. The
+screen also re-rendered about 15 times after the tap, each time regrouping the data.
+
+Fixes: history attendees are shown 50 at a time with a "Show more" button and grouped once per
+opened room (`AdminHistoryScreen.tsx`), and the live admin room roster is a virtualized
+`FlatList` (`AdminRoomDetailScreen.tsx`), which showed no visible lag at 700+ devices. The
+presenter roster screen still uses a plain `ScrollView` and has the same problem. PDF export is
+unchanged and still includes everyone.
+
+---
+
 ## Open items
 
 - **The local single-room-concentration anomaly** (section 4) remains genuinely unexplained as a
@@ -452,3 +564,14 @@ Production equivalent: a presenter's phone dying with nobody ending the room.
 - **Abandoned rooms are never marked as ended** (section 8). Small, real production bug; not fixed.
 - **Presenter silence over ~60s splits attendee stays** (section 8). Accepted as current behavior;
   revisit if attendance time accuracy during presenter outages matters.
+- **After a restart, some rooms re-place their attendees slowly** (section 9): roughly a third of
+  stays close and reopen about a minute later, concentrated in one or two rooms. Untested ideas:
+  rerun an outage with `--presenter-rejoin=false` to rule out presenter step-outs; and refresh
+  restored stays' last-seen time at boot to give a fresh 45s grace (would help only the attendees
+  re-placed within that window, since the median re-placement was about 60s after boot).
+- **The single-room limit on Container Apps at 1 vCPU** is not measured: 700 devices in one room
+  is clean, 800 and 1000 were only tested across 5 rooms (800) or on the VM.
+- **The presenter roster screen** still draws every member at once (section 10).
+- **The Container Apps deployment is on a personal trial account** with sign-in off and a public
+  address. It needs recreating from `infra/main.bicep` in the company resource group, with a
+  Key Vault or other secret store for `databaseUrl` instead of a local parameters file.

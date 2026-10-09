@@ -4,7 +4,7 @@ import {
   Text,
   TextInput,
   StyleSheet,
-  ScrollView,
+  FlatList,
 } from 'react-native';
 import { RoomMemberInfo } from '@confpresence/shared';
 import { useTheme } from '../../theme/useTheme';
@@ -63,11 +63,19 @@ export const PresenterRosterScreen: React.FC<PresenterRosterScreenProps> = ({
         />
       </View>
 
-      <ScrollView
+      {/* Virtualized: only the rows near the screen exist as native views, so a room of 800+ costs
+          about the same as one of 20, and each live update only re-renders what's mounted. */}
+      <FlatList
+        data={filtered}
+        keyExtractor={(m, idx) => m.deviceId || String(idx)}
         contentContainerStyle={styles.list}
         showsVerticalScrollIndicator={false}
-      >
-        {filtered.length === 0 ? (
+        keyboardShouldPersistTaps="handled"
+        initialNumToRender={12}
+        maxToRenderPerBatch={12}
+        windowSize={5}
+        removeClippedSubviews
+        ListEmptyComponent={
           <View
             style={[
               styles.emptyState,
@@ -80,28 +88,26 @@ export const PresenterRosterScreen: React.FC<PresenterRosterScreenProps> = ({
                 : 'No attendees currently detected in room.'}
             </Text>
           </View>
-        ) : (
-          filtered.map((m, idx) => (
-            <ParticipantCard
-              key={m.deviceId || idx}
-              name={m.displayName || `Attendee ${idx + 1}`}
-              role={m.role === 'presenter' ? 'Host' : 'Attendee'}
-              dwell={formatMemberDwell(m.durationMs)}
-              joinedAt={
-                m.startedAt
-                  ? new Date(m.startedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })
-                  : undefined
-              }
-              ultraVerified={m.ultrasonicVerified ?? false}
-              wifiMatch={
-                m.wifiSimilarity ? `${Math.round(m.wifiSimilarity * 100)}%` : 'Active'
-              }
-              bleActive={true}
-              motionFlag={m.motionAnomalyFlag ?? false}
-            />
-          ))
+        }
+        renderItem={({ item: m, index: idx }) => (
+          <ParticipantCard
+            name={m.displayName || `Attendee ${idx + 1}`}
+            role={m.role === 'presenter' ? 'Host' : 'Attendee'}
+            dwell={formatMemberDwell(m.durationMs)}
+            joinedAt={
+              m.startedAt
+                ? new Date(m.startedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })
+                : undefined
+            }
+            ultraVerified={m.ultrasonicVerified ?? false}
+            wifiMatch={
+              m.wifiSimilarity ? `${Math.round(m.wifiSimilarity * 100)}%` : 'Active'
+            }
+            bleActive={true}
+            motionFlag={m.motionAnomalyFlag ?? false}
+          />
         )}
-      </ScrollView>
+      />
     </View>
   );
 };

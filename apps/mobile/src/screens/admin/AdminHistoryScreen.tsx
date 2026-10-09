@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -25,6 +25,10 @@ import {
   type SessionOccurrence,
 } from '../../services/sessionHistory';
 
+// A 800-person room drawn all at once is ~20,000 native views inside a ScrollView, which took
+// over 20s on a phone; attendees are revealed a page at a time instead.
+const ATTENDEES_PER_PAGE = 50;
+
 interface AdminHistoryScreenProps {
   /** Lists past room occurrences. A blank code means "everything", not "nothing". */
   onSearch: (code: string) => Promise<SessionOccurrence[]>;
@@ -42,6 +46,7 @@ export const AdminHistoryScreen: React.FC<AdminHistoryScreenProps> = ({
   const [occurrences, setOccurrences] = useState<SessionOccurrence[]>([]);
   const [selected, setSelected] = useState<HistoryDetail | null>(null);
   const [expandedRooms, setExpandedRooms] = useState<Set<string>>(new Set());
+  const [shownCount, setShownCount] = useState<Record<string, number>>({});
   // Per-person visit breakdowns, keyed `${roomId}::${deviceId}` so the same person in two rooms
   // expands independently.
   const [expandedVisits, setExpandedVisits] = useState<Set<string>>(new Set());
@@ -84,6 +89,7 @@ export const AdminHistoryScreen: React.FC<AdminHistoryScreenProps> = ({
       const detail = await onOpenOccurrence(occurrenceId);
       setSelected(detail);
       setExpandedRooms(new Set());
+      setShownCount({});
     } catch (err: any) {
       setError(err?.message || 'Could not load that session.');
     } finally {
@@ -107,6 +113,12 @@ export const AdminHistoryScreen: React.FC<AdminHistoryScreenProps> = ({
       setExporting(false);
     }
   };
+
+  // Grouped per person once per opened room, not on every re-render (the screen re-renders often).
+  const attendeesByRoom = useMemo(
+    () => new Map((selected?.rooms ?? []).map(room => [room.roomId, aggregateAttendees(room.members)])),
+    [selected]
+  );
 
   const toggleRoom = (roomId: string) => {
     setExpandedRooms(prev => {
@@ -281,7 +293,8 @@ export const AdminHistoryScreen: React.FC<AdminHistoryScreenProps> = ({
                 const earliestStart = Math.min(...room.members.map(m => new Date(m.startedAt).getTime()));
                 const { durationMs, stillOpen } = computeOccupiedDurationMs(room.members);
                 const isExpanded = expandedRooms.has(room.roomId);
-                const attendees = aggregateAttendees(room.members);
+                const attendees = attendeesByRoom.get(room.roomId) ?? [];
+                const visibleCount = shownCount[room.roomId] ?? ATTENDEES_PER_PAGE;
 
                 return (
                   <View
@@ -317,7 +330,7 @@ export const AdminHistoryScreen: React.FC<AdminHistoryScreenProps> = ({
                     </TouchableOpacity>
 
                     {isExpanded &&
-                      attendees.map(a => {
+                      attendees.slice(0, visibleCount).map(a => {
                         const visitKey = `${room.roomId}::${a.deviceId}`;
                         const visitsOpen = expandedVisits.has(visitKey);
                         return (
@@ -482,6 +495,19 @@ export const AdminHistoryScreen: React.FC<AdminHistoryScreenProps> = ({
                           </View>
                         );
                       })}
+
+                    {isExpanded && attendees.length > visibleCount && (
+                      <TouchableOpacity
+                        activeOpacity={0.8}
+                        onPress={() =>
+                          setShownCount(prev => ({ ...prev, [room.roomId]: visibleCount + ATTENDEES_PER_PAGE }))
+                        }
+                      >
+                        <Text style={[styles.expandToggle, { color: palette.mintPresence }]}>
+                          Showing {visibleCount} of {attendees.length} · Show {Math.min(ATTENDEES_PER_PAGE, attendees.length - visibleCount)} more
+                        </Text>
+                      </TouchableOpacity>
+                    )}
                   </View>
                 );
               })

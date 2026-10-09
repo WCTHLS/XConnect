@@ -180,6 +180,15 @@ the device count. Make the run at least ~120s long so the 5-75s step-outs fit in
 **A presenter step-out must never call `/api/session/leave`**: the server treats a presenter's
 leave as "end this room", which closes everyone's stay and starts a new occurrence on rejoin.
 
+## Run the generator next to the server, not on a laptop
+
+When the target is a cloud deployment, run the load test from a machine in the same region (a
+small VM), not from your laptop. From a laptop, 700 simulated devices over HTTPS made a healthy
+server look about 100 times slower (typical poll 2,100 ms vs. 16 ms from a VM in the same region),
+because the laptop's own CPU and network became the limit. Signs of a generator-bound run: the
+server's CPU graph stays low while the client's latencies are high, and `node.exe` on the laptop
+uses a large share of the machine. See `docs/LOAD_TEST_RESULTS.md` section 9.
+
 ## Checking attendance in Postgres after a run
 
 Throughput numbers don't show whether attendance was recorded correctly. After a run, check
