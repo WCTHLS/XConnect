@@ -41,6 +41,16 @@ every room as one occurrence. Measurements taken from a laptop over HTTPS were w
 and should not be used (section 9). The admin screens on the phone were also the slow part at
 800+ devices, not the server (section 10).
 
+**Update (October 11, 2026): Postgres on a Burstable B1ms server, and the first hour-long test.**
+A new B1ms server (1 vCore, 32 GiB, created from the Bicep file) matches the B2s on latency and
+never spent any CPU credits, even through an hour at 700 devices (section 11). The hour-long test
+also showed that the container's 1 vCPU is not enough for 700 devices in a single room over time:
+CPU climbed from about 0.8 core to its 1.0 limit and latency collapsed (p99 3.2s, max 145s) with
+no errors. The 5-minute runs in section 9 did not show this, so "1 vCPU is fine" there only holds
+for short runs (section 12). The same hour sent 288.5 GB of data out of the API, because each
+attendee poll returns the whole room including a growing list of people who left, which is the
+leading explanation for the slowdown and a large hidden cost (section 12).
+
 ---
 
 ## 1. Per-request to per-tick (local)
@@ -529,6 +539,165 @@ opened room (`AdminHistoryScreen.tsx`), and the live admin room roster is a virt
 presenter roster screen still uses a plain `ScrollView` and has the same problem. PDF export is
 unchanged and still includes everyone.
 
+(Update: the presenter roster was later moved to a virtualized `FlatList` as well, in
+`PresenterRosterScreen.tsx`, and checked on a device.)
+
+## 11. Postgres on a Burstable B1ms server (October 11, 2026)
+
+Context: the earlier tests ran against a B2s server. The cost estimate
+(`docs/DATABASE_COST_ESTIMATE.md`) recommends B1ms, so it was measured before relying on it.
+
+**Setup.** `infra/main.bicep` now has `createPostgres`. With it on, the template creates the
+server and a database named `xconnect`, builds the `DATABASE_URL` secret for the container app,
+and opens the "allow Azure services" firewall rule.
+
+| Setting | Value |
+|---|---|
+| Server | `xconnect-test-pg-b1ms-kk`, Burstable B1ms (1 vCore, 2 GiB), PostgreSQL 16 |
+| Disk | 32 GiB, auto-grow off, 7-day backups (LRS) |
+| Region | Canada Central (the trial subscription cannot create Postgres in East US) |
+| Container app | East US, 1 vCPU / 2 GiB, one replica, Redis as a separate container app |
+
+Things that went wrong or were not obvious while doing it:
+
+- Creating the server in East US failed with `ParameterOutOfRange: The value of the 'Version'
+  should be in: []`. An empty allowed list means the subscription cannot create Postgres in that
+  region. Fixed with a separate `postgresLocation` parameter.
+- Changing a Container Apps secret does not restart the running container. After the deploy the
+  revision had to be restarted for the new `DATABASE_URL` to take effect.
+- The migrations were applied from inside the container (`az containerapp exec`, then
+  `cd /app/backend && pnpm exec drizzle-kit migrate`). Passing the command as one quoted string
+  through PowerShell fails with an unterminated-quote error, so use an interactive shell. The
+  app's startup tolerates an empty database: the orphaned-rooms sweep logs an error and the
+  process keeps running.
+
+**300-second run from the VM**, 700 devices, 5 rooms, churn 50 per room per minute (the same shape
+as the B2s run in section 9, but without a restart):
+
+| Endpoint | Count | Errors | p50 | p90 | p99 | max |
+|---|---|---|---|---|---|---|
+| `poll_device` | 61,961 | 0 | 7 | 53 | 420 | 699 |
+| `batch` | 18,295 | 0 | 7 | 53 | 412 | 660 |
+| `join` | 1,811 | 0 | 3 | 17 | 317 | 572 |
+| `leave` | 1,589 | 0 | 4 | 20 | 232 | 638 |
+| `poll_room` | 413 | 0 | 7 | 50 | 219 | 486 |
+| `admin_overview` | 62 | 0 | 5 | 87 | 137 | 137 |
+
+674 attendees were replaced, 432 returned and 5 presenters rejoined. Against the B2s 5-room run
+(`poll_device` typical 5 / p90 54 / p99 444 / max 665 ms), B1ms is the same within noise. The
+database being half the size made no visible difference.
+
+**CPU and credits** (Azure metrics on the B1ms server). A Burstable server earns credits while
+below its baseline (about 20% of one vCore on B1ms, 0.2 credits a minute) and spends them only
+above it.
+
+| Measure | Reading |
+|---|---|
+| Credits remaining at the start | 30 (a new server) |
+| Credits remaining after the 1-hour test (section 12) | about 39 |
+| Credits consumed | 0 throughout (the single reading of 1 was the create-and-migrate burst) |
+| CPU percent, max | mostly 6 to 14%, one bump to about 20%, and about 34% at the end of the hour-long test (all devices leaving) |
+
+Postgres CPU stayed flat while the API's latency got worse in section 12, which fits the problem
+being in the API process and not the database. Per-database size from the Azure dashboard: the
+empty migrated `xconnect` database was 8.33 MB (the other databases are about 8 MB each as well),
+and 15.7 MB after both runs, so the two runs added about 7.4 MB for about 5,500 stays, or about
+1.3 KB per stay including device rows and state-change events.
+
+**Result.** B1ms is enough for the database at 700 devices, including a full hour. No credit
+pressure appeared even from a 30-credit start.
+
+## 12. One hour at 700 devices in a single room (October 11, 2026)
+
+Run from the VM against the Container Apps API, `loadtest-realistic.ts --devices=700 --rooms=1
+--duration=3600 --churn=50`, with 1 vCPU / 2 GiB and Redis on, started detached with `nohup`.
+
+| Endpoint | Count | Errors | p50 | p90 | p99 | max |
+|---|---|---|---|---|---|---|
+| `poll_device` | 750,936 | 0 | 184 | 1,102 | 3,188 | 144,863 |
+| `batch` | 229,469 | 0 | 182 | 1,087 | 2,904 | 144,141 |
+| `join` | 3,668 | 0 | 114 | 1,043 | 2,891 | 74,205 |
+| `leave` | 3,077 | 0 | 102 | 940 | 2,525 | 125,695 |
+| `poll_room` | 1,113 | 0 | 196 | 1,093 | 3,020 | 54,238 |
+| `admin_overview` | 650 | 0 | 183 | 1,064 | 3,157 | 94,936 |
+
+1,765 attendees were replaced (about 3,000 expected at 50 a minute), 590 + 612 returned, and 1
+presenter rejoin. About 989,000 requests completed, roughly 91% of the demand the generator
+generates, so the generator slowed down as well.
+
+Against the 5-minute run of the same shape (1 vCPU, 700 devices, 1 room, section 9: typical 22 / p90
+205 / p99 393 / max 884 ms) every figure is much worse, with **zero errors**: nothing crashed or
+restarted, requests just waited.
+
+**Container metrics for the hour** (Azure Monitor, container app `xconnect-test`):
+
+- **CPU usage** started at about 0.8 core and climbed steadily to **1.0 core (the limit) by about
+  half an hour in**, where it stayed until the test ended. The earlier 5-room run of the same size
+  used only about 0.4 core, so one 700-device room costs roughly twice as much CPU as the same
+  devices spread over 5 rooms.
+- **Memory working set** stayed flat at about 220 MB for the first half hour, then rose steadily to
+  about 970 MB (of 2 GiB) before dropping to about 120 MB once the test stopped.
+
+**Reading.**
+
+- The slowdown is not the database. `poll_device`, `poll_room` and `admin_overview` are served
+  from the in-memory snapshot (the live routes do no Postgres work), yet they are as slow as the
+  endpoints that write. Equal slowdown on every endpoint means the Node process was behind, with
+  its main thread at the CPU limit. B1ms's credits and CPU (section 11) were untouched.
+- The generator waits for each reply before a device sends its next request, so a growing backlog
+  of requests cannot account for the memory growth. It is in the server.
+- **Correction to section 9:** "1 vCPU / 2 GiB is enough for 700 devices" held for runs of a few
+  minutes. For an hour in one room it is not. Going to 2 vCPU would not help either: the 2 vCPU
+  runs in section 9 gave no benefit because the busy part is one thread.
+
+**Not yet explained.** Why the CPU cost per request rises over time at a constant load, and why
+memory starts to grow after about 30 minutes. Candidates, none confirmed: state that grows as
+attendees come and go (closed stays, replaced devices) and is re-scanned every tick, the Redis
+checkpoint writing all of the engine's maps on every tick, or garbage collection falling behind
+once the CPU is full.
+
+**Outbound data, measured afterwards** (Azure Monitor, container app, metric Network Out Bytes,
+Sum). The API sent **288.5 GB in the one-hour run**. The per-interval total (intervals look to be 5
+minutes) rose from about 14 GB in the first full interval to about 31 GB at the end, with
+demand roughly constant or falling:
+
+- About 14 GB per 5 minutes at roughly 230 attendee polls a second is about **200 KB per poll**
+  at the start, in line with a room of 700 members.
+- By the end the same polls were more than twice as large, so **the response grows during the
+  run**.
+- The attendee poll (`GET /api/devices/:deviceId/live`, `deviceRoomState` in `inference.ts`) returns
+  the entire room snapshot: every member, plus `leftMembers`. `leftMembers` is built from
+  `recentlyLeftByRoom`, which only gains entries while a room is open (no cap, cleared only when the
+  room ends), and it is re-sorted and re-serialized into every snapshot. With about 1,765
+  replacements in the hour it kept growing.
+- That fits the three symptoms above: CPU per request rising until the 1 vCPU limit, memory growth
+  from larger responses, and every endpoint slowing together. It is the leading explanation, from
+  reading the code and these numbers, and **not yet proven**: the fix below is also the test.
+- Cost: the first 100 GB of outbound data a month is free, then roughly $0.09 per GB (check current
+  pricing). Phones count as internet egress. Whether traffic from the VM generator in the same
+  region was billed is not known, so this run is not a bill. At 16 event-hours a month with 500
+  attendees the same design would be on the order of $150 to $200 a month, more than everything else
+  in `docs/DATABASE_COST_ESTIMATE.md` combined.
+
+**Redis during the same hour** (Azure Monitor, `xconnect-test-redis`, 0.5 vCPU / 1 GiB): CPU about
+4 to 5.6 millicores (0.005 core) throughout, and a memory working set of about 3.4 MB at rest and a
+peak of 4.3 MB. Redis was not a factor in the slowdown and is far larger than it needs to be. The
+smallest Consumption size (0.25 vCPU / 0.5 GiB) would be enough. Not changed yet.
+
+**Next steps.**
+
+1. **Cut the payload** (agreed, not yet implemented): compress responses with the `compression`
+   middleware, slim the attendee response to the device's own entry, the presenter's entry and a
+   headcount (the attendee app reads `members` only for the in-room check, its own confidence, Wi-Fi
+   and dwell time, and the host name), and return `leftMembers` only to presenters and admins (only
+   the admin room screen reads it). Presenter and admin responses stay as they are. Then rerun this
+   exact one-hour single-room test and compare CPU, p99 and Network Out against the numbers above.
+2. Run the same hour at 700 devices across 5 rooms (about 0.4 core in the short run) to see whether
+   the realistic shape stays stable.
+3. If CPU still drifts after the payload is cut, add periodic server logging (event-loop delay, heap
+   size, sizes of the engine's maps, time spent per checkpoint) and rerun the single-room test for
+   about 40 minutes to see what grows.
+
 ---
 
 ## Open items
@@ -562,6 +731,20 @@ unchanged and still includes everyone.
 - **Why 1000 devices across 5 rooms collapsed far worse than 1000 in one room** (section 7) is
   unexplained.
 - **Abandoned rooms are never marked as ended** (section 8). Small, real production bug; not fixed.
+- **CPU and memory drift over an hour at 700 devices in one room** (section 12). The container
+  reaches its 1 vCPU limit after about 30 minutes and latency collapses, with no errors. Leading
+  explanation: the attendee poll returns the whole room snapshot including an ever-growing
+  `leftMembers` list (288.5 GB sent in the hour, with the response more than doubling in size).
+  Planned fix: compress responses, slim the attendee response, and send `leftMembers` only to
+  presenters and admins. Not yet implemented or re-tested. The 5-room version of the hour-long test
+  has not been run.
+- **Outbound data cost** (section 12). At the current payload size egress would exceed the rest of
+  the monthly bill. Re-measure Network Out after the payload fix before relying on any cost figure
+  in `docs/DATABASE_COST_ESTIMATE.md`.
+- **Redis app is oversized** (0.5 vCPU / 1 GiB against a 4.3 MB peak). Planned change to 0.25 vCPU /
+  0.5 GiB, not made yet.
+- **Redis container restart** has not been tested (only the API restart, section 9). The Redis app
+  has no volume, so its contents are lost if it is restarted or replaced.
 - **Presenter silence over ~60s splits attendee stays** (section 8). Accepted as current behavior;
   revisit if attendance time accuracy during presenter outages matters.
 - **After a restart, some rooms re-place their attendees slowly** (section 9): roughly a third of
