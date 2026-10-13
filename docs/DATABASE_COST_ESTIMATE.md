@@ -73,6 +73,11 @@ database was 8.33 MB). The event counts and attendees per event are assumptions.
 real expectations. The heavy case is about 2% of a 32 GiB disk, and real use should have fewer
 state flips than the synthetic test, so treat it as an upper bound.
 
+Checked at three times the scale (October 13): after the 1-hour, 5-room test (11,687 stays) and the earlier
+runs on the same server (roughly 16,000 stays in all, an estimate), the `xconnect` database was **31.4 MB**,
+against 8.33 MB for the empty migrated schema. About 23 MB for about 16,000 stays is about 1.4 KB per stay,
+in line with the 1.3 KB above, so the yearly figures stand (the heavy case would be about 730 MB).
+
 - Postgres disks can be grown later but never shrunk, so 32 GiB is the right starting size.
 - Backup storage is free up to the provisioned disk size, so it is $0 at this data size (LRS or GRS).
   LRS keeps copies in one datacenter. GRS also copies to a paired region and cannot generally be
@@ -164,6 +169,19 @@ question, tracked in `docs/LOAD_TEST_RESULTS.md` section 12, and does not change
 choice or cost. It does mean the container may need attention before long single-room events.
 
 If credits ever trend toward zero in production, move up to B2s before considering General Purpose.
+
+## Outbound data (measured)
+
+Outbound data from the API is billed after the first 100 GB a month (roughly $0.09 per GB; check the
+calculator). It turned out to be the biggest risk in the estimate until it was fixed. A one-hour test
+with 700 devices in one room sent **288.5 GB** with the original design, because every attendee poll
+returned the whole room. After slimming the attendee response and gzipping the larger ones, the same
+hour sent about **1.6 GB** (`docs/LOAD_TEST_RESULTS.md`, end of section 12).
+
+At that rate, 16 event-hours a month is about 26 GB, inside the free 100 GB, so outbound data adds
+about $0. With the original design the same month would have cost on the order of $150 to $200. Treat
+the figure as measured for one large room: more simultaneous rooms and presenters polling the full
+roster add some, but the volume is now small.
 
 ## Recommendation
 

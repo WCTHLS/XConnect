@@ -23,6 +23,9 @@ param acrName string = 'xconnect${uniqueString(resourceGroup().id)}'
 
 param logAnalyticsName string = 'log-xconnect'
 param environmentName string = 'env-xconnect'
+
+@description('Resource id of an existing Container Apps environment to run the apps in, from any resource group in this subscription. It must be in the same region as the apps (location). Empty creates a new environment here. Useful where a subscription allows few environments, such as the free trial.')
+param existingEnvironmentId string = ''
 param appName string = 'xconnect-test'
 
 param imageName string = 'xconnect-test'
@@ -151,7 +154,9 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   }
 }
 
-resource env 'Microsoft.App/managedEnvironments@2024-03-01' = {
+// Created with the apps (deployApp), not in pass 1: pass 1 only needs the registry, and some
+// subscriptions (the free trial) allow just one environment in total.
+resource env 'Microsoft.App/managedEnvironments@2024-03-01' = if (deployApp && empty(existingEnvironmentId)) {
   name: environmentName
   location: location
   properties: {
@@ -189,15 +194,6 @@ var optionalEnv = filter([
 // only exists when there is one (an empty secret value is rejected by Container Apps). It comes
 // from the hub created below, or from the parameter for an existing hub.
 var hasNotificationSecret = createNotificationHub || !empty(notificationHubConnectionString)
-var effectiveNotificationConnection = createNotificationHub
-  ? notificationHubRule!.listKeys().primaryConnectionString
-  : notificationHubConnectionString
-var notificationSecrets = hasNotificationSecret ? [
-  {
-    name: 'notification-hub-connection'
-    value: effectiveNotificationConnection
-  }
-] : []
 var notificationEnv = hasNotificationSecret ? [
   {
     name: 'AZURE_NOTIFICATION_HUB_CONNECTION_STRING'
@@ -206,36 +202,24 @@ var notificationEnv = hasNotificationSecret ? [
 ] : []
 
 // --- Push notifications: a Notification Hubs namespace and hub (createNotificationHub = true). ---
-// The rule gives the backend the same rights as the default full-access one: Listen, Send, Manage.
-// The phone-platform credentials (FCM, APNs) live on the hub itself and are added in the portal.
-resource notificationNamespace 'Microsoft.NotificationHubs/namespaces@2023-09-01' = if (createNotificationHub) {
-  name: notificationNamespaceName
-  location: location
-  sku: {
-    name: notificationHubSku
-  }
-  properties: {
-    namespaceType: 'NotificationHub'
+// A module, not three resources here: the app reads the hub's connection string, and a direct
+// dependency on a conditional resource whose names are empty (when no hub is created) is rejected
+// by Azure as a malformed resource id. The phone-platform credentials (FCM, APNs) live on the hub
+// itself and are added in the portal.
+module notificationHubModule 'notificationhub.bicep' = if (createNotificationHub) {
+  name: 'notification-hub'
+  params: {
+    location: location
+    namespaceName: notificationNamespaceName
+    hubName: notificationHubName
+    sku: notificationHubSku
   }
 }
 
-resource notificationHub 'Microsoft.NotificationHubs/namespaces/notificationHubs@2023-09-01' = if (createNotificationHub) {
-  parent: notificationNamespace
-  name: notificationHubName
-  location: location
-  properties: {}
-}
-
-resource notificationHubRule 'Microsoft.NotificationHubs/namespaces/notificationHubs/authorizationRules@2023-09-01' = if (createNotificationHub) {
-  parent: notificationHub
-  name: 'xconnect-api'
-  properties: {
-    rights: [
-      'Listen'
-      'Send'
-      'Manage'
-    ]
-  }
+// A reference to the access rule the module creates, only to read its key. `existing` adds no
+// dependency of its own, so the app waits for the module explicitly (dependsOn below) instead.
+resource notificationRule 'Microsoft.NotificationHubs/namespaces/notificationHubs/authorizationRules@2023-09-01' existing = if (createNotificationHub) {
+  name: '${notificationNamespaceName}/${notificationHubName}/xconnect-api'
 }
 
 // --- New server: Burstable B1ms, 32 GiB (the smallest disk), no high availability. ---
@@ -327,7 +311,7 @@ resource redisApp 'Microsoft.App/containerApps@2024-03-01' = if (deployApp && de
   name: redisAppName
   location: location
   properties: {
-    managedEnvironmentId: env.id
+    managedEnvironmentId: empty(existingEnvironmentId) ? env!.id : existingEnvironmentId
     configuration: {
       activeRevisionsMode: 'Single'
       ingress: {
@@ -362,9 +346,10 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = if (deployApp) {
     redisApp
     postgresNewDb
     postgresNewAllowAzure
+    notificationHubModule
   ]
   properties: {
-    managedEnvironmentId: env.id
+    managedEnvironmentId: empty(existingEnvironmentId) ? env!.id : existingEnvironmentId
     configuration: {
       activeRevisionsMode: 'Single'
       ingress: {
@@ -388,7 +373,12 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = if (deployApp) {
           name: 'database-url'
           value: effectiveDatabaseUrl
         }
-      ], notificationSecrets)
+      ], hasNotificationSecret ? [
+        {
+          name: 'notification-hub-connection'
+          value: createNotificationHub ? notificationRule!.listKeys().primaryConnectionString : notificationHubConnectionString
+        }
+      ] : [])
     }
     template: {
       containers: [
