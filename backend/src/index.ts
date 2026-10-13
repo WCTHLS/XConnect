@@ -1,3 +1,4 @@
+import compression from "compression";
 import cors from "cors";
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, notInArray, or } from "drizzle-orm";
 import express from "express";
@@ -37,6 +38,10 @@ if (db) {
 }
 
 app.use(cors());
+// Responses over 1 KB are gzipped when the client accepts it (every phone and fetch client does).
+// Level 1 keeps the CPU cost low: the live-poll responses are small now, so this mostly helps the
+// big ones a presenter or admin screen fetches (rosters, overview, history).
+app.use(compression({ threshold: 1024, level: 1 }));
 app.use(express.json({ limit: "256kb" }));
 console.log(authEnabled ? "🔐 Sign-in required" : "⚠️  No sign-in configured (FIREBASE_PROJECT_ID or AUTH_AUTHORITY/AUTH_AUDIENCE), API is open (POC mode)");
 app.use(authenticate);
@@ -1255,9 +1260,17 @@ app.get("/api/sessions/active", (_request, response) => {
 let lastLogTime = 0;
 app.get("/api/rooms/:roomId/live", (request, response) => {
   const label = String(request.query.sessionId ?? "poc-session");
-  const state = engine.roomState(label, request.params.roomId);
   // A presenter passes its own deviceId so an admin ending the session can switch it off too.
   const askingDeviceId = String(request.query.deviceId ?? "");
+  // The full roster (names, emails, readings, and who has left) is for the room's host and for
+  // admins. Anyone else asking about the room gets the host and a headcount.
+  const seesFullRoom =
+    !authEnabled ||
+    Boolean(request.user?.isAdmin) ||
+    engine.isRoomHost(label, request.params.roomId, askingDeviceId, request.user?.id);
+  const state = seesFullRoom
+    ? engine.roomState(label, request.params.roomId)
+    : engine.publicRoomState(label, request.params.roomId);
   if (askingDeviceId && engine.roomEndedNotice(askingDeviceId)) {
     return response.json({ ...state, roomEnded: true });
   }
