@@ -216,7 +216,7 @@ function MainApp() {
   );
 
   // Health check
-  const checkHealth = async (url: string) => {
+  const checkHealth = async (url: string): Promise<boolean> => {
     setServerHealth('checking');
     try {
       const controller = new AbortController();
@@ -226,13 +226,15 @@ function MainApp() {
       if (res.ok) {
         setServerHealth('online');
         setServerConnected(true);
-      } else {
-        setServerHealth('offline');
-        setServerConnected(false);
+        return true;
       }
+      setServerHealth('offline');
+      setServerConnected(false);
+      return false;
     } catch {
       setServerHealth('offline');
       setServerConnected(false);
+      return false;
     }
   };
 
@@ -372,6 +374,16 @@ function MainApp() {
   const togglePresence = async (overrideRunning?: boolean, explicitSnapshot?: ActiveSessionSnapshot): Promise<boolean> => {
     const targetRunning = overrideRunning ?? !runningRef.current;
     if (targetRunning) {
+      // Re-checked live rather than trusting the cached serverHealth, which only refreshes at
+      // launch or when the server picker is tapped, so it is stale by the time someone starts
+      // (Wi-Fi turned off after launch, for example). Without this, joinSession() tolerates the
+      // unreachable server while BLE genuinely starts locally: a "phantom presenting" state that
+      // looks live on this device but never created anything server-side. It checks the selected
+      // server, not Wi-Fi: Cloud mode on mobile data with Wi-Fi off is fine.
+      if (!(await checkHealth(serverUrl))) {
+        AppAlert.alert('Server not reachable', 'Check internet connection.');
+        return false;
+      }
       try {
         const activeRole = (explicitSnapshot?.role ?? role) as ParticipantRole;
         // roomId/sessionId are PRESENTER-authored config (the room chips, the custom room field,

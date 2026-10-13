@@ -189,6 +189,37 @@ because the laptop's own CPU and network became the limit. Signs of a generator-
 server's CPU graph stays low while the client's latencies are high, and `node.exe` on the laptop
 uses a large share of the machine. See `docs/LOAD_TEST_RESULTS.md` section 9.
 
+**Sign-in must be off on the target.** The container app now accepts the sign-in settings
+(`firebaseProjectId`, `authAuthority`, `authAudience` in `infra/main.bicep`). If they are set, the
+load test's unsigned requests are rejected, so leave them empty in `infra/main.local.bicepparam`
+while load testing, or test against a separate deployment. Changing them also creates a new
+revision, which restarts the server and ruins a run in progress, so never redeploy mid-test.
+
+## Long runs (an hour or more)
+
+Short runs hide drift. The 5-minute run at 700 devices in one room looked fine, but the same
+setup run for an hour used more and more CPU until the container hit its 1 vCPU limit and latency
+collapsed (`docs/LOAD_TEST_RESULTS.md` section 12). For anything over a few minutes:
+
+- Start it detached so an SSH drop doesn't kill it, with output to a file:
+  ```bash
+  nohup pnpm exec tsx src/loadtest-realistic.ts --url=<api url> --devices=700 --rooms=1 --duration=3600 --churn=50 > soak.log 2>&1 &
+  ```
+  Then `tail -f soak.log` to follow it (Ctrl+C stops the viewing, not the test),
+  `pgrep -af loadtest-realistic` to check it's running, `pkill -f loadtest-realistic` to stop it,
+  and `tail -40 soak.log` for the summary at the end.
+- Zero errors does not mean a pass. In the hour-long run nothing failed, but p99 went from 393 ms
+  to 3,188 ms and the max to 145 s, because requests waited in a queue. Always read the latency
+  columns and the server's CPU and memory over the whole run.
+- Watch these in Azure Monitor for the run's time window: the container app's **CPU Usage** and
+  **Memory Working Set Bytes** (Max), and on a Burstable Postgres server **CPU percent (Max)**,
+  **CPU credits remaining (Min)** and **CPU credits consumed (Sum)**. Use 1-minute granularity.
+- Run the 5-room shape as well as the single-room one: one 700-device room cost about 0.75 core
+  to start, against about 0.4 core for 700 devices over 5 rooms.
+- The generator waits for each reply before a device sends its next request, so it can't pile up
+  an unbounded backlog, but it does slow down when the server does (the hour-long run completed
+  only about 91% of the requests the schedule asks for).
+
 ## Checking attendance in Postgres after a run
 
 Throughput numbers don't show whether attendance was recorded correctly. After a run, check

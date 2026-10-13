@@ -31,6 +31,22 @@ import type { RedisClient } from "./redis/index.js";
 export { isUltrasonicTokenMatch };
 export * from "./engine/types.js";
 
+/**
+ * What an attendee's live poll is answered from, built once per room per tick. An attendee only
+ * needs to know it's still in the room, its own readings, and who the host is, so the poll returns
+ * those instead of the whole roster (hundreds of KB at 700 people, polled every 3s by every phone).
+ */
+interface AttendeeRoomView {
+  sessionId: string;
+  roomId: string;
+  presenterDeviceId?: string;
+  presenterName?: string;
+  host?: RoomMemberInfo;
+  byDevice: Map<string, RoomMemberInfo>;
+  memberCount: number;
+  updatedAt: string;
+}
+
 export class PocInferenceEngine {
   private readonly devices = new Map<string, DeviceRecord>();
   /**
@@ -64,6 +80,8 @@ export class PocInferenceEngine {
   private currentGraph: Map<string, Set<string>> = new Map();
   /** Every active room's computed live state as of the last tick, keyed like activeRoomsByKey. */
   private readonly roomSnapshots = new Map<string, LiveRoomState>();
+  /** The slim, per-attendee view of each snapshot above, rebuilt in the same tick. */
+  private readonly attendeeViews = new Map<string, AttendeeRoomView>();
   /**
    * Which active room (keyed like activeRoomsByKey) each non-presenter device was resolved into
    * as of the last tick, via the same acoustic-gate-then-affinity matching deviceRoomState used to
@@ -129,13 +147,18 @@ export class PocInferenceEngine {
     for (const [key, room] of this.activeRoomsByKey.entries()) {
       if (now - room.lastActivityAt >= ROOM_AUTO_EXPIRY_MS) continue;
       liveKeys.add(key);
-      this.roomSnapshots.set(key, this.computeRoomState(room, now, this.currentGraph));
+      const snapshot = this.computeRoomState(room, now, this.currentGraph);
+      this.roomSnapshots.set(key, snapshot);
+      this.attendeeViews.set(key, this.buildAttendeeView(snapshot));
     }
     const tRooms = performance.now();
     // Drop snapshots for rooms that expired or ended since the last tick, so a stale one can't
     // linger and be served by roomState()'s cache lookup.
     for (const key of this.roomSnapshots.keys()) {
-      if (!liveKeys.has(key)) this.roomSnapshots.delete(key);
+      if (!liveKeys.has(key)) {
+        this.roomSnapshots.delete(key);
+        this.attendeeViews.delete(key);
+      }
     }
 
     this.resolveDeviceRooms(now, activePresenters);
@@ -298,6 +321,7 @@ export class PocInferenceEngine {
     // key is gone — the roomEndedNotice flag below already tells clients to stop regardless, but
     // there's no reason to keep serving a stale "who's in the room" body in the meantime.
     this.roomSnapshots.delete(key);
+    this.attendeeViews.delete(key);
     // The room itself is ending, not just this one attendee — there's no more "still active
     // room" for a Left tab to describe, and the final attendance record is about to be written
     // to Postgres anyway, so this in-memory copy no longer serves anything.
@@ -778,9 +802,10 @@ export class PocInferenceEngine {
       return this.roomState(sessionLabel, currentDevice.roomId);
     }
 
+    // An attendee gets the slim view: itself, the host and a headcount, never the roster.
     const key = this.deviceRoomIndex.get(deviceId);
-    const snapshot = key ? this.roomSnapshots.get(key) : undefined;
-    if (snapshot) return snapshot;
+    const view = key ? this.attendeeViews.get(key) : undefined;
+    if (view) return this.attendeeStateFor(view, deviceId);
 
     return {
       sessionId: sessionLabel,
@@ -788,6 +813,70 @@ export class PocInferenceEngine {
       estimatedMemberDeviceIds: [],
       members: [],
       updatedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * A room's state for someone who is neither its host nor an admin: the host, a headcount, and no
+   * roster, so the full member list (names, emails, readings) isn't handed to whoever asks.
+   */
+  publicRoomState(sessionLabel: string, roomId: string): LiveRoomState {
+    const view = this.attendeeViews.get(PocInferenceEngine.roomKey(sessionLabel, roomId));
+    if (!view) return this.roomState(sessionLabel, roomId);
+    return this.attendeeStateFor(view, "");
+  }
+
+  /**
+   * True if this device is the active host of the room. When sign-in is on, `userId` must also be
+   * the account that device belongs to, so knowing a host's device id isn't enough.
+   */
+  isRoomHost(sessionLabel: string, roomCode: string, deviceId: string, userId?: string): boolean {
+    const device = this.devices.get(deviceId);
+    if (!device || device.role !== "presenter") return false;
+    if (device.roomId !== roomCode || device.sessionLabel !== sessionLabel) return false;
+    return userId === undefined || device.userId === userId;
+  }
+
+  /**
+   * Built once per room per tick from the full snapshot. Drops what only matters to the member
+   * themselves or to a host or admin: other people's email and UWB token are not for anyone else
+   * in the room.
+   */
+  private buildAttendeeView(snapshot: LiveRoomState): AttendeeRoomView {
+    const byDevice = new Map<string, RoomMemberInfo>();
+    let host: RoomMemberInfo | undefined;
+    for (const member of snapshot.members ?? []) {
+      const { email: _email, uwbDiscoveryToken: _uwbDiscoveryToken, ...rest } = member;
+      byDevice.set(member.deviceId, rest);
+      if (member.role === "presenter" && !host) host = rest;
+    }
+    return {
+      sessionId: snapshot.sessionId,
+      roomId: snapshot.roomId,
+      presenterDeviceId: snapshot.presenterDeviceId,
+      presenterName: snapshot.presenterName,
+      host,
+      byDevice,
+      memberCount: byDevice.size,
+      updatedAt: snapshot.updatedAt,
+    };
+  }
+
+  /** The attendee's own entry (if it is in the room) plus the host's, and the headcount. */
+  private attendeeStateFor(view: AttendeeRoomView, deviceId: string): LiveRoomState {
+    const members: RoomMemberInfo[] = [];
+    if (view.host) members.push(view.host);
+    const self = view.byDevice.get(deviceId);
+    if (self && self !== view.host) members.push(self);
+    return {
+      sessionId: view.sessionId,
+      roomId: view.roomId,
+      presenterDeviceId: view.presenterDeviceId,
+      presenterName: view.presenterName,
+      estimatedMemberDeviceIds: [],
+      members,
+      memberCount: view.memberCount,
+      updatedAt: view.updatedAt,
     };
   }
 

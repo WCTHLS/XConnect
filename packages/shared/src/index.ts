@@ -142,6 +142,11 @@ export interface LiveRoomState {
    * moved into the persisted history by then.
    */
   leftMembers?: RoomMemberInfo[];
+  /**
+   * How many people are in the room right now, host included. Set on the slim response an
+   * attendee's live poll gets, where `members` holds only that attendee and the host.
+   */
+  memberCount?: number;
   updatedAt: string;
 }
 

@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch --env-file=../.env src/index.ts",
     "start": "tsx src/index.ts",
-    "test": "tsx src/test_wifi_inference.ts",
+    "test": "tsx src/test_wifi_inference.ts && tsx src/test_room_access.ts",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate"
@@ -14,6 +14,7 @@
   "dependencies": {
     "@azure/notification-hubs": "^2.1.0",
     "@confpresence/shared": "workspace:*",
+    "compression": "^1.8.2",
     "cors": "^2.8.5",
     "drizzle-orm": "^0.45.2",
     "express": "^5.1.0",
@@ -24,6 +25,7 @@
     "zod": "^3.24.4"
   },
   "devDependencies": {
+    "@types/compression": "^1.8.1",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.3",
     "drizzle-kit": "^0.31.10",
