@@ -5,12 +5,12 @@
 export const FIREBASE_API_KEY = "AIzaSyDskycfYoUxF_TMPWJ_QR_OH5sED7q9Roc";
 
 // Google sign-in (Android OAuth client from Google Cloud Console, same project as Firebase).
-// Public identifier, not a secret. Empty hides the Google button.
+// Public identifier, not a secret. Empty hides the Google button on Android.
 export const GOOGLE_ANDROID_CLIENT_ID = "113829759136-bh8qvak0thcvkl4o1cscmbfhe2iijs08.apps.googleusercontent.com";
 
-// Google sign-in for iOS (iOS OAuth client from Google Cloud Console, same project as Firebase).
-// Empty hides the Google button on iOS.
-export const GOOGLE_IOS_CLIENT_ID = "";
+// Google sign-in (iOS OAuth client from Google Cloud Console, same project as Firebase).
+// Public identifier, not a secret. Empty hides the Google button on iOS.
+export const GOOGLE_IOS_CLIENT_ID = "113829759136-0grb4nf94atarvhsvift41cinv9ocmqe.apps.googleusercontent.com";
 
 // Microsoft sign-in, via an ordinary Entra ID app registration (account types: any
 // organizational directory + personal Microsoft accounts). Empty AUTH_CLIENT_ID hides the button.
