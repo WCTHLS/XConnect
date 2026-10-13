@@ -3,10 +3,12 @@ import {
   View,
   Text,
   TouchableOpacity,
+  TouchableWithoutFeedback,
   StyleSheet,
   ScrollView,
   Animated,
   Easing,
+  Modal,
 } from 'react-native';
 import Svg, { Path, Circle, Rect } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
@@ -243,6 +245,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   // changed reply would leave the open sheet showing the answer it had when it was opened.
   const [openInviteId, setOpenInviteId] = useState<number | null>(null);
   const openInvite = answeredInvites.find(i => i.id === openInviteId) ?? null;
+  const [notificationSheetOpen, setNotificationSheetOpen] = useState(false);
 
   return (
     <ScrollView
@@ -250,7 +253,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       contentContainerStyle={styles.content}
       showsVerticalScrollIndicator={false}
     >
-      {/* Top Bar — XConnect branding + Live Connected badge */}
+      {/* Top Bar — XConnect branding + Notification bell + Live Connected badge */}
       <View style={styles.topBar}>
         <View style={styles.brandRow}>
           <View style={styles.miniLogoBadge}>
@@ -273,11 +276,43 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           </Text>
         </View>
 
-        <View style={styles.connectedBadge}>
-          <View style={styles.liveGreenDot} />
-          <Text style={styles.connectedText}>
-            {serverConnected === false ? 'OFFLINE' : 'CONNECTED'}
-          </Text>
+        <View style={styles.topBarActions}>
+          <TouchableOpacity
+            activeOpacity={0.7}
+            onPress={() => setNotificationSheetOpen(true)}
+            style={[styles.bellButton, { backgroundColor: isDark ? '#131C2E' : '#F1F5F9' }]}
+            accessibilityLabel="Notifications"
+          >
+            <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+              <Path
+                d="M6 8a6 6 0 0 1 12 0c0 4 1.5 5.5 2 6.5H4c.5-1 2-2.5 2-6.5z"
+                stroke={isDark ? '#E2E8F0' : '#0F2F2C'}
+                strokeWidth={2}
+                strokeLinejoin="round"
+                fill={pendingInvites.length > 0 ? (isDark ? 'rgba(51,209,172,0.2)' : 'rgba(51,209,172,0.15)') : 'none'}
+              />
+              <Path
+                d="M10 18a2 2 0 0 0 4 0"
+                stroke={isDark ? '#E2E8F0' : '#0F2F2C'}
+                strokeWidth={2}
+                strokeLinecap="round"
+              />
+            </Svg>
+            {pendingInvites.length > 0 && (
+              <View style={styles.bellBadge}>
+                <Text style={styles.bellBadgeText}>
+                  {pendingInvites.length > 9 ? '9+' : pendingInvites.length}
+                </Text>
+              </View>
+            )}
+          </TouchableOpacity>
+
+          <View style={styles.connectedBadge}>
+            <View style={styles.liveGreenDot} />
+            <Text style={styles.connectedText}>
+              {serverConnected === false ? 'OFFLINE' : 'CONNECTED'}
+            </Text>
+          </View>
         </View>
       </View>
 
@@ -291,12 +326,6 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           Signed in as
         </Text>
       </View>
-
-      {/* Outstanding check-in invites, above everything else because they are the one thing on
-          this screen that is waiting on the person rather than the other way round. */}
-      {pendingInvites.map(invite => (
-        <InviteCard key={invite.id} invite={invite} onRespond={onRespondToInvite} />
-      ))}
 
       {acceptedAssignments.map(invite => (
         <AssignmentCard key={invite.id} invite={invite} onStart={onStartAssignedRoom} />
@@ -835,6 +864,72 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         onClose={() => setOpenInviteId(null)}
         onRespond={onRespondToInvite}
       />
+
+      <Modal
+        visible={notificationSheetOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setNotificationSheetOpen(false)}
+      >
+        <TouchableWithoutFeedback onPress={() => setNotificationSheetOpen(false)}>
+          <View style={styles.notifBackdrop}>
+            <TouchableWithoutFeedback onPress={() => {}}>
+              <View style={[styles.notifSheet, { backgroundColor: colors.bg, borderColor: colors.border }]}>
+                <View style={[styles.notifGrabber, { backgroundColor: colors.border }]} />
+                <View style={styles.notifHeaderRow}>
+                  <View style={styles.notifTitleRow}>
+                    <Text style={[styles.notifTitle, { color: colors.txt }]}>Notifications</Text>
+                    {pendingInvites.length > 0 && (
+                      <View style={styles.notifCountBadge}>
+                        <Text style={styles.notifCountBadgeText}>{pendingInvites.length}</Text>
+                      </View>
+                    )}
+                  </View>
+                  <TouchableOpacity
+                    activeOpacity={0.7}
+                    onPress={() => setNotificationSheetOpen(false)}
+                    style={styles.notifCloseButton}
+                  >
+                    <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+                      <Path d="M6 6l12 12M18 6L6 18" stroke={colors.sub} strokeWidth={2} strokeLinecap="round" />
+                    </Svg>
+                  </TouchableOpacity>
+                </View>
+
+                <ScrollView
+                  style={styles.notifScroll}
+                  contentContainerStyle={styles.notifScrollContent}
+                  showsVerticalScrollIndicator={false}
+                >
+                  {pendingInvites.length === 0 ? (
+                    <View style={styles.notifEmptyBox}>
+                      <View style={[styles.notifEmptyIcon, { backgroundColor: isDark ? '#131C2E' : '#F1F5F9' }]}>
+                        <Svg width={28} height={28} viewBox="0 0 24 24" fill="none">
+                          <Path
+                            d="M6 8a6 6 0 0 1 12 0c0 4 1.5 5.5 2 6.5H4c.5-1 2-2.5 2-6.5z"
+                            stroke={colors.muted}
+                            strokeWidth={2}
+                            strokeLinejoin="round"
+                          />
+                          <Path d="M10 18a2 2 0 0 0 4 0" stroke={colors.muted} strokeWidth={2} strokeLinecap="round" />
+                        </Svg>
+                      </View>
+                      <Text style={[styles.notifEmptyTitle, { color: colors.txt }]}>All caught up!</Text>
+                      <Text style={[styles.notifEmptySubtitle, { color: colors.muted }]}>
+                        You have no pending session invitations or check-in requests.
+                      </Text>
+                    </View>
+                  ) : (
+                    pendingInvites.map(invite => (
+                      <InviteCard key={invite.id} invite={invite} onRespond={onRespondToInvite} />
+                    ))
+                  )}
+                </ScrollView>
+              </View>
+            </TouchableWithoutFeedback>
+          </View>
+        </TouchableWithoutFeedback>
+      </Modal>
     </ScrollView>
   );
 };
@@ -1181,5 +1276,118 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  topBarActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  bellButton: {
+    position: 'relative',
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bellBadge: {
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: palette.mintPresence,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 3,
+  },
+  bellBadgeText: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#0F2F2C',
+  },
+  notifBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(6,11,18,0.6)',
+    justifyContent: 'flex-end',
+  },
+  notifSheet: {
+    maxHeight: '80%',
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    borderWidth: 1.5,
+    borderBottomWidth: 0,
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    paddingBottom: 24,
+  },
+  notifGrabber: {
+    width: 38,
+    height: 4,
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginBottom: 14,
+  },
+  notifHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  notifTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  notifTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: -0.3,
+  },
+  notifCountBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 10,
+    backgroundColor: palette.mintPresence,
+  },
+  notifCountBadgeText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#0F2F2C',
+  },
+  notifCloseButton: {
+    padding: 4,
+  },
+  notifScroll: {
+    flexGrow: 0,
+  },
+  notifScrollContent: {
+    gap: 12,
+    paddingBottom: 20,
+  },
+  notifEmptyBox: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 36,
+    paddingHorizontal: 20,
+  },
+  notifEmptyIcon: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  notifEmptyTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  notifEmptySubtitle: {
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 18,
   },
 });

@@ -4,6 +4,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  TouchableWithoutFeedback,
   StyleSheet,
   ScrollView,
   Modal,
@@ -535,72 +536,83 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
         transparent
         onRequestClose={() => setPickerRole(null)}
       >
-        <TouchableOpacity activeOpacity={1} style={styles.modalBackdrop} onPress={() => setPickerRole(null)}>
-          <TouchableOpacity activeOpacity={1} style={[styles.modalSheet, { backgroundColor: colors.bg }]}>
-            <View style={styles.modalHeaderRow}>
-              <Text style={[styles.modalTitle, { color: colors.txt }]}>
-                {pickerRole === 'presenter' ? 'Who is hosting?' : 'Who is checking in?'}
-              </Text>
-              <TouchableOpacity activeOpacity={0.7} onPress={() => setPickerRole(null)} style={styles.modalCloseButton}>
-                <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
-                  <Path d="M6 6l12 12M18 6L6 18" stroke={colors.sub} strokeWidth={2} strokeLinecap="round" />
-                </Svg>
-              </TouchableOpacity>
-            </View>
+        <TouchableWithoutFeedback onPress={() => setPickerRole(null)}>
+          <View style={styles.modalBackdrop}>
+            <TouchableWithoutFeedback onPress={() => {}}>
+              <View style={[styles.modalSheet, { backgroundColor: colors.bg }]}>
+                <View style={styles.modalHeaderRow}>
+                  <Text style={[styles.modalTitle, { color: colors.txt }]}>
+                    {pickerRole === 'presenter' ? 'Who is hosting?' : 'Who is checking in?'}
+                  </Text>
+                  <TouchableOpacity activeOpacity={0.7} onPress={() => setPickerRole(null)} style={styles.modalCloseButton}>
+                    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                      <Path d="M6 6l12 12M18 6L6 18" stroke={colors.sub} strokeWidth={2} strokeLinecap="round" />
+                    </Svg>
+                  </TouchableOpacity>
+                </View>
 
-            <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
-              {pickerUsers.length === 0 ? (
-                <Text style={[styles.hint, { color: colors.muted }]}>
-                  {users.length === 0
-                    ? 'No accounts found. Type addresses manually instead.'
-                    : `Every known account is already on the ${
-                        pickerRole === 'presenter' ? 'attendee' : 'presenter'
-                      } list. Remove someone from it, or type an address manually.`}
-                </Text>
-              ) : (
-                pickerUsers.map(user => {
-                  const checked = pickerSelected.has(user.email);
-                  return (
-                    <TouchableOpacity
-                      key={user.id}
-                      activeOpacity={0.8}
-                      onPress={() => toggleUser(user.email)}
-                      style={[styles.userRow, { borderBottomColor: colors.border }]}
-                    >
-                      <View
-                        style={[
-                          styles.checkbox,
-                          {
-                            borderColor: checked ? palette.mintPresence : colors.border,
-                            backgroundColor: checked ? palette.mintPresence : 'transparent',
-                          },
-                        ]}
-                      >
-                        {checked && (
-                          <Svg width={12} height={12} viewBox="0 0 24 24" fill="none">
-                            <Path d="M5 13l4 4L19 7" stroke="#0F2F2C" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round" />
-                          </Svg>
-                        )}
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={[styles.userName, { color: colors.txt }]} numberOfLines={1}>
-                          {user.name}
-                        </Text>
-                        <Text style={[styles.userEmail, { color: colors.muted }]} numberOfLines={1}>
-                          {user.email}
-                        </Text>
-                      </View>
-                    </TouchableOpacity>
-                  );
-                })
-              )}
-            </ScrollView>
+                <ScrollView
+                  style={styles.modalScroll}
+                  contentContainerStyle={styles.modalScrollContent}
+                  showsVerticalScrollIndicator={false}
+                  keyboardShouldPersistTaps="handled"
+                >
+                  {pickerUsers.length === 0 ? (
+                    <Text style={[styles.hint, { color: colors.muted }]}>
+                      {users.length === 0
+                        ? 'No accounts found. Type addresses manually instead.'
+                        : `Every known account is already on the ${
+                            pickerRole === 'presenter' ? 'attendee' : 'presenter'
+                          } list. Remove someone from it, or type an address manually.`}
+                    </Text>
+                  ) : (
+                    pickerUsers.map(user => {
+                      const checked = pickerSelected.has(user.email);
+                      return (
+                        <TouchableOpacity
+                          key={user.id}
+                          activeOpacity={0.8}
+                          onPress={() => toggleUser(user.email)}
+                          style={[styles.userRow, { borderBottomColor: colors.border }]}
+                        >
+                          <View
+                            style={[
+                              styles.checkbox,
+                              {
+                                borderColor: checked ? palette.mintPresence : colors.border,
+                                backgroundColor: checked ? palette.mintPresence : 'transparent',
+                              },
+                            ]}
+                          >
+                            {checked && (
+                              <Svg width={12} height={12} viewBox="0 0 24 24" fill="none">
+                                <Path d="M5 13l4 4L19 7" stroke="#0F2F2C" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round" />
+                              </Svg>
+                            )}
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={[styles.userName, { color: colors.txt }]} numberOfLines={1}>
+                              {user.name}
+                            </Text>
+                            <Text style={[styles.userEmail, { color: colors.muted }]} numberOfLines={1}>
+                              {user.email}
+                            </Text>
+                          </View>
+                        </TouchableOpacity>
+                      );
+                    })
+                  )}
+                </ScrollView>
 
-            <TouchableOpacity activeOpacity={0.85} onPress={() => setPickerRole(null)} style={styles.primaryButton}>
-              <Text style={styles.primaryButtonText}>Done</Text>
-            </TouchableOpacity>
-          </TouchableOpacity>
-        </TouchableOpacity>
+                <TouchableOpacity activeOpacity={0.85} onPress={() => setPickerRole(null)} style={styles.primaryButton}>
+                  <Text style={styles.primaryButtonText}>
+                    {pickerSelected.size > 0 ? `Done (${pickerSelected.size} selected)` : 'Done'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </TouchableWithoutFeedback>
+          </View>
+        </TouchableWithoutFeedback>
       </Modal>
     </View>
   );
@@ -649,10 +661,14 @@ const styles = StyleSheet.create({
   resultMissing: { fontSize: 11, marginTop: 6, lineHeight: 16 },
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   modalSheet: {
-    maxHeight: '75%',
+    maxHeight: '80%',
+    display: 'flex',
+    flexDirection: 'column',
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
-    padding: 20,
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 24,
   },
   modalHeaderRow: {
     flexDirection: 'row',
@@ -662,7 +678,8 @@ const styles = StyleSheet.create({
   },
   modalTitle: { fontSize: 16, fontWeight: '800' },
   modalCloseButton: { padding: 4 },
-  modalScroll: { flexGrow: 0 },
+  modalScroll: { flex: 1 },
+  modalScrollContent: { paddingBottom: 16 },
   userRow: {
     flexDirection: 'row',
     alignItems: 'center',
