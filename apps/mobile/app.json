@@ -21,6 +21,9 @@
       "bundleIdentifier": "com.thaqib.confpresencezeropoc",
       "supportsTablet": true,
       "infoPlist": {
+        "UIBackgroundModes": [
+          "remote-notification"
+        ],
         "NSBluetoothAlwaysUsageDescription": "ConfPresence ZERO uses Bluetooth Low Energy to detect in-room peer presence.",
         "NSBluetoothPeripheralUsageDescription": "ConfPresence ZERO broadcasts BLE tokens for zero-hardware presence detection.",
         "NSLocationWhenInUseUsageDescription": "ConfPresence ZERO uses location services to verify in-room Wi-Fi network fingerprints.",

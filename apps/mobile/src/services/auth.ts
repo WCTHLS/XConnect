@@ -3,16 +3,25 @@ import * as SecureStore from "expo-secure-store";
 import * as WebBrowser from "expo-web-browser";
 import { useEffect, useState } from "react";
 import { Platform } from "react-native";
-import { AUTH_AUTHORITY, AUTH_CLIENT_ID, AUTH_REDIRECT_SCHEME, FIREBASE_API_KEY, GOOGLE_ANDROID_CLIENT_ID } from "../config/authConfig";
+import {
+  AUTH_AUTHORITY,
+  AUTH_CLIENT_ID,
+  AUTH_REDIRECT_SCHEME,
+  FIREBASE_API_KEY,
+  GOOGLE_ANDROID_CLIENT_ID,
+  GOOGLE_IOS_CLIENT_ID
+} from "../config/authConfig";
 
 WebBrowser.maybeCompleteAuthSession();
 
 // Firebase (email/password, Google) and Microsoft run side by side; a session records which one
 // signed it in, since that decides how it is refreshed.
 export const emailSignInAvailable = Boolean(FIREBASE_API_KEY);
-export const googleSignInAvailable = Boolean(FIREBASE_API_KEY) && Platform.OS === "android" && Boolean(GOOGLE_ANDROID_CLIENT_ID);
+export const googleSignInAvailable =
+  Boolean(FIREBASE_API_KEY) &&
+  Boolean(Platform.OS === "ios" ? GOOGLE_IOS_CLIENT_ID : GOOGLE_ANDROID_CLIENT_ID);
 export const microsoftSignInAvailable = Boolean(AUTH_AUTHORITY && AUTH_CLIENT_ID);
-export const authConfigured = emailSignInAvailable || microsoftSignInAvailable;
+export const authConfigured = emailSignInAvailable || microsoftSignInAvailable || googleSignInAvailable;
 
 export type AuthSessionInfo = {
   provider: "firebase" | "microsoft";
@@ -169,11 +178,14 @@ export async function signUpWithEmail(name: string, email: string, password: str
 /** Google account sign-in: Google's page in the browser gives a Google token, which Firebase turns into an account. */
 export async function signInWithGoogle(): Promise<{ ok: boolean; error?: string }> {
   try {
+    const googleClientId = Platform.OS === "ios" ? GOOGLE_IOS_CLIENT_ID : GOOGLE_ANDROID_CLIENT_ID;
+    if (!googleClientId) return { ok: false, error: "Google sign-in is not configured for this platform." };
+
     const discovery = await AuthSession.fetchDiscoveryAsync("https://accounts.google.com");
-    // Android OAuth clients only accept a redirect built from their own client ID.
-    const redirectUri = `com.googleusercontent.apps.${GOOGLE_ANDROID_CLIENT_ID.replace(".apps.googleusercontent.com", "")}:/oauthredirect`;
+    // Android and iOS OAuth clients accept a redirect built from their own client ID.
+    const redirectUri = `com.googleusercontent.apps.${googleClientId.replace(".apps.googleusercontent.com", "")}:/oauthredirect`;
     const request = new AuthSession.AuthRequest({
-      clientId: GOOGLE_ANDROID_CLIENT_ID,
+      clientId: googleClientId,
       redirectUri,
       scopes: ["openid", "profile", "email"],
       responseType: AuthSession.ResponseType.Code,
@@ -185,7 +197,7 @@ export async function signInWithGoogle(): Promise<{ ok: boolean; error?: string 
     }
     const tokens = await AuthSession.exchangeCodeAsync(
       {
-        clientId: GOOGLE_ANDROID_CLIENT_ID,
+        clientId: googleClientId,
         code: result.params.code,
         redirectUri,
         extraParams: request.codeVerifier ? { code_verifier: request.codeVerifier } : undefined

@@ -26,8 +26,6 @@ Notifications.setNotificationHandler({
  * overwrite, not a growing list of stale installations per device.
  */
 export async function registerForPushNotifications(serverUrl: string): Promise<void> {
-  if (Platform.OS !== "android") return; // FCM v1 only — no APNs credentials configured yet.
-
   try {
     const { status: existing } = await Notifications.getPermissionsAsync();
     let status = existing;
@@ -41,15 +39,21 @@ export async function registerForPushNotifications(serverUrl: string): Promise<v
     }
 
     const installationId = await getOrCreateDeviceId();
+    // On Android, this returns the FCM registration token.
+    // On iOS, this returns the raw APNs device token hex string.
     const token = await Notifications.getDevicePushTokenAsync();
 
     const res = await authFetch(`${serverUrl}/api/push/register`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ installationId, pushChannel: token.data })
+      body: JSON.stringify({
+        installationId,
+        pushChannel: token.data,
+        platform: Platform.OS // "android" | "ios"
+      })
     });
     if (res.ok) {
-      AppLogger.log("INFO", "Registered for push notifications");
+      AppLogger.log("INFO", `Registered for push notifications (${Platform.OS})`);
     } else {
       AppLogger.log("WARN", `Push registration returned ${res.status}`, "warn");
     }

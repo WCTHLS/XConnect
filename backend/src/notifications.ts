@@ -1,4 +1,13 @@
-import { NotificationHubsClient, createFcmV1Notification, createFcmV1Installation, createFirebaseV1NotificationBody, createTagExpression } from "@azure/notification-hubs";
+import {
+  NotificationHubsClient,
+  createFcmV1Notification,
+  createFcmV1Installation,
+  createFirebaseV1NotificationBody,
+  createAppleInstallation,
+  createAppleNotification,
+  createAppleNotificationBody,
+  createTagExpression
+} from "@azure/notification-hubs";
 import { db, schema } from "./db/index.js";
 
 const CONNECTION_STRING = process.env.AZURE_NOTIFICATION_HUB_CONNECTION_STRING;
@@ -16,43 +25,76 @@ function emailTag(email: string): string {
   return `email:${email.trim().toLowerCase().replace(/\+/g, "")}`;
 }
 
-/** Registers (or re-registers) one device's push channel, tagged by its signed-in user's email. */
-export async function registerInstallation(installationId: string, userId: string, email: string | undefined, pushChannel: string) {
+/** Registers (or re-registers) one device's push channel, tagged by its signed-in user's email. Supports Android (FCM v1) and iOS (APNs). */
+export async function registerInstallation(
+  installationId: string,
+  userId: string,
+  email: string | undefined,
+  pushChannel: string,
+  platform: string = "android"
+) {
   if (!client) throw new Error("Push notifications are not configured (AZURE_NOTIFICATION_HUB_CONNECTION_STRING / AZURE_NOTIFICATION_HUB_NAME not set)");
 
-  const installation = createFcmV1Installation({
-    installationId,
-    pushChannel,
-    userId,
-    tags: email ? [emailTag(email)] : []
-  });
-  await client.createOrUpdateInstallation(installation);
+  const isIos = platform.toLowerCase() === "ios";
+  const tags = email ? [emailTag(email)] : [];
+
+  if (isIos) {
+    const installation = createAppleInstallation({
+      installationId,
+      pushChannel,
+      userId,
+      tags
+    });
+    await client.createOrUpdateInstallation(installation);
+  } else {
+    const installation = createFcmV1Installation({
+      installationId,
+      pushChannel,
+      userId,
+      tags
+    });
+    await client.createOrUpdateInstallation(installation);
+  }
 
   if (db) {
     const now = new Date();
+    const storedPlatform = isIos ? "apns" : "fcmv1";
     await db
       .insert(schema.pushInstallations)
-      .values({ installationId, userId, email, platform: "fcmv1", updatedAt: now })
+      .values({ installationId, userId, email, platform: storedPlatform, updatedAt: now })
       .onConflictDoUpdate({
         target: schema.pushInstallations.installationId,
-        set: { userId, email, platform: "fcmv1", updatedAt: now }
+        set: { userId, email, platform: storedPlatform, updatedAt: now }
       });
   }
 }
 
 /**
  * Sends one plain notification to every device tagged with any of the given emails.
- * `matchedEmails` is local bookkeeping only (which of the requested emails have ever registered a
- * device here) — Notification Hubs itself resolves the actual tag-based send independently of it.
+ * Dispatches to both Android (FCM v1) and iOS (APNs) in parallel so all registered devices receive it.
  */
 export async function sendToEmails(emails: string[], title: string, body: string): Promise<{ matchedEmails: string[]; unmatchedEmails: string[] }> {
   if (!client) throw new Error("Push notifications are not configured (AZURE_NOTIFICATION_HUB_CONNECTION_STRING / AZURE_NOTIFICATION_HUB_NAME not set)");
 
   const tagExpression = createTagExpression(emails.map(emailTag));
-  const notification = createFcmV1Notification({
+
+  const fcmNotification = createFcmV1Notification({
     body: createFirebaseV1NotificationBody({ message: { notification: { title, body } } })
   });
-  await client.sendNotification(notification, { tagExpression });
+
+  const appleNotification = createAppleNotification({
+    body: createAppleNotificationBody({
+      aps: {
+        alert: { title, body },
+        sound: "default"
+      }
+    })
+  });
+
+  await Promise.allSettled([
+    client.sendNotification(fcmNotification, { tagExpression }),
+    client.sendNotification(appleNotification, { tagExpression })
+  ]);
 
   let matchedEmails = emails;
   let unmatchedEmails: string[] = [];

@@ -126,12 +126,24 @@ app.post("/api/push/register", async (request, response) => {
   if (!request.user) return response.status(401).json({ error: "unauthenticated" });
   if (!pushEnabled) return response.status(503).json({ error: "Push notifications are not configured" });
 
-  const parsed = z.object({ installationId: z.string().min(8), pushChannel: z.string().min(1) }).safeParse(request.body);
+  const parsed = z
+    .object({
+      installationId: z.string().min(8),
+      pushChannel: z.string().min(1),
+      platform: z.enum(["android", "ios"]).optional()
+    })
+    .safeParse(request.body);
   if (!parsed.success) return response.status(400).json({ error: parsed.error.flatten() });
 
   try {
-    await registerInstallation(parsed.data.installationId, request.user.id, request.user.email, parsed.data.pushChannel);
-    console.log(`🔔 [PUSH] Registered device for ${request.user.email || request.user.id}`);
+    await registerInstallation(
+      parsed.data.installationId,
+      request.user.id,
+      request.user.email,
+      parsed.data.pushChannel,
+      parsed.data.platform ?? "android"
+    );
+    console.log(`🔔 [PUSH] Registered ${parsed.data.platform ?? "android"} device for ${request.user.email || request.user.id}`);
     return response.json({ ok: true });
   } catch (err) {
     console.error("[push] registration failed:", err);
