@@ -72,25 +72,6 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
             <Text style={[styles.name, { color: colors.txt }]} numberOfLines={1}>
               {name}
             </Text>
-            <View
-              style={[
-                styles.roleBadge,
-                {
-                  backgroundColor: isHost
-                    ? 'rgba(51,209,172,0.12)'
-                    : 'rgba(100,116,139,0.12)',
-                },
-              ]}
-            >
-              <Text
-                style={[
-                  styles.roleText,
-                  { color: isHost ? palette.mintPresence : colors.sub },
-                ]}
-              >
-                {role}
-              </Text>
-            </View>
           </View>
 
           <View style={styles.dwellRow}>
@@ -109,26 +90,44 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
           </View>
         </View>
 
-        <View style={styles.verifiedIcon}>
-          <Svg width={12} height={12} viewBox="0 0 24 24" fill="none">
-            <Path
-              d="M5 13l4 4L19 7"
-              stroke={palette.mintPresence}
-              strokeWidth={3}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </Svg>
+        <View
+          style={[
+            styles.roleBadge,
+            {
+              backgroundColor: isHost
+                ? 'rgba(51,209,172,0.12)'
+                : 'rgba(100,116,139,0.12)',
+            },
+          ]}
+        >
+          <Text
+            style={[
+              styles.roleText,
+              { color: isHost ? palette.mintPresence : colors.sub },
+            ]}
+          >
+            {isHost ? 'Presenter' : 'Attendee'}
+          </Text>
         </View>
       </View>
 
       <View style={styles.pillsRow}>
-        {ultraVerified && (
+        {/* The host is the one emitting the room's ultrasonic token, not hearing it, so "verified"
+            does not apply to them. */}
+        {isHost ? (
           <View style={[styles.pill, { backgroundColor: 'rgba(45,212,191,0.12)' }]}>
             <Text style={[styles.pillText, { color: palette.tealUltra }]}>
-              🔊 Ultrasonic Verified
+              🔊 Emitter
             </Text>
           </View>
+        ) : (
+          ultraVerified && (
+            <View style={[styles.pill, { backgroundColor: 'rgba(45,212,191,0.12)' }]}>
+              <Text style={[styles.pillText, { color: palette.tealUltra }]}>
+                🔊 Ultrasonic Verified
+              </Text>
+            </View>
+          )
         )}
         {wifiMatch && (
           <View style={[styles.pill, { backgroundColor: 'rgba(51,209,172,0.12)' }]}>
@@ -214,14 +213,6 @@ const styles = StyleSheet.create({
   dwellText: {
     fontSize: 11,
     fontWeight: '500',
-  },
-  verifiedIcon: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: 'rgba(51,209,172,0.15)',
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   pillsRow: {
     flexDirection: 'row',

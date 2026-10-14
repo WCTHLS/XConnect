@@ -28,14 +28,61 @@ interface LivingRadarProps {
   statusText?: string;
 }
 
-const NODE_COORDINATES = [
-  { x: 42, y: 28 },
-  { x: 68, y: 52 },
-  { x: 30, y: 62 },
-  { x: 72, y: 30 },
-  { x: 22, y: 42 },
-  { x: 58, y: 72 },
+// The radar is a 240px square centered on (120, 120). Dots sit on three rings between the center
+// core (24px radius) and the outer ring (105px), at fixed slots at least 28px apart for 24px
+// dots, so two dots can never overlap each other, the core, or the edge.
+const RADAR_SIZE = 240;
+const RING_SLOTS = [
+  { radius: 48, count: 10, offset: 0 },
+  { radius: 76, count: 16, offset: Math.PI / 16 },
+  { radius: 104, count: 22, offset: Math.PI / 22 },
 ];
+const SLOTS = RING_SLOTS.flatMap(ring =>
+  Array.from({ length: ring.count }, (_, i) => {
+    const angle = ring.offset + (i / ring.count) * Math.PI * 2;
+    return {
+      x: ((RADAR_SIZE / 2 + Math.cos(angle) * ring.radius) / RADAR_SIZE) * 100,
+      y: ((RADAR_SIZE / 2 + Math.sin(angle) * ring.radius) / RADAR_SIZE) * 100,
+    };
+  })
+);
+// Every slot. The radar is physically full at this point, and the closer it gets to full the more
+// other dots shift to a neighbouring slot when one person joins (about 1.5 dots at 36 people, 3 at
+// 42, 6 at 47). More than this is counted in an overflow badge instead.
+const MAX_NODES = SLOTS.length;
+
+/** 32-bit FNV-1a: a stable hash, so the same device always lands on the same spot. */
+function hashString(value: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+/**
+ * Gives each person a slot, as percentages of the radar. The slot starts from a hash of their
+ * device id (display name when there is no id), not from their place in the list, so dots stay
+ * put while people join and leave instead of every dot shuffling on each poll. Two people who
+ * hash to the same slot are separated by moving the later one (in hash order) to the next free
+ * slot, which is deterministic for a given set of people.
+ */
+function assignSlots(seeds: string[]): Map<string, { x: number; y: number }> {
+  const ordered = [...new Set(seeds)]
+    .map(seed => ({ seed, hash: hashString(seed) }))
+    .sort((a, b) => a.hash - b.hash || (a.seed < b.seed ? -1 : 1));
+  const taken = new Set<number>();
+  const result = new Map<string, { x: number; y: number }>();
+  for (const { seed, hash } of ordered) {
+    if (taken.size >= SLOTS.length) break;
+    let slot = hash % SLOTS.length;
+    while (taken.has(slot)) slot = (slot + 1) % SLOTS.length;
+    taken.add(slot);
+    result.set(seed, SLOTS[slot]);
+  }
+  return result;
+}
 
 export const LivingRadar: React.FC<LivingRadarProps> = ({
   scanning = false,
@@ -119,27 +166,37 @@ export const LivingRadar: React.FC<LivingRadarProps> = ({
     outputRange: ['0deg', '360deg'],
   });
 
-  const activeNodes = React.useMemo(() => {
+  const { activeNodes, hiddenCount } = React.useMemo(() => {
     if (members && members.length > 0) {
-      return members.slice(0, 6).map((m, i) => {
-        const coords = NODE_COORDINATES[i % NODE_COORDINATES.length];
-        return {
-          x: coords.x,
-          y: coords.y,
-          initials: getMemberInitials(m.displayName, m.deviceId),
-          verified: m.ultrasonicVerified ?? true,
-        };
-      });
-    }
-    if (participantCount && participantCount > 0) {
-      return NODE_COORDINATES.slice(0, Math.min(participantCount, 6)).map((coords, i) => ({
-        x: coords.x,
-        y: coords.y,
-        initials: `A${i + 1}`,
-        verified: true,
+      const visible = members.slice(0, MAX_NODES).map((m, i) => ({
+        m,
+        seed: m.deviceId || m.displayName || `member-${i}`,
       }));
+      const slots = assignSlots(visible.map(v => v.seed));
+      const shown = visible.flatMap(({ m, seed }) => {
+        const position = slots.get(seed);
+        if (!position) return [];
+        return [
+          {
+            ...position,
+            key: seed,
+            initials: getMemberInitials(m.displayName, m.deviceId),
+            // Same default as the roster cards: unverified until the server says otherwise.
+            verified: m.ultrasonicVerified ?? false,
+          },
+        ];
+      });
+      return { activeNodes: shown, hiddenCount: Math.max(0, members.length - shown.length) };
     }
-    return [];
+    // No roster to draw (the attendee view only knows a room was detected). Drawing invented
+    // people would be false, so show only this device's own dot, labeled as such.
+    if (participantCount && participantCount > 0) {
+      return {
+        activeNodes: [{ ...SLOTS[0], key: 'self', initials: 'YOU', verified: true }],
+        hiddenCount: 0,
+      };
+    }
+    return { activeNodes: [], hiddenCount: 0 };
   }, [members, participantCount]);
 
   const ringColor = scanning ? palette.skyMesh : palette.mintPresence;
@@ -238,13 +295,13 @@ export const LivingRadar: React.FC<LivingRadarProps> = ({
 
         {/* Active In-Room Participant Nodes */}
         {!scanning &&
-          activeNodes.map((node, i) => {
+          activeNodes.map(node => {
             const verifiedColor = node.verified
               ? palette.mintPresence
               : palette.skyMesh;
             return (
               <View
-                key={i}
+                key={node.key}
                 style={[
                   styles.node,
                   {
@@ -261,6 +318,13 @@ export const LivingRadar: React.FC<LivingRadarProps> = ({
               </View>
             );
           })}
+
+        {/* People beyond what the radar can draw */}
+        {!scanning && hiddenCount > 0 && (
+          <View style={[styles.overflowBadge, { backgroundColor: colors.card, borderColor: ringColor }]}>
+            <Text style={[styles.overflowText, { color: ringColor }]}>+{hiddenCount}</Text>
+          </View>
+        )}
 
         {/* Center Presence Core */}
         <View
@@ -347,16 +411,29 @@ const styles = StyleSheet.create({
   },
   node: {
     position: 'absolute',
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
     borderWidth: 1.5,
     alignItems: 'center',
     justifyContent: 'center',
-    transform: [{ translateX: -14 }, { translateY: -14 }],
+    transform: [{ translateX: -12 }, { translateY: -12 }],
   },
   nodeText: {
-    fontSize: 9,
+    fontSize: 8,
+    fontWeight: '800',
+  },
+  overflowBadge: {
+    position: 'absolute',
+    right: 4,
+    bottom: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  overflowText: {
+    fontSize: 10,
     fontWeight: '800',
   },
   centerCore: {

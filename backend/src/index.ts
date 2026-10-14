@@ -1,6 +1,6 @@
 import compression from "compression";
 import cors from "cors";
-import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, notInArray, or } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, notInArray, or, sql } from "drizzle-orm";
 import express from "express";
 import { z } from "zod";
 import { authEnabled, authenticate, forgetCachedUser, requireAdmin } from "./auth.js";
@@ -210,6 +210,13 @@ app.get("/api/admin/users", async (_request, response) => {
 
 const normalizeEmail = (email: string) => email.trim().toLowerCase();
 
+/** Room names match regardless of case or stray spaces, the way they do everywhere else here. */
+const sameRoomName = (a?: string | null, b?: string | null) =>
+  (a ?? "").trim().toLowerCase() === (b ?? "").trim().toLowerCase();
+
+/** SQL twin of sameRoomName, for filtering invite rows by room. */
+const roomIs = (room: string) => sql`lower(trim(${schema.sessionInvites.roomCode})) = ${room.trim().toLowerCase()}`;
+
 /**
  * Flips any invite past its own scheduled time from pending to expired, in place. Lazy rather
  * than a background job: there is no process that ticks on its own here, so "expired" only
@@ -222,6 +229,27 @@ const normalizeEmail = (email: string) => email.trim().toLowerCase();
  * respond route below for the actual point where a stale reply is blocked, at the moment someone
  * tries to act on it, not by silently rewriting their answer.
  */
+/** How long an accepted presenter assignment stays usable. */
+const ACCEPTED_PRESENTER_INVITE_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The status to show a person for their own invite. An accepted presenter invite is a room
+ * assignment, and it lapses a day after it was accepted, or a day after the scheduled time when
+ * that is later (so accepting a week early does not expire it before the event). Reported here
+ * rather than written back: the stored answer stays "accepted", so the admin's roster of who
+ * agreed to host is unchanged and nothing needs a background job to flip it.
+ */
+function effectiveInviteStatus(row: {
+  status: string;
+  inviteRole: string;
+  eventAt: Date | null;
+  respondedAt: Date | null;
+}): string {
+  if (row.status !== "accepted" || row.inviteRole !== "presenter" || !row.respondedAt) return row.status;
+  const base = Math.max(row.respondedAt.getTime(), row.eventAt?.getTime() ?? 0);
+  return Date.now() > base + ACCEPTED_PRESENTER_INVITE_TTL_MS ? "expired" : row.status;
+}
+
 async function expireStaleInvites(scope: { sessionCode?: string; email?: string }) {
   if (!db) return;
   const conditions = [
@@ -269,26 +297,31 @@ app.post("/api/admin/invites", async (request, response) => {
   const eventAt = parsed.data.eventAt ? new Date(parsed.data.eventAt) : null;
   const inviteRole = parsed.data.inviteRole ?? "attendee";
 
-  // One batch per role per session. A session legitimately has both sides — the people checking in
-  // and whoever is hosting — and the invite form sends both together under one code. What it must
-  // not have is a SECOND batch of the same kind: the roster only groups by code, so a second
-  // attendee batch would be invisible alongside the first, and editing or re-asking the session
-  // would act on both at once. Changing who or what an existing batch invites goes through the
-  // Responses screen instead, which acts on the whole session deliberately.
-  const alreadyUsed = await db
-    .select({ id: schema.sessionInvites.id })
-    .from(schema.sessionInvites)
-    .where(and(eq(schema.sessionInvites.sessionCode, sessionCode), eq(schema.sessionInvites.inviteRole, inviteRole)))
-    .limit(1);
-  if (alreadyUsed.length > 0) {
-    return response.status(409).json({
-      error: `The session code "${sessionCode}" already has ${inviteRole === "presenter" ? "a presenter" : "an attendee"} invite. Change the code, or edit the details from the Responses section.`
-    });
-  }
-
   // Only a presenter invite carries a room; storing one on an attendee invite would imply an
   // assignment that nothing honours.
   const roomCode = inviteRole === "presenter" ? parsed.data.roomCode!.trim() : null;
+
+  // One batch per attendee list per session, and one presenter batch per ROOM per session. A
+  // session legitimately has both sides — the people checking in and whoever is hosting — and the
+  // invite form sends them together under one code; a session with several rooms has a presenter
+  // batch for each. What it must not have is a SECOND batch of the same kind: a second attendee
+  // batch would be invisible alongside the first, and a second batch for one room would make
+  // editing or re-asking that room act on both at once. Changing who or what an existing batch
+  // invites goes through the Responses screen instead, which acts on the batch deliberately.
+  const sameKind = await db
+    .select({ id: schema.sessionInvites.id, roomCode: schema.sessionInvites.roomCode })
+    .from(schema.sessionInvites)
+    .where(and(eq(schema.sessionInvites.sessionCode, sessionCode), eq(schema.sessionInvites.inviteRole, inviteRole)));
+  const alreadyUsed =
+    inviteRole === "presenter" ? sameKind.filter((row) => sameRoomName(row.roomCode, roomCode)) : sameKind;
+  if (alreadyUsed.length > 0) {
+    return response.status(409).json({
+      error:
+        inviteRole === "presenter"
+          ? `Room "${roomCode}" in session "${sessionCode}" already has a presenter invite. Use a different room name, or edit that room's presenters from the Responses section.`
+          : `The session code "${sessionCode}" already has an attendee invite. Change the code, or edit the details from the Responses section.`
+    });
+  }
   const title = parsed.data.title?.trim() || "Check-in request";
   const message =
     parsed.data.message?.trim() ||
@@ -298,6 +331,26 @@ app.post("/api/admin/invites", async (request, response) => {
   // Dedupe case-insensitively: the same address picked from the list and typed by hand is one
   // invite, and two rows differing only by case would both violate the unique constraint anyway.
   const emails = [...new Set(parsed.data.emails.map(normalizeEmail))];
+
+  // An invite is keyed on (session, email), so someone already invited to this session, as an
+  // attendee or to another room, would be silently converted by the insert below rather than
+  // given a second invite. With several rooms per session that is an easy mistake (the same
+  // presenter typed into two rooms), so it is refused with the reason instead.
+  const alreadyInvited = await db
+    .select({
+      email: schema.sessionInvites.email,
+      inviteRole: schema.sessionInvites.inviteRole,
+      roomCode: schema.sessionInvites.roomCode
+    })
+    .from(schema.sessionInvites)
+    .where(and(eq(schema.sessionInvites.sessionCode, sessionCode), inArray(schema.sessionInvites.email, emails)));
+  if (alreadyInvited.length > 0) {
+    const where = (row: (typeof alreadyInvited)[number]) =>
+      row.inviteRole === "presenter" ? `a presenter of ${row.roomCode}` : "an attendee";
+    return response.status(409).json({
+      error: `${alreadyInvited.map((row) => `${row.email} is already invited to "${sessionCode}" as ${where(row)}`).join("; ")}. Remove them from that list first.`
+    });
+  }
 
   const now = new Date();
   for (const email of emails) {
@@ -445,8 +498,12 @@ app.patch("/api/admin/invites", async (request, response) => {
         .refine((v) => !Number.isNaN(Date.parse(v)), { message: "eventAt must be a valid ISO date-time" })
         .optional()
         .nullable(),
-      /** Presenter batches only; ignored for attendee invites, which have no room. */
+      /** Presenter batches only; ignored for attendee invites, which have no room. Renames the
+       *  room of the presenter batch named by `fromRoomCode`. */
       roomCode: z.string().min(1).optional(),
+      /** Which room's presenters `roomCode` renames. Only needed when the session has presenters
+       *  in more than one room; with a single room it is implied. */
+      fromRoomCode: z.string().min(1).optional(),
       reAsk: z.boolean().optional()
     })
     .safeParse(request.body);
@@ -457,26 +514,68 @@ app.patch("/api/admin/invites", async (request, response) => {
   const reAsk = parsed.data.reAsk === true;
 
   const batch = await db
-    .select({ email: schema.sessionInvites.email, inviteRole: schema.sessionInvites.inviteRole })
+    .select({
+      email: schema.sessionInvites.email,
+      inviteRole: schema.sessionInvites.inviteRole,
+      roomCode: schema.sessionInvites.roomCode
+    })
     .from(schema.sessionInvites)
     .where(eq(schema.sessionInvites.sessionCode, from));
   if (batch.length === 0) return response.status(404).json({ error: `No invites found for "${from}"` });
 
-  // Renaming moves every row under this code onto the new one, so the destination must be free of
-  // the roles being moved — one batch per role per session, the same rule Send Invites enforces.
-  // Checked per role rather than per code: moving an attendee batch onto a code that only has a
-  // presenter invite is exactly the pairing the invite form itself creates, so it is allowed.
+  // Renaming moves every row under this code onto the new one, so the destination must not
+  // already hold a batch of the same kind: an attendee list if this session has one, or a
+  // presenter batch for any of the rooms this session has. The same one-batch rule Send Invites
+  // enforces, checked per batch rather than per code: moving an attendee batch onto a code that
+  // only has a presenter invite is exactly the pairing the invite form itself creates.
   if (to !== from) {
-    const roles = [...new Set(batch.map((b) => b.inviteRole))];
-    const clashes = await db
-      .select({ inviteRole: schema.sessionInvites.inviteRole })
+    const atDestination = await db
+      .select({ inviteRole: schema.sessionInvites.inviteRole, roomCode: schema.sessionInvites.roomCode })
       .from(schema.sessionInvites)
-      .where(and(eq(schema.sessionInvites.sessionCode, to), inArray(schema.sessionInvites.inviteRole, roles)));
-    if (clashes.length > 0) {
-      const clashing = [...new Set(clashes.map((c) => c.inviteRole))].join(" and ");
+      .where(eq(schema.sessionInvites.sessionCode, to));
+    const movingAttendees = batch.some((b) => b.inviteRole === "attendee");
+    const movingRooms = batch.filter((b) => b.inviteRole === "presenter").map((b) => b.roomCode);
+    const attendeeClash = movingAttendees && atDestination.some((d) => d.inviteRole === "attendee");
+    const clashingRooms = [
+      ...new Set(
+        atDestination
+          .filter((d) => d.inviteRole === "presenter" && movingRooms.some((room) => sameRoomName(room, d.roomCode)))
+          .map((d) => d.roomCode)
+      )
+    ];
+    if (attendeeClash || clashingRooms.length > 0) {
+      const parts = [
+        ...(attendeeClash ? ["an attendee invite"] : []),
+        ...clashingRooms.map((room) => `a presenter invite for ${room}`)
+      ];
       return response.status(409).json({
-        error: `"${to}" already has ${clashing} invites. Pick a code with no invites of that kind yet.`
+        error: `"${to}" already has ${parts.join(" and ")}. Pick a code with no invites of that kind yet.`
       });
+    }
+  }
+
+  // Which room's presenters a room rename applies to. A session with presenters in several rooms
+  // must say which; with a single room it is that one.
+  const presenterRooms: string[] = [];
+  for (const row of batch) {
+    if (row.inviteRole === "presenter" && row.roomCode && !presenterRooms.some((r) => sameRoomName(r, row.roomCode))) {
+      presenterRooms.push(row.roomCode);
+    }
+  }
+  let renameFromRoom: string | null = null;
+  if (parsed.data.roomCode !== undefined && presenterRooms.length > 0) {
+    renameFromRoom = parsed.data.fromRoomCode?.trim() ?? (presenterRooms.length === 1 ? presenterRooms[0] : null);
+    if (renameFromRoom === null) {
+      return response.status(400).json({
+        error: `"${from}" has presenters in several rooms (${presenterRooms.join(", ")}). Say which room to rename.`
+      });
+    }
+    if (!presenterRooms.some((r) => sameRoomName(r, renameFromRoom))) {
+      return response.status(404).json({ error: `No presenter invites for room "${renameFromRoom}" in "${from}".` });
+    }
+    const newRoom = parsed.data.roomCode.trim();
+    if (!sameRoomName(newRoom, renameFromRoom) && presenterRooms.some((r) => sameRoomName(r, newRoom))) {
+      return response.status(409).json({ error: `"${from}" already has presenters in room "${newRoom}".` });
     }
   }
 
@@ -501,15 +600,21 @@ app.patch("/api/admin/invites", async (request, response) => {
       ? await db.update(schema.sessionInvites).set(changes).where(eq(schema.sessionInvites.sessionCode, from))
       : { count: 0 };
 
-  // Room reassignment is applied separately and only to presenter rows. A batch can hold both
-  // kinds, and an attendee invite must never carry a room — it would imply an assignment that
-  // nothing honours. Runs against the destination code, since the update above may have moved
-  // these rows already.
-  if (parsed.data.roomCode !== undefined) {
+  // Room reassignment is applied separately and only to the presenter rows of the room being
+  // renamed. A batch can hold both kinds, and an attendee invite must never carry a room — it
+  // would imply an assignment that nothing honours. Runs against the destination code, since the
+  // update above may have moved these rows already.
+  if (parsed.data.roomCode !== undefined && renameFromRoom !== null) {
     await db
       .update(schema.sessionInvites)
       .set({ roomCode: parsed.data.roomCode.trim() })
-      .where(and(eq(schema.sessionInvites.sessionCode, to), eq(schema.sessionInvites.inviteRole, "presenter")));
+      .where(
+        and(
+          eq(schema.sessionInvites.sessionCode, to),
+          eq(schema.sessionInvites.inviteRole, "presenter"),
+          roomIs(renameFromRoom)
+        )
+      );
   }
 
   // Pushing the schedule out (or clearing it) un-expires anything that lazily expired under the
@@ -555,8 +660,10 @@ app.patch("/api/admin/invites", async (request, response) => {
  * presenter gets swapped out or a forgotten attendee gets added after the fact, which since a
  * session code can only be sent once is otherwise impossible.
  *
- * Added people inherit the session's existing title, schedule and (for presenters) room, so a
- * late addition is asked exactly what everyone else was asked.
+ * Added people inherit the session's existing title and schedule, so a late addition is asked
+ * exactly what everyone else was asked. A presenter goes into a named room: one the session
+ * already has (joining that room's batch), or a new one (starting its own). Left unnamed, it is
+ * the session's only room, and a session with several must be told which.
  */
 app.post("/api/admin/invites/recipients", async (request, response) => {
   if (!db) return response.status(503).json({ error: "Invites require Postgres persistence (DATABASE_URL not set)" });
@@ -567,8 +674,9 @@ app.post("/api/admin/invites/recipients", async (request, response) => {
       inviteRole: z.enum(["attendee", "presenter"]),
       add: z.array(z.string().email()).optional(),
       remove: z.array(z.string().email()).optional(),
-      /** Only consulted when adding the session's first presenter; otherwise the existing one is
-       *  inherited so two presenter rows can never disagree about the room. */
+      /** The room a presenter is being added to. Naming a room the session does not have yet
+       *  starts a new presenter batch for it. Left out, it is the session's only room; a session
+       *  with presenters in several rooms must say which. */
       roomCode: z.string().min(1).optional()
     })
     .safeParse(request.body);
@@ -595,27 +703,58 @@ app.post("/api/admin/invites/recipients", async (request, response) => {
     .where(eq(schema.sessionInvites.sessionCode, sessionCode));
   if (existing.length === 0) return response.status(404).json({ error: `No invites found for "${sessionCode}"` });
 
-  // Nobody can hold both roles in one session: the invite key is (session, email), so letting
-  // this through would silently convert their existing invite rather than adding a second one.
+  // Which room a presenter is going into. A named room joins that room's batch if the session has
+  // it (matched case-insensitively, keeping its existing spelling) and starts a new one if not. An
+  // unnamed one is the session's only room; with several it is ambiguous, so the caller must say
+  // rather than have the server guess and assign someone to the wrong room.
+  const presenterRooms: string[] = [];
+  for (const row of existing) {
+    if (row.inviteRole === "presenter" && row.roomCode && !presenterRooms.some((r) => sameRoomName(r, row.roomCode))) {
+      presenterRooms.push(row.roomCode);
+    }
+  }
+  let roomCode: string | null = null;
+  if (inviteRole === "presenter") {
+    const requested = parsed.data.roomCode?.trim();
+    if (requested) roomCode = presenterRooms.find((r) => sameRoomName(r, requested)) ?? requested;
+    else if (presenterRooms.length === 1) roomCode = presenterRooms[0];
+    if (toAdd.length > 0 && !roomCode) {
+      return response.status(400).json({
+        error:
+          presenterRooms.length > 1
+            ? `"${sessionCode}" has presenters in several rooms (${presenterRooms.join(", ")}). Say which room this presenter is for.`
+            : "Name the room this presenter is assigned to"
+      });
+    }
+  }
+
+  // Nobody can hold two places in one session: the invite key is (session, email), so letting
+  // this through would silently convert their existing invite (to the other role, or to another
+  // room) rather than adding a second one.
   const conflicting = toAdd.filter((email) =>
-    existing.some((row) => row.email === email && row.inviteRole !== inviteRole)
+    existing.some(
+      (row) =>
+        row.email === email &&
+        (row.inviteRole !== inviteRole || (inviteRole === "presenter" && !sameRoomName(row.roomCode, roomCode)))
+    )
   );
   if (conflicting.length > 0) {
+    const where = (email: string) => {
+      const row = existing.find((r) => r.email === email)!;
+      return row.inviteRole === "presenter" ? `a presenter of ${row.roomCode}` : "an attendee";
+    };
     return response.status(409).json({
-      error: `${conflicting.join(", ")} ${conflicting.length === 1 ? "is" : "are"} already invited to "${sessionCode}" as ${inviteRole === "presenter" ? "an attendee" : "a presenter"}. Remove them from that list first.`
+      error: `${conflicting.map((email) => `${email} is already invited to "${sessionCode}" as ${where(email)}`).join("; ")}. Remove them from that list first.`
     });
   }
 
-  const sameRole = existing.filter((row) => row.inviteRole === inviteRole);
+  // This role's list, and for presenters this room's list.
+  const sameRole = existing.filter(
+    (row) => row.inviteRole === inviteRole && (inviteRole !== "presenter" || sameRoomName(row.roomCode, roomCode))
+  );
   // Already on this list, so adding them again would only reset an answer they already gave.
   const skipped = toAdd.filter((email) => sameRole.some((row) => row.email === email));
   const adding = toAdd.filter((email) => !skipped.includes(email));
-
-  const roomCode =
-    inviteRole === "presenter" ? sameRole.find((row) => row.roomCode)?.roomCode ?? parsed.data.roomCode?.trim() ?? null : null;
-  if (inviteRole === "presenter" && adding.length > 0 && !roomCode) {
-    return response.status(400).json({ error: "Name the room this presenter is assigned to" });
-  }
 
   // Inherited from the session so a late addition matches what everyone else was sent. The
   // message is taken from the same role where possible, since the two halves are worded for their
@@ -734,7 +873,7 @@ app.get("/api/me/invites", async (request, response) => {
       sessionId: r.sessionCode,
       title: r.title,
       message: r.message,
-      status: r.status as "pending" | "accepted" | "declined" | "expired",
+      status: effectiveInviteStatus(r) as "pending" | "accepted" | "declined" | "expired",
       eventAt: r.eventAt,
       inviteRole: r.inviteRole as "attendee" | "presenter",
       roomCode: r.roomCode,

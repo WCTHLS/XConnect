@@ -9,6 +9,7 @@ import {
   ScrollView,
   Modal,
   Platform,
+  useWindowDimensions,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
@@ -71,6 +72,11 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
   onNavigate,
 }) => {
   const { colors } = useTheme();
+  // A fixed ceiling for the picker's list, as a share of the screen. Percentage and flex limits
+  // inside a modal sheet did not reliably bound the list on Android, so it grew past the screen
+  // with nothing left to scroll and the Done button out of reach.
+  const { height: windowHeight } = useWindowDimensions();
+  const pickerListMaxHeight = Math.round(windowHeight * 0.5);
   const [sessionId, setSessionId] = useState(defaultSessionId);
 
   // Compose state. Both sides of a session are filled in here and sent together under one code:
@@ -275,8 +281,10 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
                 autoCapitalize="none"
               />
               <Text style={[styles.hint, { color: colors.muted }]}>
-                One code covers the whole session: the presenter hosting it and the attendees
-                checking in. A code can only be used once, so both go out together from here.
+                One code covers the whole session: the presenters hosting it and the attendees
+                checking in, sent together from here. A session with several rooms sends again
+                under the same code, once per room: pick that room's presenters, name the room,
+                and leave attendees empty, since they were already sent.
               </Text>
 
               <Text style={[styles.label, { color: colors.sub, marginTop: 18 }]}>
@@ -552,8 +560,9 @@ export const AdminCheckInScreen: React.FC<AdminCheckInScreenProps> = ({
                 </View>
 
                 <ScrollView
-                  style={styles.modalScroll}
+                  style={[styles.modalScroll, { maxHeight: pickerListMaxHeight }]}
                   contentContainerStyle={styles.modalScrollContent}
+                  nestedScrollEnabled
                   showsVerticalScrollIndicator={false}
                   keyboardShouldPersistTaps="handled"
                 >
@@ -678,7 +687,10 @@ const styles = StyleSheet.create({
   },
   modalTitle: { fontSize: 16, fontWeight: '800' },
   modalCloseButton: { padding: 4 },
-  modalScroll: { flex: 1 },
+  // Not flex: 1. The sheet only has a maxHeight, no fixed height, so a flex: 1 child has nothing to
+  // fill and collapses to zero height, hiding the whole list. This takes its content's height and
+  // shrinks only when the list is taller than the sheet's max, which keeps Done pinned below it.
+  modalScroll: { flexGrow: 0, flexShrink: 1 },
   modalScrollContent: { paddingBottom: 16 },
   userRow: {
     flexDirection: 'row',

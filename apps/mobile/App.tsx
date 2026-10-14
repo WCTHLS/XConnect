@@ -49,7 +49,7 @@ import { EdgeStateScreen } from './src/screens/admin/EdgeStateScreen';
 
 const DEFAULT_SESSION = 'poc-session';
 const DEFAULT_ROOMS = ['Hall A', 'Workshop 1', 'Auditorium', 'Room B'];
-const CLOUD_API_URL = 'https://xconnect-ytoj.onrender.com';
+const CLOUD_API_URL = 'http://localhost:3000';
 const LOCAL_API_URL = 'https://xconnect-test.whitehill-a51a4474.eastus.azurecontainerapps.io';
 const SESSION_ID_KEY = 'xconnect.sessionId_v1';
 const ROLE_KEY = 'xconnect.role_v1';
@@ -691,7 +691,11 @@ function MainApp() {
   // snapshot goes stale 45s after a force-close and can't see a room from a different device or
   // after a reinstall, while this asks the server directly every time.
   useEffect(() => {
-    if (role !== 'presenter' || running) {
+    // Not while a stop is in flight either: running flips to false the moment End Session is
+    // tapped, but the leave request is still on its way to the server, so a check made right then
+    // still sees the room as live and flashes the rejoin card until the next poll. Once stopping
+    // clears, the leave has been acknowledged and this effect re-runs with a true answer.
+    if (role !== 'presenter' || running || stopping) {
       setMyActiveRooms([]);
       return;
     }
@@ -713,7 +717,7 @@ function MainApp() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [role, running, serverUrl]);
+  }, [role, running, stopping, serverUrl]);
 
   // Attendee server-truth resume check — mirrors the presenter rejoin check above, but attendee
   // membership isn't a durable ownership claim the way a presenter's room is: it's live
@@ -996,7 +1000,17 @@ function MainApp() {
       const res = await authFetch(`${serverUrl}/api/admin/invites`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sessionId: inviteSessionId, emails, title, message, eventAt, inviteRole, roomCode }),
+        // A blank message is left out, not sent as "": the server treats a missing one as "word
+        // each side yourself" but rejects an empty string as invalid.
+        body: JSON.stringify({
+          sessionId: inviteSessionId,
+          emails,
+          title: title.trim() || undefined,
+          message: message.trim() || undefined,
+          eventAt,
+          inviteRole,
+          roomCode,
+        }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(describeAdminError(res.status, data));
@@ -1077,6 +1091,8 @@ function MainApp() {
       message?: string;
       eventAt?: string | null;
       roomCode?: string;
+      /** Which room `roomCode` renames, when the session has presenters in several. */
+      fromRoomCode?: string;
       reAsk?: boolean;
     }): Promise<{ updated: number; sessionId: string; pushError: string | null }> => {
       const res = await authFetch(`${serverUrl}/api/admin/invites`, {
@@ -1119,7 +1135,24 @@ function MainApp() {
     if (!res.ok) {
       throw new Error(data?.error ? JSON.stringify(data.error) : `Server returned ${res.status}`);
     }
-    return (data.users ?? []) as { id: string; email: string; name: string }[];
+    // Sorted by name, then one entry per address. One person can have several accounts under the
+    // same email, and everything built on this list goes by email. Sorting first makes the entry
+    // kept for a duplicated address predictable (the alphabetically first name) rather than
+    // whichever row the server happened to send first.
+    const sorted = ((data.users ?? []) as { id: string; email: string; name: string }[])
+      .slice()
+      .sort(
+        (a, b) =>
+          a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) ||
+          a.email.localeCompare(b.email, undefined, { sensitivity: 'base' })
+      );
+    const seen = new Set<string>();
+    return sorted.filter(u => {
+      const key = u.email.trim().toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   };
 
   const showNav = NAV_SCREENS.includes(screen);

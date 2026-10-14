@@ -38,6 +38,8 @@ interface InviteResponsesPanelProps {
     message?: string;
     eventAt?: string | null;
     roomCode?: string;
+    /** Which room `roomCode` renames, when the session has presenters in several. */
+    fromRoomCode?: string;
     reAsk?: boolean;
   }) => Promise<{ updated: number; sessionId: string; pushError: string | null }>;
 }
@@ -246,7 +248,8 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
     setPendingRemoval(new Set());
     setAddSelected(new Set());
     setAddTyped('');
-    setAddRoomCode(role === 'presenter' ? assignedRooms[0] ?? '' : '');
+    // With several rooms there is no sensible default, so the admin has to pick one.
+    setAddRoomCode(role === 'presenter' && assignedRooms.length === 1 ? assignedRooms[0] : '');
     setPeopleError(null);
     // Loaded lazily: the roster itself doesn't need the account directory, so it's only worth
     // fetching once someone actually opens this sheet.
@@ -281,11 +284,12 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
     if (!responseSession || !peopleRole) return;
     const remove = [...pendingRemoval];
     if (addingEmails.length === 0 && remove.length === 0) return setPeopleRole(null);
-    // Only needed for the session's FIRST presenter; after that the server inherits the room that
-    // is already assigned, so the field isn't even shown.
-    const needsRoom = peopleRole === 'presenter' && assignedRooms.length === 0 && addingEmails.length > 0;
+    // Every presenter goes into a named room: one this session already has (they join that
+    // room's presenters) or a new one (it starts its own). The server cannot guess when a session
+    // has several, so the room is always sent.
+    const needsRoom = peopleRole === 'presenter' && addingEmails.length > 0;
     if (needsRoom && !addRoomCode.trim()) {
-      return setPeopleError('Name the room this presenter is assigned to.');
+      return setPeopleError('Name the room these presenters are assigned to.');
     }
 
     setPeopleSaving(true);
@@ -335,9 +339,10 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
         newSessionId: editSessionId.trim() !== responseSession ? editSessionId.trim() : undefined,
         title: editTitle.trim() || undefined,
         message: editMessage.trim() || undefined,
-        // Only meaningful when this session actually assigns a room; the server applies it to the
-        // presenter rows alone, never to attendee invites.
-        roomCode: assignedRooms.length > 0 && editRoomCode.trim() ? editRoomCode.trim() : undefined,
+        // Only when this session has exactly one room: with several, a rename would have to say
+        // which room, and the sheet shows them read-only instead. The server applies it to that
+        // room's presenter rows alone, never to attendee invites.
+        roomCode: assignedRooms.length === 1 && editRoomCode.trim() ? editRoomCode.trim() : undefined,
         // Always sent, so clearing the schedule is expressible as an explicit null.
         eventAt: editEventAt ? editEventAt.toISOString() : null,
         reAsk: editReAsk,
@@ -635,7 +640,16 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
                 autoCapitalize="none"
               />
 
-              {assignedRooms.length > 0 ? (
+              {assignedRooms.length > 1 ? (
+                <>
+                  <Text style={[styles.label, { color: colors.sub, marginTop: 16 }]}>ROOMS</Text>
+                  <Text style={[styles.hint, { color: colors.muted, marginTop: 4 }]}>
+                    This session has presenters in {assignedRooms.join(', ')}. To move someone to
+                    another room, remove them from the Presenter list and add them again with the
+                    room they should host.
+                  </Text>
+                </>
+              ) : assignedRooms.length === 1 ? (
                 <>
                   <Text style={[styles.label, { color: colors.sub, marginTop: 16 }]}>ASSIGNED ROOM</Text>
                   <TextInput
@@ -839,6 +853,9 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
                         </Text>
                         <Text style={[styles.userEmail, { color: meta.color }]} numberOfLines={1}>
                           {meta.label}
+                          {invite.inviteRole === 'presenter' && invite.roomCode
+                            ? ` · ${invite.roomCode.toUpperCase()}`
+                            : ''}
                         </Text>
                       </View>
                       <TouchableOpacity
@@ -899,9 +916,41 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
                 multiline
               />
 
-              {peopleRole === 'presenter' && assignedRooms.length === 0 ? (
+              {peopleRole === 'presenter' ? (
                 <>
-                  <Text style={[styles.label, { color: colors.sub, marginTop: 16 }]}>ASSIGN ROOM</Text>
+                  <Text style={[styles.label, { color: colors.sub, marginTop: 16 }]}>ROOM</Text>
+                  {assignedRooms.length > 0 ? (
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
+                      {assignedRooms.map(room => {
+                        const selected = addRoomCode.trim().toUpperCase() === room;
+                        return (
+                          <TouchableOpacity
+                            key={room}
+                            activeOpacity={0.8}
+                            onPress={() => setAddRoomCode(room)}
+                            style={{
+                              paddingHorizontal: 12,
+                              paddingVertical: 6,
+                              borderRadius: 999,
+                              borderWidth: 1,
+                              borderColor: selected ? palette.skyMesh : colors.border,
+                              backgroundColor: selected ? 'rgba(56,189,248,0.15)' : colors.card,
+                            }}
+                          >
+                            <Text
+                              style={{
+                                fontSize: 11,
+                                fontWeight: '800',
+                                color: selected ? palette.skyMesh : colors.sub,
+                              }}
+                            >
+                              {room}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  ) : null}
                   <TextInput
                     ref={addRoomCodeRef}
                     onFocus={peopleKeyboard.focusHandlerFor(addRoomCodeRef)}
@@ -913,7 +962,9 @@ export const InviteResponsesPanel: React.FC<InviteResponsesPanelProps> = ({
                     autoCapitalize="words"
                   />
                   <Text style={[styles.hint, { color: colors.muted }]}>
-                    This session has no room assigned yet, so the first presenter needs one.
+                    {assignedRooms.length > 0
+                      ? 'Pick one of this session\'s rooms to add presenters to it, or type a new room name to start another. Anyone already hosting a different room has to be removed from it first.'
+                      : 'This session has no room assigned yet, so the first presenter needs one.'}
                   </Text>
                 </>
               ) : null}
