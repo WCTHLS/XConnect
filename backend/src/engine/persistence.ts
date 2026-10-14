@@ -18,6 +18,20 @@ export class EnginePersistenceManager {
    */
   readonly pendingDeviceCreation = new Map<string, Promise<void>>();
 
+  /**
+   * What each device's row last held in Postgres, so an unchanged device is not written again on
+   * every sensor batch. Lost on a restart on purpose: each active device then writes once on its
+   * next batch, and the upsert is idempotent. Not shared through Redis, because there is a single
+   * API process.
+   */
+  private readonly deviceWritten = new Map<string, { name: string | undefined; at: number }>();
+
+  /** An unchanged device is rewritten at most this often, which keeps `last_seen_at` roughly current. */
+  static readonly DEVICE_REFRESH_MS = 10 * 60 * 1000;
+
+  /** Bounds the map above. Past this it is cleared, costing one extra write per active device. */
+  static readonly DEVICE_CACHE_MAX = 20_000;
+
   constructor(private readonly db?: Db) {}
 
   get hasDb(): boolean {
@@ -52,6 +66,22 @@ export class EnginePersistenceManager {
    */
   upsertDevice(deviceId: string, displayName: string | undefined, now: number) {
     if (!this.db) return;
+
+    // Called for every sensor batch from every device (about 100 a second at 1000 devices), and
+    // each write holds a connection for a full round trip. Over a long link to the database that
+    // is more than the pool can send, and the unsent writes pile up in memory. What the row needs
+    // is: to exist (the foreign key for state-change events), the current name (read by history),
+    // and a roughly current last_seen_at. So a device already written is only written again when
+    // its name changes or DEVICE_REFRESH_MS has passed.
+    const known = this.deviceWritten.get(deviceId);
+    const nameChanged = displayName !== undefined && displayName !== known?.name;
+    if (known && !nameChanged && now - known.at < EnginePersistenceManager.DEVICE_REFRESH_MS) return;
+
+    if (this.deviceWritten.size >= EnginePersistenceManager.DEVICE_CACHE_MAX) this.deviceWritten.clear();
+    // Recorded as the write starts, not when it lands, so two batches arriving together don't both write.
+    const entry = { name: displayName ?? known?.name, at: now };
+    this.deviceWritten.set(deviceId, entry);
+
     const write = this.db
       .insert(schema.devices)
       .values({ deviceId, displayName, firstSeenAt: new Date(now), lastSeenAt: new Date(now) })
@@ -60,7 +90,11 @@ export class EnginePersistenceManager {
         set: { displayName, lastSeenAt: new Date(now) }
       })
       .then(() => undefined)
-      .catch((err) => console.error("[db] failed to upsert device:", err))
+      .catch((err) => {
+        console.error("[db] failed to upsert device:", err);
+        // Forget it, so the next batch tries again instead of trusting a write that never landed.
+        if (this.deviceWritten.get(deviceId) === entry) this.deviceWritten.delete(deviceId);
+      })
       .finally(() => {
         // Only clear the entry if it is still this write: a later upsert for the same device may
         // already have replaced it, and deleting that one would reopen the race.

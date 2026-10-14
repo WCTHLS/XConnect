@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch --env-file=../.env src/index.ts",
     "start": "tsx src/index.ts",
-    "test": "tsx src/test_wifi_inference.ts && tsx src/test_room_access.ts",
+    "test": "tsx src/test_wifi_inference.ts && tsx src/test_room_access.ts && tsx src/test_persistence.ts",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate"

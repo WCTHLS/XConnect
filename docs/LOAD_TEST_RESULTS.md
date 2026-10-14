@@ -958,7 +958,105 @@ VM, API 1 vCPU / 2 GiB, Redis 0.25 vCPU / 0.5 GiB, Postgres B1ms, sign-in off. A
 
 ---
 
+## 14. The database far from the API (October 14, 2026)
+
+The company plan puts the API in South India and Postgres in the US, because the database is cheaper
+there (about 7,300 INR a month against 8,800 INR with both). The question was whether 1000 devices
+still work with the database that far away.
+
+**Setup.** The trial cannot place the API in South India or Postgres in East US or South India (it
+refuses with `ParameterOutOfRange ... Version should be in: []`), so the topology was mirrored:
+the API in **East US**, the load generator on a VM in East US, and Postgres B1ms in two places.
+Latency is the same in both directions, and each was timed with `select 1` over a connection from the VM:
+
+| Database | Round trip |
+|---|---|
+| Canada Central (`xconnect-scratch-pg-kk`, the baseline used in sections 11 to 13) | about 15 ms |
+| Central India (`xconnect-scratch-pg-far`) | **about 185 ms** |
+
+The company case (South India to East US 2) is probably nearer 230 ms. That figure is an estimate and
+was not measured, so this test is somewhat kinder than the real topology. Same image and settings in
+every run: API 1 vCPU / 2 GiB, Redis 0.25 vCPU, 1000 devices, 5 rooms, `--churn=2`, sign-in off.
+
+**Before the fix, 5 minutes each (p99 in ms, zero errors in all):**
+
+| Endpoint | Near database | Far database |
+|---|---|---|
+| `poll_device` | 376 | **750** |
+| `batch` | 377 | **739** |
+| `leave` | 255 | **865** |
+| `poll_room` | 602 | **923** |
+| `admin_overview` | 647 | **1,080** |
+
+The p50 was 3 ms and the p90 about 300 ms in both, so the 300 ms plateau is the 1000-device load on one
+vCPU, not the database distance (see the open items).
+
+**What the far database did to the API: memory.** On a 30-minute run against the far database, memory
+rose steadily from 119 MB to **about 1.09 GB in 22 minutes (about 50 MB a minute)**. Against the near
+database it stayed flat at about 245 MB. At that rate the 2 GiB container would have run out of memory.
+
+**Cause: one device write per sensor batch.** `upsertDevice` (the `devices` table) ran on every batch
+from every device, about **100 a second** at 1000 devices. Nobody waits for it, but each write holds a
+pool connection for the whole round trip, and the pool could not send them as fast as they arrived. The
+unsent writes piled up in the process's memory.
+
+- Measured from the table's `n_tup_upd` counter: **about 34 to 48 writes landed a second** against about 100
+  arriving. After the load was stopped it kept rising at 48 a second while the backlog drained, which took
+  about nine minutes or more (tens of thousands of writes).
+- 20 connections at 185 ms should manage about 108 a second. They managed 48, which is 2 to 3 round
+  trips per write. The reason was not established.
+- Not a database limit: the active connections showed only `Client / ClientRead` waits (no IO, lock or CPU
+  waits), so the time was spent in the network.
+- Anything queued in memory when the server restarts is lost.
+
+**The fix** ([persistence.ts](../backend/src/engine/persistence.ts)). The device row needs to exist (the
+foreign key for state-change events and stays), carry the current name (history reads it) and have a roughly
+current `last_seen_at` (nothing reads it). So a device already written is written again only when its name
+changes or **10 minutes** have passed. A failed write is forgotten so the next batch retries. The remembered
+set is capped at 20,000 devices and lost on restart (each active device then writes once). Sixteen
+checks in `src/test_persistence.ts` use a fake database; 10 of them fail against the old code.
+
+**After the fix, 30 minutes against the far database:** 769,184 requests, **zero errors**.
+
+| Endpoint | p50 | p90 | p95 | p99 | max |
+|---|---|---|---|---|---|
+| `poll_device` | 3 | 322 | 364 | 417 | 585 |
+| `batch` | 3 | 322 | 366 | 420 | 582 |
+| `leave` | 2 | 10 | 159 | 375 | 456 |
+| `poll_room` | 6 | 437 | 534 | 620 | 725 |
+| `admin_overview` | 8 | 511 | 579 | 656 | 746 |
+| `join` | 3 | 7 | 193 | 374 | 440 |
+
+| Measure | Before the fix (far database) | After the fix (far database) |
+|---|---|---|
+| Memory | climbed to about 1.09 GB | **flat, 235 to 245 MB (max 245.8)** |
+| `devices` updates | 34 to 48 a second, always behind | **0 a minute** in steady state |
+| 10-minute refresh | none | waves of about 967 and 925 updates, then 4 to 14 a minute (about 1.7 a second on average) |
+| Pool connections | 14 active, 7 idle | **1 active, 20 idle** |
+
+- p99 is within about 10% of the near database on the polls and batches; `leave` is higher (375 against
+  255 ms), probably the stays closing at the end still going to the far database.
+- After the run: **3,256 of 3,256 devices have a name**, and `room_membership` holds 1,225 stays
+  with **0 open**. A search of the app's console log over the three hours covering every run in this
+  section (Log Analytics, `Log_s contains "failed to"`) found **2 matching lines, both in the 04:20 UTC
+  bucket**, which is before the first load run of that stack (04:53 UTC) and so outside every test
+  window. None appeared during the 30-minute run with the fix (05:30 to 06:06 UTC).
+- Memory fell from about 240 to 135 MB when the load ended, with no visible bump while 1000 stays closed.
+
+**Not measured:**
+- the 185 ms link instead of the real South India to East US 2 distance (about 230 ms by estimate);
+- the response times of the screens that do wait on the database (history, invites, the user list), which each pay the
+  round trip once or more per query;
+- the cross-region data transfer charge (the device writes were about 100 a second of small statements);
+- runs longer than 30 minutes, or more than one run per setting.
+
+---
+
 ## Open items
+
+- **The 300 ms p90 at 1000 devices** (section 14). Present with both databases (286 ms near, 322 ms far) and
+  with p50 at 3 ms, so about one request in ten waits about 300 ms. It looks like the process stalling
+  during the 2-second tick at this size, on one vCPU. Not investigated.
 
 - **The local single-room-concentration anomaly** (section 4) remains genuinely unexplained as a
   *mechanism*, but hasn't reproduced since — the section 6 restart test ran 500 devices in a
