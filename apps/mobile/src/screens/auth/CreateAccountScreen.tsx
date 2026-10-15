@@ -11,7 +11,7 @@ import {
 import Svg, { Path, Circle } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
-import { signUpWithEmail } from '../../services/auth';
+import { sendVerificationEmail, signUpWithEmail } from '../../services/auth';
 import { MobileScreen, Role } from '../../components/navigation/BottomNav';
 import { RolePicker } from '../../components/ui/RolePicker';
 import { useKeyboardAwareScroll } from '../../hooks/useKeyboardAwareScroll';
@@ -23,8 +23,9 @@ const CONTENT_BOTTOM_PADDING = 56;
 
 interface CreateAccountScreenProps {
   role: Role;
-  /** Applied only once the account is actually created, same as on the login screen. */
-  onSelectRole: (role: Role) => void;
+  /** Applied only once the account is actually created, same as on the login screen, which also
+   *  describes the refusal message this can return. */
+  onSelectRole: (role: Role) => Promise<string | undefined> | void;
   onNavigate: (screen: MobileScreen) => void;
   onSuccess?: () => void;
 }
@@ -76,7 +77,14 @@ export const CreateAccountScreen: React.FC<CreateAccountScreenProps> = ({
       if (!res.ok && res.error) {
         setError(res.error);
       } else if (res.ok) {
-        onSelectRole(pickedRole);
+        const refusal = await onSelectRole(pickedRole);
+        if (refusal) {
+          setError(refusal);
+          return;
+        }
+        // Sent only once the sign-up is accepted, so a refused one (a non-admin picking Admin) gets
+        // no email. Best effort: the person can resend from Profile if it fails.
+        void sendVerificationEmail();
         onSuccess?.();
         onNavigate('home');
       }

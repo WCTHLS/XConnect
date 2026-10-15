@@ -13,7 +13,7 @@ import type { ParticipantRole, RoomMemberInfo, LiveRoomState, MyInvite } from '@
 import { getAcousticTokenForRoom } from '@confpresence/shared';
 import { PresenceService, RoomRejectedError, type PresenceStatus } from './src/services/presenceService';
 import { getOrCreateDeviceId } from './src/services/deviceIdentity';
-import { authConfigured, authFetch, signOut, useAuthSession } from './src/services/auth';
+import { authConfigured, authFetch, discardNewAccount, signOut, useAuthSession } from './src/services/auth';
 import { registerForPushNotifications } from './src/services/pushNotifications';
 import type { HistoryDetail, SessionOccurrence } from './src/services/sessionHistory';
 import { ThemeProvider, useTheme } from './src/theme/useTheme';
@@ -50,7 +50,7 @@ import { EdgeStateScreen } from './src/screens/admin/EdgeStateScreen';
 const DEFAULT_SESSION = 'poc-session';
 const DEFAULT_ROOMS = ['Hall A', 'Workshop 1', 'Auditorium', 'Room B'];
 const CLOUD_API_URL = 'https://xconnect-test.whitehill-a51a4474.eastus.azurecontainerapps.io';
-const LOCAL_API_URL = 'https://xconnect-ytoj.onrender.com';
+const LOCAL_API_URL = 'http://localhost:3000';
 const SESSION_ID_KEY = 'xconnect.sessionId_v1';
 const ROLE_KEY = 'xconnect.role_v1';
 
@@ -156,6 +156,8 @@ function MainApp() {
   // network never locks a real admin out of their own screens. The server enforces this for
   // real via requireAdmin; this only stops the UI offering screens that would 403.
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
+  // On the server's admin list but waiting for the email to be verified.
+  const [adminPending, setAdminPending] = useState(false);
 
   // Mirrors of state that the 3s polling callback needs to read. They are refs, not dependencies,
   // because putting `screen` or `activePresence` in fetchLiveRoom's dep array would rebuild the
@@ -196,6 +198,12 @@ function MainApp() {
   // Auth Hook
   const { session: authSession, ready: authReady } = useAuthSession();
   const signedIn = Boolean(authSession);
+  // The session exists the moment a password is accepted, but the person is only let in after the
+  // sign-in screens' role check (a non-admin choosing Admin is turned away, and a brand-new account
+  // is deleted). Nothing that calls the server for them may start until they leave those screens,
+  // or a refused attempt would still leave a user row and a registered device behind.
+  const onAuthScreen = screen === 'login' || screen === 'createAccount';
+  const sessionActive = signedIn && !onAuthScreen;
   const savedNameRef = useRef('');
 
   const nav = useCallback((s: MobileScreen) => {
@@ -300,7 +308,7 @@ function MainApp() {
 
   // Sync Preferred Name
   useEffect(() => {
-    if (!signedIn) return;
+    if (!sessionActive) return;
     let cancelled = false;
     const fallback = authSession?.name ?? '';
     authFetch(`${serverUrl}/api/me`)
@@ -313,6 +321,11 @@ function MainApp() {
         // Same response already carries it, so this costs no extra request. With sign-in turned
         // off entirely the server reports isAdmin: true, keeping POC mode open.
         setIsAdmin(typeof me?.isAdmin === 'boolean' ? me.isAdmin : null);
+        setAdminPending(me?.adminPendingVerification === true);
+        // A restored admin role must not outlive the account's admin access (removed from the list).
+        if (me?.isAdmin === false && me?.adminPendingVerification !== true) {
+          setRole(current => (current === 'admin' ? 'attendee' : current));
+        }
       })
       .catch(() => {
         if (cancelled) return;
@@ -322,14 +335,14 @@ function MainApp() {
     return () => {
       cancelled = true;
     };
-  }, [signedIn, serverUrl, authSession]);
+  }, [sessionActive, serverUrl, authSession]);
 
   // Registers this device for push notifications once signed in. Re-runs on serverUrl change
   // too, since registration is a POST to that specific server, same as every other API call here.
   useEffect(() => {
-    if (!signedIn) return;
+    if (!sessionActive) return;
     void registerForPushNotifications(serverUrl);
-  }, [signedIn, serverUrl]);
+  }, [sessionActive, serverUrl]);
 
   const saveDisplayName = async (newName: string) => {
     try {
@@ -783,7 +796,7 @@ function MainApp() {
   // poll exists so an invite still arrives for someone whose device was never registered for
   // push, or who had notifications turned off.
   useEffect(() => {
-    if (!signedIn) {
+    if (!sessionActive) {
       setMyInvites([]);
       return;
     }
@@ -805,7 +818,7 @@ function MainApp() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [signedIn, serverUrl]);
+  }, [sessionActive, serverUrl]);
 
   /** Returns whether the reply actually saved, so callers don't dismiss their UI on a failure —
    *  the same reason togglePresence returns a boolean rather than firing and forgetting. */
@@ -955,6 +968,39 @@ function MainApp() {
     setRole('attendee');
     setMyActiveRooms([]);
     setScreen('login');
+  };
+
+  /**
+   * Role picked on the sign-in screens, called once sign-in has succeeded. Attendee and presenter
+   * are open to everyone and apply at once. Admin is checked with the server first: an account that
+   * is not an admin is signed straight back out and the returned message is shown on the sign-in
+   * screen, which stays where it is. An address on the admin list that is not yet verified still
+   * goes in, because the admin screens show the "Verify your email" card. The server's admin check
+   * stays the real boundary. Returns the message to show, or undefined when the role was accepted.
+   */
+  const handleSelectRole = async (picked: Role, newAccount: boolean = false): Promise<string | undefined> => {
+    if (picked !== 'admin') {
+      setRole(picked);
+      return undefined;
+    }
+    let refusal: string;
+    try {
+      // The probe header makes the server answer without creating the person's row.
+      const res = await authFetch(`${serverUrl}/api/me`, { headers: { 'x-auth-probe': '1' } });
+      const me = await res.json();
+      if (!res.ok || typeof me?.isAdmin !== 'boolean') throw new Error('admin check failed');
+      if (me.isAdmin || me.adminPendingVerification === true) {
+        setRole('admin');
+        return undefined;
+      }
+      refusal = 'This account is not an admin. Choose Attendee or Presenter, or sign in with an admin account.';
+    } catch {
+      refusal = 'Could not check admin access. Check your connection and try again.';
+    }
+    // A sign-up that is refused leaves no account behind; a sign-in just signs the person out.
+    if (newAccount) await discardNewAccount();
+    else await signOut();
+    return refusal;
   };
 
   // Past-session lookups for the admin History tab. Both are useCallback'd because the screen
@@ -1198,7 +1244,7 @@ function MainApp() {
         return (
           <LoginScreen
             role={role}
-            onSelectRole={setRole}
+            onSelectRole={handleSelectRole}
             onNavigate={nav}
             onSuccess={() => {
               void markOnboarded();
@@ -1210,7 +1256,7 @@ function MainApp() {
         return (
           <CreateAccountScreen
             role={role}
-            onSelectRole={setRole}
+            onSelectRole={r => handleSelectRole(r, true)}
             onNavigate={nav}
             onSuccess={() => {
               void markOnboarded();
@@ -1392,6 +1438,7 @@ function MainApp() {
             <AdminOnlyNotice
               feature="The live room monitor"
               userEmail={authSession?.email}
+              pendingVerification={adminPending}
               onNavigate={nav}
             />
           );
@@ -1410,6 +1457,7 @@ function MainApp() {
             <AdminOnlyNotice
               feature="Room details"
               userEmail={authSession?.email}
+              pendingVerification={adminPending}
               onNavigate={nav}
             />
           );
@@ -1446,6 +1494,7 @@ function MainApp() {
             <AdminOnlyNotice
               feature="Session history"
               userEmail={authSession?.email}
+              pendingVerification={adminPending}
               onNavigate={nav}
             />
           );
@@ -1465,6 +1514,7 @@ function MainApp() {
             <AdminOnlyNotice
               feature="Check-in invites"
               userEmail={authSession?.email}
+              pendingVerification={adminPending}
               onNavigate={nav}
             />
           );
@@ -1483,6 +1533,7 @@ function MainApp() {
             <AdminOnlyNotice
               feature="Sending notifications"
               userEmail={authSession?.email}
+              pendingVerification={adminPending}
               onNavigate={nav}
             />
           );

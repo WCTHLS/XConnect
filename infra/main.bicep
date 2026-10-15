@@ -90,6 +90,9 @@ param authAudience string = ''
 @description('Comma-separated admin email addresses. Sets ADMIN_EMAILS.')
 param adminEmails string = ''
 
+@description('The company Entra tenant id (a GUID). A Microsoft sign-in from this tenant may become admin by email. Unset means no Microsoft sign-in can; Google sign-in still can. Sets ADMIN_TENANT_ID.')
+param adminTenantId string = ''
+
 @description('true creates a Notification Hubs namespace and hub here, and the API gets its connection string automatically. false uses an existing hub: then set notificationHubConnectionString below. Push credentials (Firebase Cloud Messaging for Android, an APNs key for iOS) are not set by this template: add them to the hub in the portal afterwards.')
 param createNotificationHub bool = false
 
@@ -185,6 +188,7 @@ var optionalEnv = filter([
   { name: 'AUTH_AUTHORITY', value: authAuthority }
   { name: 'AUTH_AUDIENCE', value: authAudience }
   { name: 'ADMIN_EMAILS', value: adminEmails }
+  { name: 'ADMIN_TENANT_ID', value: adminTenantId }
   { name: 'AZURE_NOTIFICATION_HUB_NAME', value: notificationHubName }
   { name: 'DB_POOL_MAX', value: dbPoolMax }
   { name: 'MOTION_SLIDING_WINDOW_SIZE', value: motionSlidingWindowSize }

@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from "express";
 import { createRemoteJWKSet, decodeJwt, jwtVerify, type JWTPayload } from "jose";
 import { db, schema } from "./db/index.js";
 import { redis } from "./redis/index.js";
+import { adminAccess } from "./trustedEmail.js";
 
 export type AuthUser = {
   id: string;
@@ -11,6 +12,11 @@ export type AuthUser = {
   /** The name the login provider gave, kept so the UI can offer it as the fallback. */
   accountName?: string;
   isAdmin: boolean;
+  /**
+   * True when the email is on the admin list but the provider has not vouched for it yet (an
+   * unverified password account), so the app can say "verify your email" instead of "not an admin".
+   */
+  adminPendingVerification?: boolean;
 };
 
 declare global {
@@ -42,6 +48,9 @@ const ADMIN_EMAILS = new Set(
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean)
 );
+
+/** The company's Entra tenant id: Microsoft sign-ins from it may become admin by email. Unset means none may. */
+const ADMIN_TENANT_ID = process.env.ADMIN_TENANT_ID?.trim() || undefined;
 
 const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID;
 const FIREBASE_JWKS_URL = "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
@@ -103,7 +112,7 @@ function loadVerifiers(): Promise<Verifier[]> {
 }
 
 /** Verifies against whichever configured provider issued the token. Throws if none did. */
-async function verifyToken(token: string): Promise<JWTPayload> {
+async function verifyToken(token: string): Promise<{ payload: JWTPayload; provider: "firebase" | "oidc" }> {
   const verifiers = await loadVerifiers();
   // Unverified read, used only to pick a verifier — the signature check below is what makes the
   // issuer trustworthy, and it is re-checked against the verified payload afterwards.
@@ -113,7 +122,7 @@ async function verifyToken(token: string): Promise<JWTPayload> {
 
   const { payload } = await jwtVerify(token, verifier.jwks, { audience: verifier.audience });
   if (!payload.iss || !verifier.issuerMatches(payload.iss)) throw new Error("issuer mismatch");
-  return payload;
+  return { payload, provider: verifier.name as "firebase" | "oidc" };
 }
 
 function claimString(payload: JWTPayload, ...keys: string[]): string | undefined {
@@ -126,65 +135,84 @@ function claimString(payload: JWTPayload, ...keys: string[]): string | undefined
 }
 
 const USER_REFRESH_MS = 5 * 60 * 1000;
-const USER_CACHE_PREFIX = "auth:user:";
+const USER_CACHE_PREFIX = "auth:profile:";
+
+/** What is cached per person: who they are, never what they may do (admin is worked out per request). */
+type Profile = Pick<AuthUser, "id" | "email" | "name" | "accountName">;
+
 /**
  * L1 cache — checked first on every authenticated request, zero network cost. Redis (below) is
  * an L2 behind it: surviving a restart means the first request after boot can still skip the
  * Postgres upsert, instead of every cache being cold again the moment the process restarts.
  */
-const userCache = new Map<string, { user: AuthUser; at: number }>();
+const userCache = new Map<string, { profile: Profile; at: number }>();
 
-async function getCachedUser(id: string): Promise<AuthUser | undefined> {
+async function getCachedProfile(id: string): Promise<Profile | undefined> {
   const cached = userCache.get(id);
-  if (cached && Date.now() - cached.at < USER_REFRESH_MS) return cached.user;
+  if (cached && Date.now() - cached.at < USER_REFRESH_MS) return cached.profile;
   if (!redis) return undefined;
   const raw = await redis.get(`${USER_CACHE_PREFIX}${id}`);
   if (!raw) return undefined;
-  const user = JSON.parse(raw) as AuthUser;
-  userCache.set(id, { user, at: Date.now() });
-  return user;
+  const parsed = JSON.parse(raw) as Profile;
+  const profile: Profile = { id: parsed.id, email: parsed.email, name: parsed.name, accountName: parsed.accountName };
+  userCache.set(id, { profile, at: Date.now() });
+  return profile;
 }
 
-function setCachedUser(id: string, user: AuthUser) {
-  userCache.set(id, { user, at: Date.now() });
+function setCachedProfile(id: string, profile: Profile) {
+  userCache.set(id, { profile, at: Date.now() });
   redis
-    ?.set(`${USER_CACHE_PREFIX}${id}`, JSON.stringify(user), "PX", USER_REFRESH_MS)
+    ?.set(`${USER_CACHE_PREFIX}${id}`, JSON.stringify(profile), "PX", USER_REFRESH_MS)
     .catch((err) => console.error("[redis] failed to cache user:", err));
 }
 
-/** Upserts the person's row at most every USER_REFRESH_MS so authenticated polling never hits the DB per request. */
-async function resolveUser(payload: JWTPayload): Promise<AuthUser> {
+/**
+ * Upserts the person's row at most every USER_REFRESH_MS so authenticated polling never hits the DB
+ * per request. Admin status is not part of that: it comes from the admin list and this token on
+ * every request (see adminAccess), so a change to the list takes effect immediately.
+ */
+async function resolveUser(
+  payload: JWTPayload,
+  provider: "firebase" | "oidc",
+  persist: boolean = true
+): Promise<AuthUser> {
   const id = claimString(payload, "oid", "sub");
   if (!id) throw new Error("token has no subject");
   const email = claimString(payload, "email", "emails", "preferred_username", "upn");
   const name = claimString(payload, "name") ?? email?.split("@")[0];
-  const allowlisted = Boolean(email && ADMIN_EMAILS.has(email.toLowerCase()));
+  // Only an email its owner has proved may grant admin: see trustedEmail.ts.
+  const access = adminAccess(email, payload, provider, ADMIN_EMAILS, ADMIN_TENANT_ID);
+  const withAccess = (profile: Profile): AuthUser => ({
+    ...profile,
+    isAdmin: access.isAdmin,
+    ...(access.pending ? { adminPendingVerification: true } : {})
+  });
 
-  const cached = await getCachedUser(id);
-  if (cached) return cached;
+  // A probe (see authenticate) answers who the token is and what it may do without writing a row
+  // or filling the cache, so checking an account that is about to be refused leaves no trace.
+  if (!persist) return withAccess({ id, email, name, accountName: name });
 
-  let isAdmin = allowlisted;
+  const cached = await getCachedProfile(id);
+  if (cached) return withAccess(cached);
+
   let preferredName: string | undefined;
   if (db) {
     const now = new Date();
     const [row] = await db
       .insert(schema.users)
-      .values({ id, email, displayName: name, isAdmin: allowlisted, firstSeenAt: now, lastSeenAt: now })
+      .values({ id, email, displayName: name, isAdmin: access.isAdmin, firstSeenAt: now, lastSeenAt: now })
+      // is_admin is written as a record for reports only; access never reads it back.
       .onConflictDoUpdate({
         target: schema.users.id,
-        // Never downgrade an admin set directly in the database; only the allowlist can add one here.
-        set: allowlisted
-          ? { email, displayName: name, lastSeenAt: now, isAdmin: true }
-          : { email, displayName: name, lastSeenAt: now }
+        set: { email, displayName: name, lastSeenAt: now, isAdmin: access.isAdmin }
       })
-      .returning({ isAdmin: schema.users.isAdmin, preferredName: schema.users.preferredName });
-    isAdmin = row?.isAdmin ?? allowlisted;
+      .returning({ preferredName: schema.users.preferredName });
     preferredName = row?.preferredName ?? undefined;
   }
 
-  const user: AuthUser = { id, email, name: preferredName ?? name, accountName: name, isAdmin };
-  setCachedUser(id, user);
-  return user;
+  const profile: Profile = { id, email, name: preferredName ?? name, accountName: name };
+  setCachedProfile(id, profile);
+  return withAccess(profile);
 }
 
 /** Drops a cached user so a just-changed name is visible on the very next request. */
@@ -202,7 +230,10 @@ export async function authenticate(request: Request, response: Response, next: N
   if (!token) return response.status(401).json({ error: "unauthenticated" });
 
   try {
-    request.user = await resolveUser(await verifyToken(token));
+    const { payload, provider } = await verifyToken(token);
+    // The app sends this on the sign-in screens' admin check, before it decides to let the person in.
+    const probe = request.headers["x-auth-probe"] === "1";
+    request.user = await resolveUser(payload, provider, !probe);
     return next();
   } catch (err) {
     console.warn("[auth] rejected token:", err instanceof Error ? err.message : err);

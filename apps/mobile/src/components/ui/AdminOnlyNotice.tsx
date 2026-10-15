@@ -4,12 +4,15 @@ import Svg, { Path, Circle } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
 import { TopBar } from './TopBar';
+import { VerifyEmailCard } from './VerifyEmailCard';
 import { MobileScreen } from '../navigation/BottomNav';
 
 interface AdminOnlyNoticeProps {
   /** What they were trying to open, named in the copy so the refusal is specific. */
   feature: string;
   userEmail?: string;
+  /** The server says this address is on the admin list but not yet verified. */
+  pendingVerification?: boolean;
   onNavigate: (screen: MobileScreen) => void;
 }
 
@@ -20,7 +23,7 @@ interface AdminOnlyNoticeProps {
  * by requireAdmin, so a non-admin reaching these screens anyway would simply get 403s. The point
  * is to say why up front rather than letting someone fill in a form that cannot succeed.
  */
-export const AdminOnlyNotice: React.FC<AdminOnlyNoticeProps> = ({ feature, userEmail, onNavigate }) => {
+export const AdminOnlyNotice: React.FC<AdminOnlyNoticeProps> = ({ feature, userEmail, pendingVerification, onNavigate }) => {
   const { colors } = useTheme();
 
   return (
@@ -28,6 +31,9 @@ export const AdminOnlyNotice: React.FC<AdminOnlyNoticeProps> = ({ feature, userE
       <TopBar title={feature} subtitle="Admin only" onBack={() => onNavigate('home')} />
 
       <View style={styles.content}>
+        {pendingVerification ? (
+          <VerifyEmailCard note="This address is on the admin list. Verify it to unlock the admin screens." />
+        ) : null}
         <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <View style={[styles.iconBox, { backgroundColor: 'rgba(245,158,11,0.15)' }]}>
             <Svg width={24} height={24} viewBox="0 0 24 24" fill="none">

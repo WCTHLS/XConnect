@@ -96,7 +96,8 @@ available to the routes.
 | `FIREBASE_PROJECT_ID` | API env | Firebase project ID; turns on Firebase token checking |
 | `AUTH_AUTHORITY` | API env | `https://login.microsoftonline.com/common/v2.0` for work and personal Microsoft accounts |
 | `AUTH_AUDIENCE` | API env | The Microsoft app registration's Application (client) ID |
-| `ADMIN_EMAILS` | API env | Comma-separated emails that become admins on first sign-in |
+| `ADMIN_EMAILS` | API env | Comma-separated emails that become admins on first sign-in, only when the provider vouches for the email (Google; Microsoft from `ADMIN_TENANT_ID`; never an unverified password account) |
+| `ADMIN_TENANT_ID` | API env | Company Entra tenant id: Microsoft sign-ins from it may become admin by email |
 | `FIREBASE_API_KEY`, `GOOGLE_ANDROID_CLIENT_ID` | `apps/mobile/src/config/authConfig.ts` | Firebase web API key and the Android OAuth client; empty hides email and Google |
 | `AUTH_AUTHORITY`, `AUTH_CLIENT_ID` | `apps/mobile/src/config/authConfig.ts` | Same authority and client ID as the API; empty hides the Microsoft button |
 

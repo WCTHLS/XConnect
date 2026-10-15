@@ -30,6 +30,8 @@ export type AuthSessionInfo = {
   expiresAt: number;
   name?: string;
   email?: string;
+  /** Firebase's email_verified claim. Undefined on sessions stored before it was read, until the next token refresh. */
+  emailVerified?: boolean;
 };
 
 const SCOPES = ["openid", "profile", "email", "offline_access"];
@@ -56,7 +58,7 @@ function getDiscovery() {
   return discoveryPromise;
 }
 
-function decodeClaims(idToken: string): { name?: string; email?: string } {
+function decodeClaims(idToken: string): { name?: string; email?: string; emailVerified?: boolean } {
   try {
     let payload = idToken.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
     // JWT segments are unpadded base64url; atob requires a length that's a multiple of 4.
@@ -69,7 +71,11 @@ function decodeClaims(idToken: string): { name?: string; email?: string } {
     );
     const claims = JSON.parse(json);
     const email = [claims.email, claims.emails, claims.preferred_username].flat().find((v) => typeof v === "string");
-    return { name: typeof claims.name === "string" ? claims.name : undefined, email };
+    return {
+      name: typeof claims.name === "string" ? claims.name : undefined,
+      email,
+      emailVerified: typeof claims.email_verified === "boolean" ? claims.email_verified : undefined
+    };
   } catch {
     return {};
   }
@@ -227,6 +233,38 @@ export async function sendPasswordReset(email: string): Promise<{ ok: boolean; e
   }
 }
 
+/** Sends (or resends) the verification email for the signed-in email/password account. */
+export async function sendVerificationEmail(): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const idToken = await getIdToken();
+    if (!idToken || session?.provider !== "firebase") return { ok: false, error: "Sign in again to verify your email." };
+    await firebasePost("accounts:sendOobCode", { requestType: "VERIFY_EMAIL", idToken });
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: err?.message };
+  }
+}
+
+/**
+ * Asks Firebase for a fresh token, which carries the current email_verified value, so a link
+ * clicked in the mailbox shows up here. The server reads the same claim, so after this the account
+ * is trusted without signing out.
+ */
+export async function checkEmailVerified(): Promise<{ ok: boolean; verified?: boolean; error?: string }> {
+  try {
+    const current = session;
+    if (!current?.refreshToken || current.provider !== "firebase") return { ok: false, error: "Sign in again to verify your email." };
+    const refreshed = await refreshFirebase(current.refreshToken);
+    // A refreshed token does not always repeat the display name, so keep what the session had.
+    const next = { ...refreshed, name: refreshed.name ?? current.name, email: refreshed.email ?? current.email };
+    await persist(next);
+    publish(next);
+    return { ok: true, verified: next.emailVerified === true };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || "Could not check right now. Try again." };
+  }
+}
+
 async function refreshFirebase(refreshToken: string): Promise<AuthSessionInfo> {
   const res = await fetch(`${FIREBASE_TOKEN_URL}?key=${FIREBASE_API_KEY}`, {
     method: "POST",
@@ -296,6 +334,21 @@ export async function signInWithMicrosoft(): Promise<{ ok: boolean; error?: stri
   } catch (err: any) {
     return { ok: false, error: err?.message || "Microsoft sign-in failed" };
   }
+}
+
+/**
+ * Removes the Firebase account that was just created and signs out. Used when a brand-new sign-up
+ * is refused straight away (a non-admin choosing Admin), so the attempt leaves no account behind.
+ * If the deletion fails the person is still signed out, and the account is left to be cleaned up.
+ */
+export async function discardNewAccount() {
+  try {
+    const idToken = await getIdToken();
+    if (idToken && session?.provider === "firebase") await firebasePost("accounts:delete", { idToken });
+  } catch {
+    // Best effort: signing out below is what matters for the person.
+  }
+  await signOut();
 }
 
 export async function signOut() {

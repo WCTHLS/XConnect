@@ -17,6 +17,8 @@ import { MobileScreen, Role } from '../../components/navigation/BottomNav';
 import type { LiveRoomState, MyInvite, ParticipantRole } from '@confpresence/shared';
 import { InviteCard } from '../../components/ui/InviteCard';
 import { InviteDetailSheet } from '../../components/ui/InviteDetailSheet';
+import { VerifyEmailCard } from '../../components/ui/VerifyEmailCard';
+import { useAuthSession } from '../../services/auth';
 import { AssignmentCard } from '../../components/ui/AssignmentCard';
 
 /**
@@ -246,6 +248,11 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [openInviteId, setOpenInviteId] = useState<number | null>(null);
   const openInvite = answeredInvites.find(i => i.id === openInviteId) ?? null;
   const [notificationSheetOpen, setNotificationSheetOpen] = useState(false);
+  // An unverified email/password account is asked to verify from the bell, as one more item next
+  // to the invites. VerifyEmailCard hides itself once verified, and for Google and Microsoft.
+  const { session } = useAuthSession();
+  const needsVerification = session?.provider === 'firebase' && session.emailVerified === false;
+  const notificationCount = pendingInvites.length + (needsVerification ? 1 : 0);
 
   return (
     <ScrollView
@@ -289,7 +296,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 stroke={isDark ? '#E2E8F0' : '#0F2F2C'}
                 strokeWidth={2}
                 strokeLinejoin="round"
-                fill={pendingInvites.length > 0 ? (isDark ? 'rgba(51,209,172,0.2)' : 'rgba(51,209,172,0.15)') : 'none'}
+                fill={notificationCount > 0 ? (isDark ? 'rgba(51,209,172,0.2)' : 'rgba(51,209,172,0.15)') : 'none'}
               />
               <Path
                 d="M10 18a2 2 0 0 0 4 0"
@@ -298,10 +305,10 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 strokeLinecap="round"
               />
             </Svg>
-            {pendingInvites.length > 0 && (
+            {notificationCount > 0 && (
               <View style={styles.bellBadge}>
                 <Text style={styles.bellBadgeText}>
-                  {pendingInvites.length > 9 ? '9+' : pendingInvites.length}
+                  {notificationCount > 9 ? '9+' : notificationCount}
                 </Text>
               </View>
             )}
@@ -879,9 +886,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 <View style={styles.notifHeaderRow}>
                   <View style={styles.notifTitleRow}>
                     <Text style={[styles.notifTitle, { color: colors.txt }]}>Notifications</Text>
-                    {pendingInvites.length > 0 && (
+                    {notificationCount > 0 && (
                       <View style={styles.notifCountBadge}>
-                        <Text style={styles.notifCountBadgeText}>{pendingInvites.length}</Text>
+                        <Text style={styles.notifCountBadgeText}>{notificationCount}</Text>
                       </View>
                     )}
                   </View>
@@ -901,7 +908,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                   contentContainerStyle={styles.notifScrollContent}
                   showsVerticalScrollIndicator={false}
                 >
-                  {pendingInvites.length === 0 ? (
+                  <VerifyEmailCard />
+                  {notificationCount === 0 ? (
                     <View style={styles.notifEmptyBox}>
                       <View style={[styles.notifEmptyIcon, { backgroundColor: isDark ? '#131C2E' : '#F1F5F9' }]}>
                         <Svg width={28} height={28} viewBox="0 0 24 24" fill="none">

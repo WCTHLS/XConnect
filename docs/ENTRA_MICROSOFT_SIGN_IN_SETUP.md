@@ -25,6 +25,7 @@ XConnect has a single mobile app. Who is an admin is decided by the server's adm
 | Server | Authority URL | `authAuthority` (Bicep) / `AUTH_AUTHORITY` |
 | Server | Application (client) ID | `authAudience` (Bicep) / `AUTH_AUDIENCE` |
 | Server | Admin email addresses | `adminEmails` (Bicep) / `ADMIN_EMAILS` |
+| Server | Your tenant id, so Microsoft admins count as verified | `adminTenantId` (Bicep) / `ADMIN_TENANT_ID` (without it, a Microsoft sign-in is never made admin by email) |
 
 The client ID and the authority are public identifiers, not secrets. The app and the server
 must use the **same** values.

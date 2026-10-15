@@ -32,8 +32,12 @@ const CONTENT_BOTTOM_PADDING = 56;
 
 interface LoginScreenProps {
   role: Role;
-  /** Applied only once sign-in actually succeeds — see the comment in `run`. */
-  onSelectRole: (role: Role) => void;
+  /**
+   * Applied only once sign-in actually succeeds — see the comment in `run`. Returns a message when
+   * the role is refused (an account that is not an admin picking Admin), in which case the person
+   * has already been signed out and this screen stays up showing it.
+   */
+  onSelectRole: (role: Role) => Promise<string | undefined> | void;
   onNavigate: (screen: MobileScreen) => void;
   onSuccess?: () => void;
 }
@@ -74,7 +78,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
       if (!result.ok && result.error) {
         setError(result.error);
       } else if (result.ok && entersApp) {
-        onSelectRole(pickedRole);
+        const refusal = await onSelectRole(pickedRole);
+        if (refusal) {
+          setError(refusal);
+          return result;
+        }
         onSuccess?.();
         onNavigate('home');
       }

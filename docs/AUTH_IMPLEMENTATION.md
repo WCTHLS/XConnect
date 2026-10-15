@@ -286,11 +286,13 @@ The verified JWT payload only proves *who signed in*, not what your app knows ab
 - Upserts a `users` row (id, email, display name) — this is a normal app-domain user record;
   it exists so the app can attach *your own* app data to a person, not because auth itself
   needs a database.
-- Determines admin status from a static env-var allowlist of emails
-  (`ADMIN_EMAILS=alice@x.com,bob@x.com`) on first sight, but never downgrades an admin flag
-  set directly in the database afterward — a deliberate one-way ratchet so revoking someone
-  from the allowlist doesn't silently strip admin rights you'd set some other way.
-- Caches the resolved user in memory for 5 minutes (`USER_REFRESH_MS`), so a client polling
+- Determines admin status on every request from a static env-var allowlist of emails
+  (`ADMIN_EMAILS=alice@x.com,bob@x.com`) and the token's own proof that the email is the
+  person's (`backend/src/trustedEmail.ts`). The `users.is_admin` column is written as a record
+  for reports but never read back for access, so taking an address off the list, or an email
+  becoming unverified, removes admin on the next request. An admin set only in the database has
+  no effect.
+- Caches the person's profile (not their admin status) in memory for 5 minutes (`USER_REFRESH_MS`), so a client polling
   the API every few seconds doesn't hit the database on every single request — only signature
   verification happens on every request; the DB upsert is throttled.
 
