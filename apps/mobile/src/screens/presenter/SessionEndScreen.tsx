@@ -16,8 +16,10 @@ import { AppAlert } from '../../components/ui/AppAlert';
 import { exportHistoryReport, type HistoryDetail } from '../../services/sessionHistory';
 
 interface SessionEndScreenProps {
-  roomId: string;
-  sessionId: string;
+  /** Both are undefined when there is no live or ended session to describe, so no room or session
+   *  name is shown (and none made up). */
+  roomId?: string;
+  sessionId?: string;
   /** True while this room is actually being broadcast right now — the "Analysis" tab reuses this
    * same screen both for a live in-progress summary and for the last-ended report, and the two
    * need clearly different framing so the numbers are never mistaken for the wrong one. */
@@ -41,8 +43,8 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
   durationMs = 0,
   startedAt,
   endedAt,
-  acousticMatchPercent = 99.2,
-  wifiSimilarityPercent = 98.5,
+  acousticMatchPercent,
+  wifiSimilarityPercent,
   onFetchRoomHistory,
   onNavigate,
 }) => {
@@ -52,12 +54,19 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
   // Format real duration
   const totalMinutes = Math.max(1, Math.round(durationMs / 60000));
   const dwellFormatted =
-    totalMinutes >= 60
+    durationMs <= 0
+      ? '–'
+      : totalMinutes >= 60
       ? `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`
       : `${totalMinutes}m`;
 
+  const hasSession = Boolean(roomId && sessionId);
+  // The saved attendance record is written when the room ends. While it is live the server would
+  // either find nothing or hand back an earlier occurrence of the same room, so wait for the end.
+  const canExport = hasSession && !isLive;
+
   const handleExportReport = async () => {
-    if (exporting) return;
+    if (exporting || !canExport || !roomId || !sessionId) return;
     setExporting(true);
     try {
       // Fetched rather than built from what's on screen: the report is the persisted attendance
@@ -90,7 +99,7 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
     <View style={[styles.container, { backgroundColor: colors.surf }]}>
       <TopBar
         title={isLive ? 'Live Session Summary' : 'Session Summary'}
-        subtitle={`${roomId.toUpperCase()} · ${sessionId}`}
+        subtitle={hasSession ? `${roomId!.toUpperCase()} · ${sessionId}` : undefined}
         onBack={() => onNavigate('home')}
       />
 
@@ -147,9 +156,20 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
               <Text style={[styles.successTitle, { color: palette.amberWarn }]}>
                 No Active Room Right Now
               </Text>
-              <Text style={[styles.successSubtitle, { color: colors.sub }]}>
-                The summary below is from your last ended session, not a live one.
-              </Text>
+              {hasSession ? (
+                <>
+                  <Text style={[styles.successSubtitle, { color: colors.sub }]}>
+                    The summary below is from your last ended session, not a live one.
+                  </Text>
+                  <Text style={[styles.successSubtitle, { color: colors.sub, marginTop: 4 }]}>
+                    The numbers below are from when the room ended. For a detailed history, download the PDF.
+                  </Text>
+                </>
+              ) : (
+                <Text style={[styles.successSubtitle, { color: colors.sub }]}>
+                  No session has ended on this account yet.
+                </Text>
+              )}
             </View>
           </View>
         )}
@@ -170,7 +190,7 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
             </View>
             <View style={[styles.timelineDivider, { backgroundColor: colors.border }]} />
             <View style={styles.timelineRow}>
-              <Text style={[styles.timelineLabel, { color: colors.muted }]}>STATUS</Text>
+              <Text style={[styles.timelineLabel, { color: colors.muted }]}>{isLive ? 'STATUS' : 'ENDED'}</Text>
               <Text style={[styles.timelineValue, { color: isLive ? palette.mintPresence : colors.sub }]}>
                 {isLive ? 'Ongoing' : endedAt ? new Date(endedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true }) : 'Ended'}
               </Text>
@@ -193,7 +213,7 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
               {totalAttendees}
             </Text>
             <Text style={[styles.statSub, { color: colors.sub }]}>
-              100% In-Room Verified
+              {isLive ? 'In the room now' : 'In the room when it ended'}
             </Text>
           </View>
 
@@ -224,7 +244,7 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
               ACOUSTIC GATE
             </Text>
             <Text style={[styles.statValue, { color: palette.tealUltra }]}>
-              {acousticMatchPercent}%
+              {acousticMatchPercent === undefined ? '–' : `${acousticMatchPercent}%`}
             </Text>
             <Text style={[styles.statSub, { color: colors.sub }]}>
               19kHz Token Match
@@ -241,7 +261,7 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
               WI-FI SIMILARITY
             </Text>
             <Text style={[styles.statValue, { color: palette.amberWarn }]}>
-              {wifiSimilarityPercent}%
+              {wifiSimilarityPercent === undefined ? '–' : `${wifiSimilarityPercent}%`}
             </Text>
             <Text style={[styles.statSub, { color: colors.sub }]}>
               Multi-AP Fingerprint
@@ -253,9 +273,9 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
         <View style={styles.actions}>
           <TouchableOpacity
             activeOpacity={0.85}
-            disabled={exporting}
+            disabled={exporting || !canExport}
             onPress={() => void handleExportReport()}
-            style={[styles.exportButton, exporting && { opacity: 0.6 }]}
+            style={[styles.exportButton, (exporting || !canExport) && { opacity: 0.6 }]}
           >
             {exporting ? (
               <ActivityIndicator size="small" color="#0F2F2C" />
@@ -263,6 +283,11 @@ export const SessionEndScreen: React.FC<SessionEndScreenProps> = ({
               <Text style={styles.exportButtonText}>Export PDF Attendance Report</Text>
             )}
           </TouchableOpacity>
+          {isLive ? (
+            <Text style={[styles.exportNote, { color: colors.muted }]}>
+              Available after the room ends.
+            </Text>
+          ) : null}
 
           <TouchableOpacity
             activeOpacity={0.85}
@@ -363,6 +388,11 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.25,
     shadowRadius: 6,
     elevation: 3,
+  },
+  exportNote: {
+    fontSize: 11,
+    textAlign: 'center',
+    marginTop: -4,
   },
   exportButtonText: {
     color: '#0F2F2C',

@@ -873,6 +873,38 @@ function MainApp() {
     }
   }, [screen, launchAnimationDone, hasOnboarded, authReady, signedIn]);
 
+  // The session can disappear while the app is in use: the server answered 401 (an expired or
+  // rejected token, or one issued for a different app) and authFetch signed the person out. Nothing
+  // else moves them, so without this they stay on a signed-in screen showing placeholder data. Only a
+  // signed-in to signed-out change counts, so developer screen jumps and the sign-in screens, which
+  // sign out on purpose, are left alone.
+  const wasSignedInRef = useRef(false);
+  // Set by handleSignOut, which does its own cleanup and navigation and must not get the alert.
+  const manualSignOutRef = useRef(false);
+  useEffect(() => {
+    const wasSignedIn = wasSignedInRef.current;
+    wasSignedInRef.current = signedIn;
+    if (!authConfigured || !authReady || signedIn || !wasSignedIn) return;
+    if (manualSignOutRef.current) {
+      manualSignOutRef.current = false;
+      return;
+    }
+    const current = screenRef.current;
+    if (current === 'launch' || current === 'onboarding' || current === 'permissions' || current === 'login' || current === 'createAccount') {
+      return;
+    }
+    void (async () => {
+      if (runningRef.current) await togglePresence(false);
+      setRole('attendee');
+      setMyActiveRooms([]);
+      setSessionEndMembers([]);
+      setSessionDurationMs(0);
+      setSessionStartTime(Date.now());
+      nav('login');
+      AppAlert.alert('Signed out', 'Your session ended or was not accepted by the server. Please sign in again.');
+    })();
+  }, [signedIn, authReady, nav]);
+
   // Ends the currently-selected admin room via the real backend action — the only primitive
   // this API exposes is ending the whole room occurrence (attendees included); there's no way
   // to remove just the presenter and keep the room open, which is why the admin UI only offers
@@ -963,10 +995,16 @@ function MainApp() {
    * one's.
    */
   const handleSignOut = async () => {
+    manualSignOutRef.current = true;
     if (runningRef.current) await togglePresence(false);
     await signOut();
     setRole('attendee');
     setMyActiveRooms([]);
+    // The last ended session belongs to the account that hosted it; the next person to sign in on
+    // this device must not see its summary.
+    setSessionEndMembers([]);
+    setSessionDurationMs(0);
+    setSessionStartTime(Date.now());
     setScreen('login');
   };
 
@@ -1328,21 +1366,27 @@ function MainApp() {
 
         const attendeesOnly = members.filter(m => m.role === 'attendee');
         const ultraCount = attendeesOnly.filter(m => m.ultrasonicVerified).length;
-        const acousticPct = attendeesOnly.length > 0 ? Math.round((ultraCount / attendeesOnly.length) * 100) : 100;
-        const avgWifi = attendeesOnly.length > 0
-          ? Math.round(
-              (attendeesOnly.reduce((sum, m) => sum + (m.wifiSimilarity ?? 0.98), 0) / attendeesOnly.length) * 100
-            )
-          : 98;
+        // Undefined, not a stand-in figure, when there is nothing to measure: the screen shows a dash.
+        const acousticPct = attendeesOnly.length > 0 ? Math.round((ultraCount / attendeesOnly.length) * 100) : undefined;
+        const wifiReadings = attendeesOnly
+          .map(m => m.wifiSimilarity)
+          .filter((v): v is number => typeof v === 'number');
+        const avgWifi =
+          wifiReadings.length > 0
+            ? Math.round((wifiReadings.reduce((sum, v) => sum + v, 0) / wifiReadings.length) * 100)
+            : undefined;
 
         return (
           <SessionEndScreen
-            roomId={roomId}
-            sessionId={sessionId}
+            // The room and session names are the presenter's typed entries (with defaults), so they
+            // describe a session only when one is live or has ended; otherwise nothing is shown.
+            roomId={isLive || sessionDurationMs > 0 ? roomId : undefined}
+            sessionId={isLive || sessionDurationMs > 0 ? sessionId : undefined}
             isLive={isLive}
             totalAttendees={attendeesOnly.length}
             durationMs={durationMsForDisplay}
-            startedAt={new Date(sessionStartTime).toISOString()}
+            // No timeline when there is no ended session to describe (a fresh sign-in).
+            startedAt={isLive || sessionDurationMs > 0 ? new Date(sessionStartTime).toISOString() : undefined}
             endedAt={isLive ? null : new Date(sessionStartTime + sessionDurationMs).toISOString()}
             acousticMatchPercent={acousticPct}
             wifiSimilarityPercent={avgWifi}
