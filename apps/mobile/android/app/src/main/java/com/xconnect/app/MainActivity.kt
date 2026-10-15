@@ -1,4 +1,4 @@
-package com.confpresence.zero
+package com.xconnect.app
 
 import android.os.Bundle
 

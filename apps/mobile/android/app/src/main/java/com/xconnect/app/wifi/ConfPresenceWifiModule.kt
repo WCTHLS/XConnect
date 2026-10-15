@@ -1,4 +1,4 @@
-package com.confpresence.zero.wifi
+package com.xconnect.app.wifi
 
 import android.content.Context
 import android.net.wifi.WifiManager

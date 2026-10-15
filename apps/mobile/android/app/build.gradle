@@ -89,9 +89,9 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
-    namespace 'com.confpresence.zero'
+    namespace 'com.xconnect.app'
     defaultConfig {
-        applicationId 'com.confpresence.zero'
+        applicationId 'com.xconnect.app'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1

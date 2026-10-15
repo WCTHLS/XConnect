@@ -74,7 +74,7 @@ On Android, Google Sign-In uses `GOOGLE_ANDROID_CLIENT_ID`. For iOS, Google requ
 
 ### 2.2 Microsoft Entra ID (Verify iOS Redirect URI)
 1. Open [Azure Portal - Entra ID App Registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade).
-2. Open your registration: `7181eccc-9044-4908-b881-dcdb45b388a4`.
+2. Open your registration (the Application (client) ID in `AUTH_CLIENT_ID`, see 3.1).
 3. In the left menu, click **Authentication**.
 4. Under **Platform configurations**, verify that a platform exists for **Mobile and desktop applications**.
 5. Ensure `xconnect://auth` is present in the list of **Redirect URIs**. (If missing, click **Add URI** and add `xconnect://auth`, then click **Save**).
@@ -101,7 +101,7 @@ export const GOOGLE_IOS_CLIENT_ID = "113829759136-YOUR_IOS_CLIENT_ID.apps.google
 
 // Microsoft sign-in
 export const AUTH_AUTHORITY = "https://login.microsoftonline.com/common/v2.0";
-export const AUTH_CLIENT_ID = "7181eccc-9044-4908-b881-dcdb45b388a4";
+export const AUTH_CLIENT_ID = "<Application (client) ID of the Microsoft app registration>";
 export const AUTH_REDIRECT_SCHEME = "xconnect";
 ```
 

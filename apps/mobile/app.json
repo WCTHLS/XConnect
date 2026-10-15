@@ -8,7 +8,7 @@
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "android": {
-      "package": "com.confpresence.zero",
+      "package": "com.xconnect.app",
       "googleServicesFile": "./google-services.json",
       "permissions": [
         "android.permission.BLUETOOTH_SCAN",

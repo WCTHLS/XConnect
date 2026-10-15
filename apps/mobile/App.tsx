@@ -49,7 +49,7 @@ import { EdgeStateScreen } from './src/screens/admin/EdgeStateScreen';
 
 const DEFAULT_SESSION = 'poc-session';
 const DEFAULT_ROOMS = ['Hall A', 'Workshop 1', 'Auditorium', 'Room B'];
-const CLOUD_API_URL = 'https://xconnect-test.whitehill-a51a4474.eastus.azurecontainerapps.io';
+const CLOUD_API_URL = 'https://xconnect.wittyground-955b506b.southindia.azurecontainerapps.io';
 const LOCAL_API_URL = 'http://localhost:3000';
 const SESSION_ID_KEY = 'xconnect.sessionId_v1';
 const ROLE_KEY = 'xconnect.role_v1';

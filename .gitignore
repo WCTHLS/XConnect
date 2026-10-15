@@ -50,3 +50,6 @@ apps/mobile/ios/build/
 *.iml
 .vscode/
 .freebuff/
+
+# Firebase config (per environment, not committed)
+google-services.json

@@ -309,14 +309,19 @@ export async function signInWithMicrosoft(): Promise<{ ok: boolean; error?: stri
       scopes: SCOPES,
       responseType: AuthSession.ResponseType.Code,
       usePKCE: true,
-      prompt: AuthSession.Prompt.SelectAccount,
-      extraParams: {
-        prompt: "select_account"
-      }
+      prompt: AuthSession.Prompt.SelectAccount
     });
-    const result = await request.promptAsync(discovery);
+    // createTask: false keeps the browser tab inside this app's task instead of Chrome's own. When
+    // sign-in sends the person to an authenticator app (Duo, Microsoft Authenticator), some Android
+    // phones close Chrome's separate task and the sign-in is lost; staying in the app's task makes
+    // the tab survive the switch and Back return to it.
+    const result = await request.promptAsync(discovery, { createTask: false });
     if (result.type !== "success") {
-      return { ok: false, error: result.type === "cancel" || result.type === "dismiss" ? undefined : "Microsoft sign-in failed" };
+      if (result.type === "cancel") return { ok: false };
+      if (result.type === "dismiss") {
+        return { ok: false, error: "Sign-in did not finish. If you went to an authenticator app, try again and come back with the Back button." };
+      }
+      return { ok: false, error: "Microsoft sign-in failed" };
     }
     const tokens = await AuthSession.exchangeCodeAsync(
       {

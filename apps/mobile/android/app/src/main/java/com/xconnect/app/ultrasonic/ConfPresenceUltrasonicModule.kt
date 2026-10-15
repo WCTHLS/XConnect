@@ -1,4 +1,4 @@
-package com.confpresence.zero.ultrasonic
+package com.xconnect.app.ultrasonic
 
 import android.media.AudioAttributes
 import android.media.AudioFormat

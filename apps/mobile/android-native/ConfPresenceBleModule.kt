@@ -1,7 +1,7 @@
 // Copy this file into the generated Android application package and register ConfPresenceBlePackage.
 // AndroidManifest permissions required:
 // BLUETOOTH_SCAN, BLUETOOTH_ADVERTISE, BLUETOOTH_CONNECT, ACCESS_FINE_LOCATION (Android <= 11)
-package com.confpresence.zero.ble
+package com.xconnect.app.ble
 
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.le.AdvertiseCallback

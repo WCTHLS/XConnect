@@ -1,11 +1,11 @@
-package com.confpresence.zero
+package com.xconnect.app
 
 import android.app.Application
 import android.content.res.Configuration
 
-import com.confpresence.zero.ble.ConfPresenceBlePackage
-import com.confpresence.zero.wifi.ConfPresenceWifiPackage
-import com.confpresence.zero.ultrasonic.ConfPresenceUltrasonicPackage
+import com.xconnect.app.ble.ConfPresenceBlePackage
+import com.xconnect.app.wifi.ConfPresenceWifiPackage
+import com.xconnect.app.ultrasonic.ConfPresenceUltrasonicPackage
 
 import com.facebook.react.PackageList
 import com.facebook.react.ReactApplication

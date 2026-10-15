@@ -1,4 +1,4 @@
-﻿package com.confpresence.zero.ble
+﻿package com.xconnect.app.ble
 
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.le.*
