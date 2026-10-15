@@ -22,7 +22,20 @@ them.
   - Otherwise, likely an org-account restriction (conditional access / admin consent) on
     that specific Microsoft account, not an app bug.
 - A `401` from the API while signed in should sign the user out automatically and return
-  them to the login screen — not show a raw error.
+  them to the login screen with a "Signed out" alert (detection stops too), not show a raw
+  error and not leave them on a signed-in screen. Bad Wi-Fi alone never signs anyone out; only a
+  401 or a rejected token refresh does. The Sign out button gives no alert.
+- A new email/password account gets a verification email once sign-up is accepted. Until it is
+  verified, the notification bell shows a count of 1 and a "Verify your email" card; **I've
+  verified** clears it. Unverified accounts can still use the app, but cannot be admins. Google
+  and Microsoft accounts never see the card.
+- Choosing **Admin** at sign-in or sign-up is checked with the server. A non-admin sees "This
+  account is not an admin…" on the sign-in screen and is not signed in; a refused new sign-up
+  is deleted. An address on the admin list that is not yet verified is let in to a verify card.
+  Attendee and presenter sign-ins are never refused.
+- Admin comes from the server's admin list on every request: removing an address removes admin
+  on its next request, with no waiting and no database edit. Microsoft admins must belong to the
+  company tenant; personal Microsoft accounts and guests are not admins (use Google).
 
 ## Role selection (Attendee / Presenter / Admin)
 
@@ -34,6 +47,22 @@ them.
   selected — this is intentional, not a frozen UI.
 - **Presenter**: session code and room code (Anchor Room ID) are both free text/picker as
   before — presenters are what create rooms, so there's nothing to select from yet.
+
+## Session Summary (the presenter's Analysis tab)
+
+- With no live or ended session (a fresh sign-in, or after signing out and in as someone else),
+  the screen shows "No session has ended on this account yet", 0 attendees, dashes, no room or
+  session name and no timeline, and the PDF button is greyed out. The previous account's last
+  session is cleared at sign-out, so it is never shown to the next person.
+- **Total attendees** counts the attendees in the room's list when the host ended it, not everyone
+  who ever visited. People who left earlier appear only in the PDF and the admin History tab.
+- **Acoustic gate** and **Wi-Fi similarity** are real measurements. With nothing to measure they
+  show a dash, never a stand-in number. Wi-Fi is averaged over the attendees that have a reading.
+- A live room shows STARTED and STATUS: Ongoing. An ended room shows STARTED and ENDED with the
+  time. STARTED is when this phone began broadcasting and restarts if you stop and start again.
+- **Export PDF** is greyed out while the room is live ("Available after the room ends"). The saved
+  record is written when the room ends, and a tap just after can say "Nothing to report yet":
+  wait a moment and try again.
 
 ## Presenter conflict (two devices claiming the same room)
 

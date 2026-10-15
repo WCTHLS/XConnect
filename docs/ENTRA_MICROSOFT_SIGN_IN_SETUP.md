@@ -16,7 +16,12 @@ One thing: **one app registration**. There is no client secret, no second app, n
 permissions and no user flows.
 
 XConnect has a single mobile app. Who is an admin is decided by the server's admin email list
-(`ADMIN_EMAILS`), not by a separate app registration or sign-in flow.
+(`ADMIN_EMAILS`) and a check that the email can be trusted (see "Who can be an admin"), not by a
+separate app registration or sign-in flow.
+
+XConnect is a **public app**: anyone with a Microsoft account (work, school or personal) can sign
+in. The registration is therefore multi-tenant and also allows personal accounts, and signing in
+does not make anyone an admin.
 
 | Where it goes | Value | App setting |
 |---|---|---|
@@ -34,26 +39,32 @@ must use the **same** values.
 
 ## Step 1. Choose who can sign in
 
-This decides the account type for the registration and the authority URL.
+XConnect is a public app, so use the first row: **any organization and personal Microsoft
+accounts**, with the `common` authority.
 
 | Who signs in | Supported account types | Authority URL |
 |---|---|---|
-| Anyone with a work or school or personal Microsoft account | Any organizational directory **and personal Microsoft accounts** | `https://login.microsoftonline.com/common/v2.0` |
-| Staff of one company only | Accounts in this organizational directory only (single tenant) | `https://login.microsoftonline.com/<tenant-id>/v2.0` |
+| **Anyone with a work, school or personal Microsoft account (XConnect)** | Any Entra ID tenant **and personal Microsoft accounts** | `https://login.microsoftonline.com/common/v2.0` |
+| Work or school accounts only, from any organization | Any Entra ID tenant | `https://login.microsoftonline.com/organizations/v2.0` |
+| Personal accounts only | Personal Microsoft accounts only | `https://login.microsoftonline.com/consumers/v2.0` |
+| Staff of one company only (not used by XConnect) | This organizational directory only (single tenant) | `https://login.microsoftonline.com/<tenant-id>/v2.0` |
 
-The personal trial uses the first row. For the company deployment, decide with IT. A
-single-tenant registration in the company tenant is the usual choice when only company staff
-sign in.
+The account type and the authority must match, and the app and the server must use the **same**
+authority. A single-tenant registration with the `common` authority fails at sign-in (see
+Troubleshooting).
 
-The account type and the authority must match. A single-tenant registration with the `common`
-authority fails at sign-in (see Troubleshooting).
+Because any tenant can sign in, a Microsoft token's email address cannot be trusted on its own: a
+stranger can create their own tenant and give a user any email. That is why signing in never
+makes anyone an admin by itself (see "Who can be an admin").
 
 ---
 
 ## Step 2. Register the app
 
-Use the **company's** tenant for the company deployment. Check the directory in the Azure portal
-before you start (top right, Switch directory).
+Create the registration in the tenant that **IT owns** for the company deployment, and use the
+same tenant's id as `adminTenantId` later. Check the directory in the Azure portal before you
+start (top right, Switch directory): a registration made in the wrong tenant is easy to miss
+because its pages look identical.
 
 1. Go to **Microsoft Entra ID**, then **App registrations**, then **+ New registration**.
 2. Fill in:
@@ -61,13 +72,14 @@ before you start (top right, Switch directory).
    | Setting | Value |
    |---|---|
    | Name | `XConnect Mobile` |
-   | Supported account types | From step 1 |
+   | Supported account types | **Any Entra ID Tenant + Personal Microsoft accounts** (step 1) |
    | Redirect URI | Leave empty for now (set in step 3) |
 
 3. Click **Register**.
 4. On the **Overview** page, copy:
    - **Application (client) ID**. This is `AUTH_CLIENT_ID` and `authAudience`.
-   - **Directory (tenant) ID**. You need it only for a single-tenant authority URL.
+   - **Directory (tenant) ID**. This is `adminTenantId` (the tenant whose staff may be admins);
+     it is not used in the authority URL, which stays `common`.
 
 ---
 
@@ -80,6 +92,10 @@ before you start (top right, Switch directory).
    ```text
    xconnect://auth
    ```
+
+   Azure pre-ticks `https://login.microsoftonline.com/common/oauth2/nativeclient`. Untick it: the
+   app only uses `xconnect://auth`, and extra redirect URIs are extra places a sign-in response
+   could land.
 
    This is the app's URL scheme (`"scheme": "xconnect"` in `apps/mobile/app.json`) plus the
    path `auth`, as set by `AUTH_REDIRECT_SCHEME` in `authConfig.ts`.
@@ -123,7 +139,7 @@ Personal Microsoft accounts do not always include `email` by default, so add it:
 Edit [apps/mobile/src/config/authConfig.ts](../apps/mobile/src/config/authConfig.ts):
 
 ```ts
-export const AUTH_AUTHORITY = "https://login.microsoftonline.com/<tenant-id or common>/v2.0";
+export const AUTH_AUTHORITY = "https://login.microsoftonline.com/common/v2.0";
 export const AUTH_CLIENT_ID = "<Application (client) ID>";
 export const AUTH_REDIRECT_SCHEME = "xconnect";
 ```
@@ -137,9 +153,10 @@ In the deployment parameter file (for example `infra/company.local.bicepparam`, 
 gitignored):
 
 ```text
-param authAuthority = 'https://login.microsoftonline.com/<tenant-id or common>/v2.0'
+param authAuthority = 'https://login.microsoftonline.com/common/v2.0'
 param authAudience  = '<Application (client) ID>'
-param adminEmails   = 'admin1@company.com,admin2@company.com'
+param adminEmails   = 'admin1@gmail.com,admin2@company.com'
+param adminTenantId = '<Directory (tenant) ID>'   // only if staff of this tenant sign in with Microsoft as admins
 ```
 
 Then deploy as usual. Changing these environment variables creates a new revision, so the API
@@ -148,7 +165,13 @@ restarts briefly. Do it outside an event.
 ### The server (an app that is already running)
 
 ```powershell
-az containerapp update -n <app> -g <resource group> --set-env-vars AUTH_AUTHORITY="<authority>" AUTH_AUDIENCE="<client id>" ADMIN_EMAILS="<emails>"
+az containerapp update -n <app> -g <resource group> --set-env-vars "AUTH_AUTHORITY=<authority>" "AUTH_AUDIENCE=<client id>" "ADMIN_EMAILS=<emails>" "ADMIN_TENANT_ID=<tenant id>"
+```
+
+Check what the app is really running with (the update command's own output hides plain values):
+
+```powershell
+az containerapp show -n <app> -g <resource group> --query "properties.template.containers[0].env[?name=='AUTH_AUTHORITY' || name=='AUTH_AUDIENCE' || name=='ADMIN_EMAILS' || name=='ADMIN_TENANT_ID']" -o table
 ```
 
 To remove them again (this turns Microsoft sign-in off on the server):
@@ -160,6 +183,9 @@ az containerapp update -n <app> -g <resource group> --remove-env-vars AUTH_AUTHO
 Sign-in is on for the server when either `FIREBASE_PROJECT_ID` **or** both `AUTH_AUTHORITY` and
 `AUTH_AUDIENCE` are set. Load tests need sign-in **off**, so do not run them against a server
 with these values set.
+
+---
+
 
 ---
 
@@ -183,32 +209,13 @@ with these values set.
 | `AADSTS50194` not configured as multi-tenant | The registration is single-tenant but the authority is `common`. Use the tenant-specific authority, or change the account type. |
 | `AADSTS7000218` or `AADSTS9002327` client secret or assertion required | **Allow public client flows** is not set to Yes (step 3). |
 | `AADSTS65001` or "Need admin approval" | Tenant restricts consent. An admin grants consent (step 4). |
+| Sign-in succeeds, then the app signs you out ("Signed out" alert) and the server log says `unexpected "aud" claim value` | The app's `AUTH_CLIENT_ID` and the server's `AUTH_AUDIENCE` are different registrations. Make them the same client ID. |
 | App shows signed in, but every API call is `401` | Server and app disagree. Check that `authAudience` equals the client ID in the app and `authAuthority` equals the app's authority. |
 | Server log: `no configured provider issued this token` | The server's authority does not match the token's issuer (wrong tenant, or `common` versus a tenant id). |
 | Server log: `issuer mismatch` or an audience error | `AUTH_AUDIENCE` is not the registration's client ID. |
-| Signed in, but the admin tabs are missing | The email in the token is not in `adminEmails`, or the token has no email. Check step 5, and compare the address (case does not matter). |
+| Picked Admin at sign-in and was refused, or the admin tabs are missing | Check, in order: the address is on `adminEmails` (case does not matter); `adminTenantId` is set and equals the tenant the account **belongs to**; the account is a **Member** created in that tenant, not a guest or a personal Microsoft account (see "Who can be an admin"); the token has an email (step 5). For a Microsoft account that cannot pass the tenant check, sign in with Google instead. |
 | Microsoft button missing | `AUTH_CLIENT_ID` in the app is empty. |
 
 ---
 
-## Moving to Entra External ID later
 
-If external people (not company staff) need to sign up themselves, use an External ID
-(customer) tenant instead:
-
-1. Create a **Customer** tenant and note its subdomain and tenant id.
-2. Register the same app there: **Mobile and desktop applications**, redirect
-   `xconnect://auth`, public client flows on.
-3. Create a **Sign up and sign in** user flow with Email with password, add the app to it, and
-   make sure the email address is included in the token.
-4. Change only the authority, in the app and on the server:
-
-   ```text
-   https://<subdomain>.ciamlogin.com/<tenant-id>/v2.0
-   ```
-
-No server code changes are needed. The server reads the real issuer from the authority's
-discovery document. External ID is free for the first 50,000 monthly active users.
-
-Personal Microsoft accounts and accounts from other organizations cannot sign in to an
-External ID tenant. Only accounts created in that tenant can.

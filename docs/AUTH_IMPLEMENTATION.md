@@ -296,6 +296,54 @@ The verified JWT payload only proves *who signed in*, not what your app knows ab
   the API every few seconds doesn't hit the database on every single request — only signature
   verification happens on every request; the DB upsert is throttled.
 
+### Who may be an admin (`backend/src/trustedEmail.ts`)
+
+An email on `ADMIN_EMAILS` grants admin only when the sign-in proves the person owns it. Anyone can
+register an email/password account with any address, and the Microsoft registration accepts any
+tenant, so an unproven email is never enough.
+
+| Sign-in | The email counts when |
+|---|---|
+| Firebase (Google, or email/password) | the token has `email_verified: true` (Google always; a password account once the link is clicked) |
+| Microsoft | the token's `tid` equals `ADMIN_TENANT_ID` (the one tenant the company controls), or Microsoft marks the domain verified (`xms_edov`) |
+
+With `ADMIN_TENANT_ID` unset, no Microsoft sign-in can be an admin by email. Personal Microsoft
+accounts and guests sign in through their own home tenant, so they are refused too; those admins
+use Google. `/api/me` returns `adminPendingVerification: true` when an address is on the list but
+not yet trusted, so the app can ask the person to verify instead of saying "not an admin". The
+decision is `adminAccess()`, called on every request (about 40 ns).
+
+### Email verification for password accounts
+
+Firebase only records that an address was confirmed; nothing enforces it by itself. The app sends
+the verification email (`accounts:sendOobCode`, `VERIFY_EMAIL`) once a sign-up is accepted, shows a
+"Verify your email" card in the notification bell (and on the admin screens when the address is on
+the admin list), and **I've verified** refreshes the token so the new `email_verified` value
+reaches the server. The link opens a Firebase-hosted page, not the app, so it does not depend on
+Firebase Dynamic Links (which is shutting down). The server enforces verification only for admin
+access, so unverified accounts can still use the app.
+
+### The sign-in screens' admin check
+
+Choosing **Admin** at sign-in or sign-up asks the server (`GET /api/me`) before letting the person
+in. The request carries `x-auth-probe: 1`, which makes the server answer without writing a `users`
+row or filling the cache. A non-admin is signed out and stays on the sign-in screen with a message;
+a brand-new sign-up that is refused is deleted from Firebase (`accounts:delete`). An address on the
+admin list that is not yet verified is let in, because the admin screens show the verify card.
+Until the person leaves the sign-in screens the app starts nothing that calls the server (name
+sync, invite polling, push registration), so a refused attempt leaves no user row and no
+registered device. Attendee and presenter sign-ins are not checked.
+
+### When a session is lost
+
+`authFetch` clears the session when the server answers 401 while the request carried a token. A
+network failure is not a 401 and never signs anyone out, and a token refresh is only treated as
+rejected on an explicit 4xx. When the session disappears while the app is in use, `App.tsx` stops
+detection, clears the last ended session, returns to the sign-in screen and shows a "Signed out"
+alert. The Sign out button does the same cleanup without the alert. One server-side cause to know
+about: if the server cannot fetch the provider's signing keys it answers 401 `invalid_token`, which
+the app treats as a rejected session.
+
 ### Route-level usage
 
 ```ts

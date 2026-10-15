@@ -96,7 +96,7 @@ available to the routes.
 | `FIREBASE_PROJECT_ID` | API env | Firebase project ID; turns on Firebase token checking |
 | `AUTH_AUTHORITY` | API env | `https://login.microsoftonline.com/common/v2.0` for work and personal Microsoft accounts |
 | `AUTH_AUDIENCE` | API env | The Microsoft app registration's Application (client) ID |
-| `ADMIN_EMAILS` | API env | Comma-separated emails that become admins on first sign-in, only when the provider vouches for the email (Google; Microsoft from `ADMIN_TENANT_ID`; never an unverified password account) |
+| `ADMIN_EMAILS` | API env | Comma-separated admin emails. Admin is worked out on every request, only when the provider vouches for the email (Google; Microsoft from `ADMIN_TENANT_ID`; a password account once verified). Removing an address removes admin on the next request. |
 | `ADMIN_TENANT_ID` | API env | Company Entra tenant id: Microsoft sign-ins from it may become admin by email |
 | `FIREBASE_API_KEY`, `GOOGLE_ANDROID_CLIENT_ID` | `apps/mobile/src/config/authConfig.ts` | Firebase web API key and the Android OAuth client; empty hides email and Google |
 | `AUTH_AUTHORITY`, `AUTH_CLIENT_ID` | `apps/mobile/src/config/authConfig.ts` | Same authority and client ID as the API; empty hides the Microsoft button |
@@ -105,13 +105,17 @@ available to the routes.
   POC mode" switch as `DATABASE_URL`.
 - A multi-tenant Microsoft authority advertises a literal `{tenantid}` template as its issuer, and
   each token carries its signer's own tenant GUID, so the issuer is matched by shape. A
-  single-tenant authority (Entra External ID) advertises its real issuer and is compared exactly,
-  which is what the eventual move to Azure will use.
+  single-tenant authority advertises its real issuer and is compared exactly. XConnect stays on
+  the multi-tenant `common` authority because it is a public app; see
+  [AUTH_IMPLEMENTATION.md](AUTH_IMPLEMENTATION.md) for why that means the Microsoft email cannot be
+  trusted without `ADMIN_TENANT_ID`.
 - Microsoft's `sub` is per-application, so the stable `oid` claim identifies the person instead.
 - Running two providers means one person who signs in with Google one day and Microsoft the next
   is two rows in `users`. Accepted deliberately; it disappears once everything moves to Entra.
-- `/api/admin/*` requires an admin. The Admin screen asks `GET /api/me` and shows "not an admin"
-  instead of the PIN when sign-in is on.
+- `/api/admin/*` requires an admin. Choosing Admin at sign-in asks `GET /api/me` first: a
+  non-admin is signed out and stays on the sign-in screen with a message, and an address on the
+  admin list that is not yet verified is let in to a "Verify your email" card. The admin screens
+  still show "not an admin" if an account loses admin while signed in.
 - A person's name comes from their account, never from whatever the app sends. They can override
   it with `PATCH /api/me { preferredName }`, stored as `users.preferred_name`, which wins wherever
   a name is shown (live roster, History, the PDF). Blank clears it. The provider's own name stays

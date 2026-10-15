@@ -20,9 +20,11 @@ Today's stack (see [.env.example](../.env.example), [render.yaml](../render.yaml
   `https://login.microsoftonline.com/common/v2.0` — a plain multi-tenant + personal-account
   registration, not Entra External ID.
 
-A full Azure migration replaces the first two outright and upgrades the third (plain Entra
-ID → Entra External ID, needed once the app is public-facing rather than
-company-internal — see the auth discussion referenced in [SCHEDULER_DESIGN.md](SCHEDULER_DESIGN.md)).
+A full Azure migration replaces the first two outright and keeps the third as it is: the app is
+public, and the ordinary multi-tenant Entra ID registration (any organization plus personal
+Microsoft accounts) is what XConnect uses. Entra External ID, which an earlier version of this plan
+proposed, is not planned: it would exclude personal and other-company Microsoft accounts, and
+email/password and Google sign-up already go through Firebase.
 
 ## Resources needed
 
@@ -32,7 +34,7 @@ company-internal — see the auth discussion referenced in [SCHEDULER_DESIGN.md]
 | Database | Replaces Render Postgres | Azure Database for PostgreSQL — Flexible Server |
 | Container registry | Holds the API's Docker image (same `Dockerfile` already in the repo) | Azure Container Registry |
 | Compute | Runs the API container | **Two options — see below** |
-| Identity | Replaces the plain Entra ID app registration | Entra External ID tenant + app registration |
+| Identity | The same multi-tenant Entra ID app registration, created in the company tenant | Entra ID app registration (see [ENTRA_MICROSOFT_SIGN_IN_SETUP.md](ENTRA_MICROSOFT_SIGN_IN_SETUP.md)) |
 
 ### Database — Azure Database for PostgreSQL (Flexible Server)
 
@@ -47,19 +49,18 @@ company-internal — see the auth discussion referenced in [SCHEDULER_DESIGN.md]
   resource and the database in the same virtual network so the connection never leaves
   Azure's internal network.
 
-### Identity — Entra External ID
+### Identity: Entra ID app registration
 
-- A separate tenant type from the current plain Entra ID registration (see the earlier
-  auth discussion) — required once sign-in needs to work for the general public, not just
-  people already in an organizational directory.
-- `AUTH_AUTHORITY` in `apps/mobile/src/config/authConfig.ts` changes from
-  `https://login.microsoftonline.com/common/v2.0` to
-  `https://<subdomain>.ciamlogin.com/<tenant-id>/v2.0` — the config already has a comment
-  anticipating exactly this swap.
-- Whether Firebase (email/password, Google) stays alongside Entra External ID or gets
-  folded into it as a federated identity provider is a separate decision, not required for
-  this migration to work — `apps/api/src/auth.ts` already supports more than one verifier
-  side by side, so nothing forces consolidating them.
+- One app registration in the company tenant, accounts type "Any Entra ID Tenant + Personal
+  Microsoft accounts", authority `https://login.microsoftonline.com/common/v2.0` (unchanged).
+  Follow [ENTRA_MICROSOFT_SIGN_IN_SETUP.md](ENTRA_MICROSOFT_SIGN_IN_SETUP.md).
+- Set `adminTenantId` to that tenant's id so company staff can be admins through Microsoft;
+  anyone else who needs admin (outside the company, or a personal Microsoft account) signs in with
+  Google and is listed on `adminEmails`. A Microsoft token's email is not trusted on its own
+  because any tenant can sign in.
+- Firebase (email/password, Google) stays alongside it. `apps/api/src/auth.ts` supports more than
+  one verifier side by side, and a company-owned Firebase project is set up in
+  [FIREBASE_GOOGLE_SIGN_IN_SETUP.md](FIREBASE_GOOGLE_SIGN_IN_SETUP.md).
 
 ## Hosting — two options
 
