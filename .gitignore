@@ -45,6 +45,11 @@ apps/mobile/ios/build/
 *.jks
 !apps/mobile/android/app/debug.keystore
 
+# Apple signing and push keys (APNs auth keys are named AuthKey_<KeyID>.p8)
+*.p8
+*.p12
+*.mobileprovision
+
 # IDE & Local tool configs
 .idea/
 *.iml

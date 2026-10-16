@@ -85,25 +85,27 @@ On Android, Google Sign-In uses `GOOGLE_ANDROID_CLIENT_ID`. For iOS, Google requ
 
 Follow these exact code changes to enable cross-platform support for both Android and iOS.
 
-### 3.1 Update `apps/mobile/src/config/authConfig.ts`
-Add the new iOS Google Client ID alongside the Android one:
+### 3.1 Set the iOS Google Client ID in `apps/mobile/.env`
+`apps/mobile/src/config/authConfig.ts` no longer holds any IDs. It reads them from environment
+variables in `apps/mobile/.env` (ignored by git; copy `apps/mobile/.env.example`). Add the new iOS
+Google Client ID alongside the Android one:
 
-```ts
-// apps/mobile/src/config/authConfig.ts
-
-export const FIREBASE_API_KEY = "AIzaSyDskycfYoUxF_TMPWJ_QR_OH5sED7q9Roc";
-
-// Android OAuth client
-export const GOOGLE_ANDROID_CLIENT_ID = "113829759136-bh8qvak0thcvkl4o1cscmbfhe2iijs08.apps.googleusercontent.com";
-
-// iOS OAuth client (Generated in Phase 2.1)
-export const GOOGLE_IOS_CLIENT_ID = "113829759136-YOUR_IOS_CLIENT_ID.apps.googleusercontent.com";
-
-// Microsoft sign-in
-export const AUTH_AUTHORITY = "https://login.microsoftonline.com/common/v2.0";
-export const AUTH_CLIENT_ID = "<Application (client) ID of the Microsoft app registration>";
-export const AUTH_REDIRECT_SCHEME = "xconnect";
 ```
+# apps/mobile/.env
+EXPO_PUBLIC_FIREBASE_API_KEY=<sign-in API key from Google Cloud Console>
+EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID=<Android OAuth client ID>.apps.googleusercontent.com
+# iOS OAuth client (Generated in Phase 2.1)
+EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID=<iOS OAuth client ID>.apps.googleusercontent.com
+# Microsoft sign-in (leave empty to hide the button)
+EXPO_PUBLIC_AUTH_CLIENT_ID=<Application (client) ID of the Microsoft app registration>
+```
+
+Restart Metro with `npx expo start --clear` after changing `.env`; a release build needs a new build.
+
+The iOS URL scheme that Google sign-in returns to (`com.googleusercontent.apps.<iOS client ID>`) is
+added to the iOS `Info.plist` by `apps/mobile/app.config.js`, which reads
+`EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID`, so nothing else needs editing in `app.json`. An EAS build needs
+the same `EXPO_PUBLIC_*` values set as EAS environment variables, because `.env` is not uploaded.
 
 ---
 
