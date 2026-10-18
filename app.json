@@ -6,7 +6,7 @@
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "android": {
-      "package": "com.confpresence.zero",
+      "package": "com.xconnect.app",
       "permissions": [
         "android.permission.BLUETOOTH_SCAN",
         "android.permission.BLUETOOTH_ADVERTISE",

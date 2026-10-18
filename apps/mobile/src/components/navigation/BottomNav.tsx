@@ -25,7 +25,8 @@ export type MobileScreen =
   | 'adminNotify'
   | 'adminCheckIn'
   | 'diagnostics'
-  | 'edgeState';
+  | 'edgeState'
+  | 'notifications';
 
 export type Role = 'attendee' | 'presenter' | 'admin';
 

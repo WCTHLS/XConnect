@@ -3,23 +3,18 @@ import {
   View,
   Text,
   TouchableOpacity,
-  TouchableWithoutFeedback,
   StyleSheet,
   ScrollView,
   Animated,
   Easing,
-  Modal,
 } from 'react-native';
 import Svg, { Path, Circle, Rect } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
 import { MobileScreen, Role } from '../../components/navigation/BottomNav';
 import type { LiveRoomState, MyInvite, ParticipantRole } from '@confpresence/shared';
-import { InviteCard } from '../../components/ui/InviteCard';
-import { InviteDetailSheet } from '../../components/ui/InviteDetailSheet';
-import { VerifyEmailCard } from '../../components/ui/VerifyEmailCard';
-import { useAuthSession } from '../../services/auth';
 import { AssignmentCard } from '../../components/ui/AssignmentCard';
+import { useAuthSession } from '../../services/auth';
 
 /**
  * Date and time down to the minute. The components are listed explicitly rather than using
@@ -243,13 +238,6 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         })
       : [];
 
-  // Held by id rather than by value so the sheet re-reads the invite from props — otherwise a
-  // changed reply would leave the open sheet showing the answer it had when it was opened.
-  const [openInviteId, setOpenInviteId] = useState<number | null>(null);
-  const openInvite = answeredInvites.find(i => i.id === openInviteId) ?? null;
-  const [notificationSheetOpen, setNotificationSheetOpen] = useState(false);
-  // An unverified email/password account is asked to verify from the bell, as one more item next
-  // to the invites. VerifyEmailCard hides itself once verified, and for Google and Microsoft.
   const { session } = useAuthSession();
   const needsVerification = session?.provider === 'firebase' && session.emailVerified === false;
   const notificationCount = pendingInvites.length + (needsVerification ? 1 : 0);
@@ -286,7 +274,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         <View style={styles.topBarActions}>
           <TouchableOpacity
             activeOpacity={0.7}
-            onPress={() => setNotificationSheetOpen(true)}
+            onPress={() => onNavigate('notifications')}
             style={[styles.bellButton, { backgroundColor: isDark ? '#131C2E' : '#F1F5F9' }]}
             accessibilityLabel="Notifications"
           >
@@ -729,215 +717,6 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         )}
       </View>
 
-      {/* Attendees and presenters see what they replied to past invites. Admins get nothing
-          here: their past sessions are the History tab's job, with real data behind it. */}
-      {(role === 'attendee' || role === 'presenter') && (
-        <View style={styles.recentSection}>
-          <Text style={[styles.recentTitle, { color: colors.sub }]}>YOUR INVITE REPLIES</Text>
-
-          {answeredInvites.length === 0 ? (
-            <View
-              style={[
-                styles.inviteHistoryEmpty,
-                { backgroundColor: colors.card, borderColor: colors.border },
-              ]}
-            >
-              <Text style={[styles.inviteHistoryEmptyText, { color: colors.muted }]}>
-                {pendingInvites.length > 0
-                  ? 'Answer the invite above and your reply will be listed here.'
-                  : role === 'presenter'
-                  ? "You haven't been invited to host anything yet."
-                  : "You haven't been asked to check in to anything yet."}
-              </Text>
-            </View>
-          ) : (
-            answeredInvites.map(invite => {
-              const isHostingInvite = invite.inviteRole === 'presenter';
-              const isExpired = invite.status === 'expired';
-              const accepted = invite.status === 'accepted';
-              // Expired always means "never got an answer, and now it's too late" — the server
-              // only ever flips a still-pending invite to expired, so there is no prior reply to
-              // show or to let someone change. Muted grey rather than the accept/decline colors,
-              // and not tappable: opening the edit sheet would offer a "change your reply" action
-              // that the server will now refuse.
-              const tone = isExpired ? '#94A3B8' : accepted ? palette.mintPresence : palette.roseError;
-              // Wording follows the INVITE's own role, not the viewer's current role — a
-              // presenter account could in principle hold an old attendee-type reply too, and
-              // "GOING" would misdescribe an accepted room assignment.
-              const statusLabel = isExpired
-                ? 'EXPIRED'
-                : isHostingInvite
-                ? accepted
-                  ? 'HOSTING'
-                  : 'DECLINED'
-                : accepted
-                ? 'GOING'
-                : 'NOT GOING';
-              return (
-                <TouchableOpacity
-                  key={invite.id}
-                  activeOpacity={isExpired ? 1 : 0.8}
-                  disabled={isExpired}
-                  onPress={() => setOpenInviteId(invite.id)}
-                  style={[
-                    styles.inviteHistoryRow,
-                    { backgroundColor: colors.card, borderColor: colors.border },
-                  ]}
-                >
-                  <View
-                    style={[
-                      styles.inviteHistoryIcon,
-                      {
-                        backgroundColor: isExpired
-                          ? 'rgba(148,163,184,0.15)'
-                          : accepted
-                          ? 'rgba(51,209,172,0.15)'
-                          : 'rgba(239,68,68,0.15)',
-                      },
-                    ]}
-                  >
-                    <Svg width={14} height={14} viewBox="0 0 24 24" fill="none">
-                      {isExpired ? (
-                        <>
-                          <Circle cx={12} cy={12} r={9} stroke={tone} strokeWidth={2} />
-                          <Path d="M12 7v5l3 2" stroke={tone} strokeWidth={2} strokeLinecap="round" />
-                        </>
-                      ) : (
-                        <Path
-                          d={accepted ? 'M5 13l4 4L19 7' : 'M6 6l12 12M18 6L6 18'}
-                          stroke={tone}
-                          strokeWidth={2.5}
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      )}
-                    </Svg>
-                  </View>
-
-                  <View style={styles.inviteHistoryBody}>
-                    <Text style={[styles.inviteHistorySession, { color: colors.txt }]} numberOfLines={1}>
-                      {/* A hosting invite is about the ROOM; the session is secondary context,
-                          same lead-with-the-room rule the pending InviteCard uses. */}
-                      {isHostingInvite
-                        ? `${(invite.roomCode ?? '').toUpperCase()} · ${invite.sessionId}`
-                        : invite.sessionId}
-                    </Text>
-                    {/* The event's own date/time is what the person actually cares about; when
-                        they happened to tap reply is only a fallback for invites with no
-                        schedule set. */}
-                    <Text style={[styles.inviteHistoryMeta, { color: colors.muted }]} numberOfLines={1}>
-                      {invite.eventAt
-                        ? formatEventWhen(invite.eventAt)
-                        : invite.respondedAt
-                        ? `Replied ${new Date(invite.respondedAt).toLocaleDateString()}`
-                        : 'Replied'}
-                    </Text>
-                    <Text style={[styles.inviteHistoryStatus, { color: tone }]}>{statusLabel}</Text>
-                  </View>
-
-                  {/* Nothing to change on an expired invite that was never answered — omitted
-                      rather than shown-but-disabled, since a pencil that does nothing invites a
-                      confused tap. */}
-                  {!isExpired && (
-                    <TouchableOpacity
-                      activeOpacity={0.7}
-                      onPress={() => setOpenInviteId(invite.id)}
-                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                      style={[
-                        styles.inviteHistoryEditButton,
-                        { backgroundColor: colors.cardSecondary, borderColor: colors.border },
-                      ]}
-                    >
-                      <Svg width={15} height={15} viewBox="0 0 24 24" fill="none">
-                        <Path
-                          d="M4 20h4l10-10a2.1 2.1 0 0 0-3-3L5 17v3z"
-                          stroke={colors.sub}
-                          strokeWidth={2}
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      </Svg>
-                    </TouchableOpacity>
-                  )}
-                </TouchableOpacity>
-              );
-            })
-          )}
-        </View>
-      )}
-
-      <InviteDetailSheet
-        invite={openInvite}
-        onClose={() => setOpenInviteId(null)}
-        onRespond={onRespondToInvite}
-      />
-
-      <Modal
-        visible={notificationSheetOpen}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setNotificationSheetOpen(false)}
-      >
-        <TouchableWithoutFeedback onPress={() => setNotificationSheetOpen(false)}>
-          <View style={styles.notifBackdrop}>
-            <TouchableWithoutFeedback onPress={() => {}}>
-              <View style={[styles.notifSheet, { backgroundColor: colors.bg, borderColor: colors.border }]}>
-                <View style={[styles.notifGrabber, { backgroundColor: colors.border }]} />
-                <View style={styles.notifHeaderRow}>
-                  <View style={styles.notifTitleRow}>
-                    <Text style={[styles.notifTitle, { color: colors.txt }]}>Notifications</Text>
-                    {notificationCount > 0 && (
-                      <View style={styles.notifCountBadge}>
-                        <Text style={styles.notifCountBadgeText}>{notificationCount}</Text>
-                      </View>
-                    )}
-                  </View>
-                  <TouchableOpacity
-                    activeOpacity={0.7}
-                    onPress={() => setNotificationSheetOpen(false)}
-                    style={styles.notifCloseButton}
-                  >
-                    <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
-                      <Path d="M6 6l12 12M18 6L6 18" stroke={colors.sub} strokeWidth={2} strokeLinecap="round" />
-                    </Svg>
-                  </TouchableOpacity>
-                </View>
-
-                <ScrollView
-                  style={styles.notifScroll}
-                  contentContainerStyle={styles.notifScrollContent}
-                  showsVerticalScrollIndicator={false}
-                >
-                  <VerifyEmailCard />
-                  {notificationCount === 0 ? (
-                    <View style={styles.notifEmptyBox}>
-                      <View style={[styles.notifEmptyIcon, { backgroundColor: isDark ? '#131C2E' : '#F1F5F9' }]}>
-                        <Svg width={28} height={28} viewBox="0 0 24 24" fill="none">
-                          <Path
-                            d="M6 8a6 6 0 0 1 12 0c0 4 1.5 5.5 2 6.5H4c.5-1 2-2.5 2-6.5z"
-                            stroke={colors.muted}
-                            strokeWidth={2}
-                            strokeLinejoin="round"
-                          />
-                          <Path d="M10 18a2 2 0 0 0 4 0" stroke={colors.muted} strokeWidth={2} strokeLinecap="round" />
-                        </Svg>
-                      </View>
-                      <Text style={[styles.notifEmptyTitle, { color: colors.txt }]}>All caught up!</Text>
-                      <Text style={[styles.notifEmptySubtitle, { color: colors.muted }]}>
-                        You have no pending session invitations or check-in requests.
-                      </Text>
-                    </View>
-                  ) : (
-                    pendingInvites.map(invite => (
-                      <InviteCard key={invite.id} invite={invite} onRespond={onRespondToInvite} />
-                    ))
-                  )}
-                </ScrollView>
-              </View>
-            </TouchableWithoutFeedback>
-          </View>
-        </TouchableWithoutFeedback>
-      </Modal>
     </ScrollView>
   );
 };
@@ -1220,71 +999,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
   },
-  recentSection: {
-    marginTop: 18,
-    paddingHorizontal: 20,
-  },
-  recentTitle: {
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.8,
-    marginBottom: 10,
-  },
-  inviteHistoryEmpty: {
-    borderRadius: 14,
-    borderWidth: 1.5,
-    padding: 16,
-    alignItems: 'center',
-  },
-  inviteHistoryEmptyText: {
-    fontSize: 12,
-    lineHeight: 18,
-    textAlign: 'center',
-  },
-  inviteHistoryRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    borderRadius: 14,
-    borderWidth: 1.5,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    marginBottom: 8,
-  },
-  inviteHistoryIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  inviteHistoryBody: {
-    flex: 1,
-  },
-  inviteHistorySession: {
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  inviteHistoryMeta: {
-    fontSize: 11,
-    marginTop: 1,
-  },
-  inviteHistoryStatus: {
-    fontSize: 9,
-    fontWeight: '800',
-    letterSpacing: 0.6,
-    marginTop: 4,
-  },
-  // Matches the display-name edit control on the Profile screen, so "tap the pencil to change
-  // this one thing" reads the same way in both places.
-  inviteHistoryEditButton: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   topBarActions: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1314,88 +1028,5 @@ const styles = StyleSheet.create({
     fontSize: 9,
     fontWeight: '800',
     color: '#0F2F2C',
-  },
-  notifBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(6,11,18,0.6)',
-    justifyContent: 'flex-end',
-  },
-  notifSheet: {
-    maxHeight: '80%',
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
-    borderWidth: 1.5,
-    borderBottomWidth: 0,
-    paddingHorizontal: 20,
-    paddingTop: 10,
-    paddingBottom: 24,
-  },
-  notifGrabber: {
-    width: 38,
-    height: 4,
-    borderRadius: 2,
-    alignSelf: 'center',
-    marginBottom: 14,
-  },
-  notifHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 16,
-  },
-  notifTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  notifTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    letterSpacing: -0.3,
-  },
-  notifCountBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 10,
-    backgroundColor: palette.mintPresence,
-  },
-  notifCountBadgeText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#0F2F2C',
-  },
-  notifCloseButton: {
-    padding: 4,
-  },
-  notifScroll: {
-    flexGrow: 0,
-  },
-  notifScrollContent: {
-    gap: 12,
-    paddingBottom: 20,
-  },
-  notifEmptyBox: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 36,
-    paddingHorizontal: 20,
-  },
-  notifEmptyIcon: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 12,
-  },
-  notifEmptyTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    marginBottom: 4,
-  },
-  notifEmptySubtitle: {
-    fontSize: 13,
-    textAlign: 'center',
-    lineHeight: 18,
   },
 });

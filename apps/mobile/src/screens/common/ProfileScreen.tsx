@@ -6,7 +6,6 @@ import {
   TouchableOpacity,
   StyleSheet,
   ScrollView,
-  Switch,
   ActivityIndicator,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
@@ -14,6 +13,7 @@ import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
 import { Role } from '../../components/navigation/BottomNav';
 import { AppAlert } from '../../components/ui/AppAlert';
+import { useAuthSession } from '../../services/auth';
 
 /** Compact enough for a stat tile: minutes below an hour, then hours to one decimal. */
 function formatDwell(ms: number): string {
@@ -58,14 +58,25 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
   onSelectServerEnv,
   onSignOut,
 }) => {
-  const { colors, theme, toggleTheme } = useTheme();
+  const { colors, theme } = useTheme();
   const isDark = theme === 'dark';
+  const { session } = useAuthSession();
 
   const [name, setName] = useState(displayName);
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   // undefined while the request is in flight, null once it has failed.
   const [stats, setStats] = useState<MyStats | null | undefined>(undefined);
+
+  const providerLabel =
+    session?.provider === 'microsoft'
+      ? 'Microsoft Entra ID'
+      : session?.provider === 'firebase'
+      ? session.emailVerified !== undefined
+        ? 'Corporate Email'
+        : 'Google Account'
+      : 'SSO Account';
+  const isVerified = session?.emailVerified !== false;
 
   useEffect(() => {
     let cancelled = false;
@@ -97,7 +108,14 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
   // The whole teardown (stop presence, then drop the token, then reset role and navigate) is
   // owned by App.tsx — the ordering matters and only it can see the live presence state.
   const handleSignOut = () => {
-    void onSignOut();
+    AppAlert.alert(
+      'Sign Out',
+      'Are you sure you want to sign out of XConnect?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Sign Out', style: 'destructive', onPress: () => void onSignOut() },
+      ]
+    );
   };
 
   const initials = (name || displayName || 'User')
@@ -250,7 +268,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
         </View>
       </View>
 
-      {/* Preferences Card */}
+      {/* Short Info / Account Details Card */}
       <View
         style={[
           styles.sectionCard,
@@ -258,75 +276,105 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
         ]}
       >
         <Text style={[styles.sectionHeading, { color: colors.sub }]}>
-          SYSTEM PREFERENCES
+          ACCOUNT DETAILS
         </Text>
 
-        <View style={styles.toggleRow}>
-          <View>
-            <Text style={[styles.toggleTitle, { color: colors.txt }]}>Dark Mode</Text>
-            <Text style={[styles.toggleDesc, { color: colors.muted }]}>
-              Toggle between Light and Dark interface
-            </Text>
-          </View>
-          <Switch
-            value={isDark}
-            onValueChange={toggleTheme}
-            trackColor={{
-              false: colors.border,
-              true: 'rgba(51,209,172,0.4)',
-            }}
-            thumbColor={isDark ? palette.mintPresence : colors.sub}
-          />
+        <View style={styles.infoRow}>
+          <Text style={[styles.infoLabel, { color: colors.muted }]}>Full Name</Text>
+          <Text style={[styles.infoValue, { color: colors.txt }]} numberOfLines={1}>
+            {name || displayName || 'XConnect User'}
+          </Text>
         </View>
-      </View>
 
-      {/* Server Environment Card */}
-      <View
-        style={[
-          styles.sectionCard,
-          { backgroundColor: colors.card, borderColor: colors.border },
-        ]}
-      >
-        <Text style={[styles.sectionHeading, { color: colors.sub }]}>
-          BACKEND ENVIRONMENT
-        </Text>
+        <View style={[styles.infoDivider, { backgroundColor: colors.border }]} />
 
-        <View style={styles.serverChipsRow}>
-          {(['cloud', 'local'] as const).map(env => (
-            <TouchableOpacity
-              key={env}
-              onPress={() => onSelectServerEnv(env)}
+        <View style={styles.infoRow}>
+          <Text style={[styles.infoLabel, { color: colors.muted }]}>Email Address</Text>
+          <View style={styles.infoValueRow}>
+            <Text style={[styles.infoValue, { color: colors.txt }]} numberOfLines={1}>
+              {userEmail || 'user@enterprise.io'}
+            </Text>
+            <View
               style={[
-                styles.serverChip,
-                {
-                  backgroundColor:
-                    serverEnv === env
-                      ? 'rgba(51,209,172,0.18)'
-                      : colors.surf,
-                  borderColor:
-                    serverEnv === env ? palette.mintPresence : colors.border,
-                },
+                styles.verifyPill,
+                { backgroundColor: isVerified ? 'rgba(51,209,172,0.15)' : 'rgba(239,68,68,0.15)' },
               ]}
             >
               <Text
                 style={[
-                  styles.serverChipText,
-                  {
-                    color:
-                      serverEnv === env ? palette.mintPresence : colors.sub,
-                    fontWeight: serverEnv === env ? '700' : '500',
-                  },
+                  styles.verifyPillText,
+                  { color: isVerified ? palette.mintPresence : palette.roseError },
                 ]}
               >
-                {env === 'cloud' ? 'Cloud Server' : 'Local LAN (Dev)'}
+                {isVerified ? '✓ Verified' : 'Unverified'}
               </Text>
-            </TouchableOpacity>
-          ))}
+            </View>
+          </View>
         </View>
 
-        <Text style={[styles.serverUrlText, { color: colors.muted }]} numberOfLines={1}>
-          {serverUrl}
+        <View style={[styles.infoDivider, { backgroundColor: colors.border }]} />
+
+        <View style={styles.infoRow}>
+          <Text style={[styles.infoLabel, { color: colors.muted }]}>Account Role</Text>
+          <Text style={[styles.infoValue, { color: palette.mintPresence, fontWeight: '700' }]}>
+            {role === 'presenter'
+              ? 'Presenter (Broadcasting & Hosting)'
+              : role === 'attendee'
+              ? 'Attendee (Presence & Dwell)'
+              : 'Enterprise Admin'}
+          </Text>
+        </View>
+
+        <View style={[styles.infoDivider, { backgroundColor: colors.border }]} />
+
+        <View style={styles.infoRow}>
+          <Text style={[styles.infoLabel, { color: colors.muted }]}>Authentication</Text>
+          <Text style={[styles.infoValue, { color: colors.txt }]}>{providerLabel}</Text>
+        </View>
+
+        <View style={[styles.infoDivider, { backgroundColor: colors.border }]} />
+
+        <View style={styles.infoRow}>
+          <Text style={[styles.infoLabel, { color: colors.muted }]}>Device Identity</Text>
+          <Text style={[styles.infoValue, { color: colors.sub, fontFamily: 'monospace' }]}>
+            {deviceId ? `${deviceId.slice(0, 12)}...` : 'Device Registered'}
+          </Text>
+        </View>
+      </View>
+
+      {/* System & Application Card */}
+      <View
+        style={[
+          styles.sectionCard,
+          { backgroundColor: colors.card, borderColor: colors.border },
+        ]}
+      >
+        <Text style={[styles.sectionHeading, { color: colors.sub }]}>
+          SYSTEM & PRESENCE
         </Text>
+
+        <View style={styles.infoRow}>
+          <Text style={[styles.infoLabel, { color: colors.muted }]}>Application</Text>
+          <Text style={[styles.infoValue, { color: colors.txt }]}>
+            XConnect Mobile v1.0.0
+          </Text>
+        </View>
+
+        <View style={[styles.infoDivider, { backgroundColor: colors.border }]} />
+
+        <View style={styles.infoRow}>
+          <Text style={[styles.infoLabel, { color: colors.muted }]}>Presence Engine</Text>
+          <Text style={[styles.infoValue, { color: palette.mintPresence, fontWeight: '600' }]}>
+            Quad-Sensor Ready (BLE · Audio · WiFi · IMU)
+          </Text>
+        </View>
+
+        <View style={[styles.infoDivider, { backgroundColor: colors.border }]} />
+
+        <View style={styles.infoRow}>
+          <Text style={[styles.infoLabel, { color: colors.muted }]}>Build Status</Text>
+          <Text style={[styles.infoValue, { color: colors.sub }]}>Production Release</Text>
+        </View>
       </View>
 
       {/* Sign Out Button */}
@@ -483,37 +531,38 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     marginBottom: 12,
   },
-  toggleRow: {
+  infoRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-  },
-  toggleTitle: {
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  toggleDesc: {
-    fontSize: 11,
-    marginTop: 2,
-  },
-  serverChipsRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 10,
-  },
-  serverChip: {
-    flex: 1,
     paddingVertical: 10,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    alignItems: 'center',
   },
-  serverChipText: {
+  infoLabel: {
     fontSize: 12,
+    fontWeight: '500',
   },
-  serverUrlText: {
-    fontSize: 11,
-    textAlign: 'center',
+  infoValue: {
+    fontSize: 13,
+    fontWeight: '600',
+    maxWidth: '60%',
+    textAlign: 'right',
+  },
+  infoValueRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  verifyPill: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  verifyPillText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  infoDivider: {
+    height: 1,
   },
   signOutButton: {
     borderWidth: 1.5,

@@ -30,6 +30,7 @@ import { PermissionsScreen } from './src/screens/auth/PermissionsScreen';
 import { LoginScreen } from './src/screens/auth/LoginScreen';
 import { CreateAccountScreen } from './src/screens/auth/CreateAccountScreen';
 import { HomeScreen } from './src/screens/common/HomeScreen';
+import { NotificationsScreen } from './src/screens/common/NotificationsScreen';
 import { ProfileScreen } from './src/screens/common/ProfileScreen';
 import { PresenterSetupScreen } from './src/screens/presenter/PresenterSetupScreen';
 import { PresenterDashboardScreen } from './src/screens/presenter/PresenterDashboardScreen';
@@ -108,6 +109,7 @@ const NAV_SCREENS: MobileScreen[] = [
   'adminCheckIn',
   'diagnostics',
   'edgeState',
+  'notifications',
 ];
 
 function MainApp() {
@@ -1304,6 +1306,14 @@ function MainApp() {
         );
       case 'home':
         return renderHome();
+      case 'notifications':
+        return (
+          <NotificationsScreen
+            invites={myInvites}
+            onRespondToInvite={handleRespondToInvite}
+            onNavigate={nav}
+          />
+        );
       case 'profile':
         return (
           <ProfileScreen
