@@ -7,6 +7,7 @@ import {
   StyleSheet,
   ActivityIndicator,
   ScrollView,
+  Image,
 } from 'react-native';
 import Svg, { Path, Circle } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
@@ -122,19 +123,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
         {/* Header Branding */}
         <View style={styles.header}>
           <View style={styles.logoBadge}>
-            {/* Reproduces assets/icon.svg's glyph (same viewBox/paths, scaled down) rather than
-                importing the .svg directly — Metro isn't configured with an SVG transformer, and
-                every other icon in this codebase is hand-authored react-native-svg JSX already. */}
-            <Svg width={38} height={38} viewBox="0 0 1024 1024">
-              <Path d="M 284 284 L 512 512 L 740 740" fill="none" stroke="#FFFFFF" strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
-              <Path d="M 740 284 L 512 512 L 284 740" fill="none" stroke={palette.mintPresence} strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
-              <Circle cx={284} cy={284} r={102} fill="#FFFFFF" />
-              <Circle cx={740} cy={740} r={102} fill="#FFFFFF" />
-              <Circle cx={740} cy={284} r={102} fill={palette.mintPresence} />
-              <Circle cx={284} cy={740} r={102} fill={palette.mintPresence} />
-              <Circle cx={512} cy={512} r={64} fill="#102A2A" />
-              <Circle cx={512} cy={512} r={24} fill="#FFFFFF" />
-            </Svg>
+            <Image
+              source={require('../../../assets/logo.png')}
+              style={styles.logoImage}
+              resizeMode="contain"
+            />
           </View>
           <Text style={[styles.title, { color: colors.txt }]}>XConnect</Text>
           <Text style={[styles.subtitle, { color: colors.sub }]}>
@@ -301,13 +294,17 @@ const styles = StyleSheet.create({
     marginBottom: 24,
   },
   logoBadge: {
-    width: 60,
-    height: 60,
-    borderRadius: 18,
-    backgroundColor: '#102A2A',
+    width: 64,
+    height: 64,
+    borderRadius: 20,
+    backgroundColor: '#070E18',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 16,
+  },
+  logoImage: {
+    width: 52,
+    height: 52,
   },
   title: {
     fontSize: 22,

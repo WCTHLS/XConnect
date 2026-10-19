@@ -7,6 +7,7 @@ import {
   Animated,
   Easing,
   Dimensions,
+  Image,
 } from 'react-native';
 import Svg, { Path, Circle } from 'react-native-svg';
 import { palette } from '../../theme/colors';
@@ -151,20 +152,11 @@ export const LaunchScreen: React.FC<LaunchScreenProps> = ({ onComplete }) => {
           ]}
         >
           <View style={styles.xLogoBadge}>
-            {/* Reproduces assets/icon.svg's actual glyph (same viewBox/paths as the app icon and
-                the Home/Login badges). The glyph sits on the screen background with no badge
-                behind it; xLogoBadge only reserves the 80x80 box the scale/translate animations
-                are tuned against. */}
-            <Svg width={54} height={54} viewBox="0 0 1024 1024">
-              <Path d="M 284 284 L 512 512 L 740 740" fill="none" stroke="#FFFFFF" strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
-              <Path d="M 740 284 L 512 512 L 284 740" fill="none" stroke={palette.mintPresence} strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
-              <Circle cx={284} cy={284} r={102} fill="#FFFFFF" />
-              <Circle cx={740} cy={740} r={102} fill="#FFFFFF" />
-              <Circle cx={740} cy={284} r={102} fill={palette.mintPresence} />
-              <Circle cx={284} cy={740} r={102} fill={palette.mintPresence} />
-              <Circle cx={512} cy={512} r={64} fill="#102A2A" />
-              <Circle cx={512} cy={512} r={24} fill="#FFFFFF" />
-            </Svg>
+            <Image
+              source={require('../../../assets/logo.png')}
+              style={{ width: 68, height: 68 }}
+              resizeMode="contain"
+            />
           </View>
         </Animated.View>
 

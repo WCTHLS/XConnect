@@ -7,6 +7,7 @@ import {
   ScrollView,
   Animated,
   Easing,
+  Image,
 } from 'react-native';
 import Svg, { Path, Circle, Rect } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
@@ -252,19 +253,11 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       <View style={styles.topBar}>
         <View style={styles.brandRow}>
           <View style={styles.miniLogoBadge}>
-            {/* Reproduces assets/icon.svg's glyph (same viewBox/paths, scaled down) rather than
-                importing the .svg directly — Metro isn't configured with an SVG transformer, and
-                every other icon in this codebase is hand-authored react-native-svg JSX already. */}
-            <Svg width={20} height={20} viewBox="0 0 1024 1024">
-              <Path d="M 284 284 L 512 512 L 740 740" fill="none" stroke="#FFFFFF" strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
-              <Path d="M 740 284 L 512 512 L 284 740" fill="none" stroke={palette.mintPresence} strokeWidth={144} strokeLinecap="round" strokeLinejoin="round" />
-              <Circle cx={284} cy={284} r={102} fill="#FFFFFF" />
-              <Circle cx={740} cy={740} r={102} fill="#FFFFFF" />
-              <Circle cx={740} cy={284} r={102} fill={palette.mintPresence} />
-              <Circle cx={284} cy={740} r={102} fill={palette.mintPresence} />
-              <Circle cx={512} cy={512} r={64} fill="#102A2A" />
-              <Circle cx={512} cy={512} r={24} fill="#FFFFFF" />
-            </Svg>
+            <Image
+              source={require('../../../assets/logo.png')}
+              style={styles.miniLogoImage}
+              resizeMode="contain"
+            />
           </View>
           <Text style={[styles.brandTitle, { color: isDark ? '#FFFFFF' : '#0F2F2C' }]}>
             Connect
@@ -744,10 +737,14 @@ const styles = StyleSheet.create({
   miniLogoBadge: {
     width: 32,
     height: 32,
-    borderRadius: 8,
-    backgroundColor: '#102A2A',
+    borderRadius: 10,
+    backgroundColor: '#070E18',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  miniLogoImage: {
+    width: 26,
+    height: 26,
   },
   brandTitle: {
     fontSize: 18,

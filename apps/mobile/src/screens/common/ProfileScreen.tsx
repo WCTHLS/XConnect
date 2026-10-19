@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -7,13 +7,23 @@ import {
   StyleSheet,
   ScrollView,
   ActivityIndicator,
+  Switch,
+  Platform,
+  PermissionsAndroid,
+  Linking,
 } from 'react-native';
-import Svg, { Path } from 'react-native-svg';
+import Svg, { Path, Rect, Circle } from 'react-native-svg';
 import { useTheme } from '../../theme/useTheme';
 import { palette } from '../../theme/colors';
 import { Role } from '../../components/navigation/BottomNav';
 import { AppAlert } from '../../components/ui/AppAlert';
 import { useAuthSession } from '../../services/auth';
+import {
+  checkBlePermissions,
+  checkAudioPermissions,
+  requestBlePermissions,
+  requestAudioPermissions,
+} from '../../services/presenceService';
 
 /** Compact enough for a stat tile: minutes below an hour, then hours to one decimal. */
 function formatDwell(ms: number): string {
@@ -77,6 +87,85 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
         : 'Google Account'
       : 'SSO Account';
   const isVerified = session?.emailVerified !== false;
+
+  const [permissionsOpen, setPermissionsOpen] = useState(false);
+  const [permissions, setPermissions] = useState<Record<string, boolean>>({
+    bluetooth: false,
+    location: false,
+    microphone: false,
+    wifi: false,
+  });
+
+  const syncPermissions = useCallback(async () => {
+    if (Platform.OS !== 'android') {
+      setPermissions({ bluetooth: true, location: true, microphone: true, wifi: true });
+      return;
+    }
+    try {
+      const [bleOk, audioOk, locOk] = await Promise.all([
+        checkBlePermissions(),
+        checkAudioPermissions(),
+        PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION).catch(() => false),
+      ]);
+      setPermissions({
+        bluetooth: bleOk,
+        microphone: audioOk,
+        location: locOk,
+        wifi: locOk,
+      });
+    } catch {
+      // Fallback
+    }
+  }, []);
+
+  useEffect(() => {
+    void syncPermissions();
+  }, [syncPermissions]);
+
+  const handleTogglePermission = async (key: string, nextVal: boolean) => {
+    if (!nextVal) {
+      setPermissions(prev => ({ ...prev, [key]: false }));
+      AppAlert.alert(
+        'Permission Disabled',
+        `To revoke ${key} access at the system level, you can also update permissions in your device settings.`,
+        [
+          { text: 'Done', style: 'cancel' },
+          { text: 'Device Settings', onPress: () => void Linking.openSettings() },
+        ]
+      );
+      return;
+    }
+
+    let granted = false;
+    if (key === 'bluetooth') {
+      granted = await requestBlePermissions();
+    } else if (key === 'microphone') {
+      granted = await requestAudioPermissions();
+    } else if (key === 'location' || key === 'wifi') {
+      if (Platform.OS === 'android') {
+        const res = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION, {
+          title: 'Location & Wi-Fi Access',
+          message: 'XConnect uses location access for Bluetooth beacon discovery and in-room Wi-Fi identification.',
+          buttonPositive: 'Allow',
+        });
+        granted = res === PermissionsAndroid.RESULTS.GRANTED;
+      } else {
+        granted = true;
+      }
+    }
+
+    setPermissions(prev => ({ ...prev, [key]: granted }));
+    if (!granted) {
+      AppAlert.alert(
+        'Permission Required',
+        `Access for ${key} was not granted. Please enable it in system settings to use zero-hardware presence detection.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Open Settings', onPress: () => void Linking.openSettings() },
+        ]
+      );
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -181,9 +270,26 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                 {name || displayName || 'XConnect User'}
               </Text>
             )}
-            <Text style={[styles.userEmail, { color: colors.muted }]}>
-              {userEmail || 'user@enterprise.io'}
-            </Text>
+            <View style={styles.userEmailRow}>
+              <Text style={[styles.userEmail, { color: colors.muted }]} numberOfLines={1}>
+                {userEmail || 'user@enterprise.io'}
+              </Text>
+              <View
+                style={[
+                  styles.verifyPill,
+                  { backgroundColor: isVerified ? 'rgba(51,209,172,0.15)' : 'rgba(239,68,68,0.15)' },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.verifyPillText,
+                    { color: isVerified ? palette.mintPresence : palette.roseError },
+                  ]}
+                >
+                  {isVerified ? '✓ Verified' : 'Unverified'}
+                </Text>
+              </View>
+            </View>
             <View style={styles.roleTag}>
               <Text style={styles.roleTagText}>{role.toUpperCase()} ACCOUNT</Text>
             </View>
@@ -268,78 +374,179 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
         </View>
       </View>
 
-      {/* Short Info / Account Details Card */}
+      {/* App & Sensor Permissions Accordion Card */}
       <View
         style={[
           styles.sectionCard,
           { backgroundColor: colors.card, borderColor: colors.border },
         ]}
       >
-        <Text style={[styles.sectionHeading, { color: colors.sub }]}>
-          ACCOUNT DETAILS
-        </Text>
-
-        <View style={styles.infoRow}>
-          <Text style={[styles.infoLabel, { color: colors.muted }]}>Full Name</Text>
-          <Text style={[styles.infoValue, { color: colors.txt }]} numberOfLines={1}>
-            {name || displayName || 'XConnect User'}
-          </Text>
-        </View>
-
-        <View style={[styles.infoDivider, { backgroundColor: colors.border }]} />
-
-        <View style={styles.infoRow}>
-          <Text style={[styles.infoLabel, { color: colors.muted }]}>Email Address</Text>
-          <View style={styles.infoValueRow}>
-            <Text style={[styles.infoValue, { color: colors.txt }]} numberOfLines={1}>
-              {userEmail || 'user@enterprise.io'}
-            </Text>
+        <TouchableOpacity
+          activeOpacity={0.7}
+          onPress={() => setPermissionsOpen(prev => !prev)}
+          style={styles.accordionHeaderRow}
+        >
+          <View style={styles.accordionTitleGroup}>
             <View
               style={[
-                styles.verifyPill,
-                { backgroundColor: isVerified ? 'rgba(51,209,172,0.15)' : 'rgba(239,68,68,0.15)' },
+                styles.accordionIconCircle,
+                { backgroundColor: 'rgba(51,209,172,0.15)' },
               ]}
             >
-              <Text
-                style={[
-                  styles.verifyPillText,
-                  { color: isVerified ? palette.mintPresence : palette.roseError },
-                ]}
-              >
-                {isVerified ? '✓ Verified' : 'Unverified'}
+              <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+                <Path
+                  d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
+                  stroke={palette.mintPresence}
+                  strokeWidth={2}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </Svg>
+            </View>
+            <View>
+              <Text style={[styles.accordionTitle, { color: colors.txt }]}>
+                View & Set Permissions
+              </Text>
+              <Text style={[styles.accordionSubtitle, { color: colors.muted }]}>
+                Bluetooth, Wi-Fi, Microphone & Location
               </Text>
             </View>
           </View>
-        </View>
+          <View style={styles.chevronWrap}>
+            <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+              <Path
+                d={permissionsOpen ? "M18 15l-6-6-6 6" : "M6 9l6 6 6-6"}
+                stroke={colors.sub}
+                strokeWidth={2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </Svg>
+          </View>
+        </TouchableOpacity>
 
-        <View style={[styles.infoDivider, { backgroundColor: colors.border }]} />
+        {permissionsOpen && (
+          <View style={styles.accordionContent}>
+            <View style={[styles.infoDivider, { backgroundColor: colors.border }]} />
 
-        <View style={styles.infoRow}>
-          <Text style={[styles.infoLabel, { color: colors.muted }]}>Account Role</Text>
-          <Text style={[styles.infoValue, { color: palette.mintPresence, fontWeight: '700' }]}>
-            {role === 'presenter'
-              ? 'Presenter (Broadcasting & Hosting)'
-              : role === 'attendee'
-              ? 'Attendee (Presence & Dwell)'
-              : 'Enterprise Admin'}
-          </Text>
-        </View>
+            {/* Bluetooth */}
+            <View style={styles.permRow}>
+              <View style={styles.permInfoCol}>
+                <View style={styles.permTitleRow}>
+                  <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                    <Path
+                      d="M6.5 6.5l11 11M17.5 6.5L12 12l5.5 5.5L12 23V1l5.5 5.5"
+                      stroke="#38BDF8"
+                      strokeWidth={2}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </Svg>
+                  <Text style={[styles.permTitle, { color: colors.txt }]}>
+                    Bluetooth (Nearby Devices)
+                  </Text>
+                </View>
+                <Text style={[styles.permDesc, { color: colors.muted }]}>
+                  Broadcast & scan proximity presence tokens
+                </Text>
+              </View>
+              <Switch
+                value={permissions.bluetooth}
+                onValueChange={val => handleTogglePermission('bluetooth', val)}
+                trackColor={{ false: colors.border, true: 'rgba(51,209,172,0.4)' }}
+                thumbColor={permissions.bluetooth ? palette.mintPresence : colors.sub}
+              />
+            </View>
 
-        <View style={[styles.infoDivider, { backgroundColor: colors.border }]} />
+            <View style={[styles.infoDivider, { backgroundColor: colors.border }]} />
 
-        <View style={styles.infoRow}>
-          <Text style={[styles.infoLabel, { color: colors.muted }]}>Authentication</Text>
-          <Text style={[styles.infoValue, { color: colors.txt }]}>{providerLabel}</Text>
-        </View>
+            {/* Location */}
+            <View style={styles.permRow}>
+              <View style={styles.permInfoCol}>
+                <View style={styles.permTitleRow}>
+                  <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                    <Path
+                      d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"
+                      stroke="#34D399"
+                      strokeWidth={2}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <Circle cx={12} cy={10} r={3} stroke="#34D399" strokeWidth={2} />
+                  </Svg>
+                  <Text style={[styles.permTitle, { color: colors.txt }]}>
+                    Location Services
+                  </Text>
+                </View>
+                <Text style={[styles.permDesc, { color: colors.muted }]}>
+                  Required for Bluetooth beacon & Wi-Fi scanning
+                </Text>
+              </View>
+              <Switch
+                value={permissions.location}
+                onValueChange={val => handleTogglePermission('location', val)}
+                trackColor={{ false: colors.border, true: 'rgba(51,209,172,0.4)' }}
+                thumbColor={permissions.location ? palette.mintPresence : colors.sub}
+              />
+            </View>
 
-        <View style={[styles.infoDivider, { backgroundColor: colors.border }]} />
+            <View style={[styles.infoDivider, { backgroundColor: colors.border }]} />
 
-        <View style={styles.infoRow}>
-          <Text style={[styles.infoLabel, { color: colors.muted }]}>Device Identity</Text>
-          <Text style={[styles.infoValue, { color: colors.sub, fontFamily: 'monospace' }]}>
-            {deviceId ? `${deviceId.slice(0, 12)}...` : 'Device Registered'}
-          </Text>
-        </View>
+            {/* Microphone */}
+            <View style={styles.permRow}>
+              <View style={styles.permInfoCol}>
+                <View style={styles.permTitleRow}>
+                  <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                    <Rect x={9} y={3} width={6} height={11} rx={3} stroke="#2DD4BF" strokeWidth={2} />
+                    <Path d="M5 10a7 7 0 0 0 14 0M12 19v3M8 22h8" stroke="#2DD4BF" strokeWidth={2} strokeLinecap="round" />
+                  </Svg>
+                  <Text style={[styles.permTitle, { color: colors.txt }]}>
+                    Microphone (Ultrasonic)
+                  </Text>
+                </View>
+                <Text style={[styles.permDesc, { color: colors.muted }]}>
+                  Decodes inaudible 18.5–19.5 kHz room tokens
+                </Text>
+              </View>
+              <Switch
+                value={permissions.microphone}
+                onValueChange={val => handleTogglePermission('microphone', val)}
+                trackColor={{ false: colors.border, true: 'rgba(51,209,172,0.4)' }}
+                thumbColor={permissions.microphone ? palette.mintPresence : colors.sub}
+              />
+            </View>
+
+            <View style={[styles.infoDivider, { backgroundColor: colors.border }]} />
+
+            {/* Wi-Fi */}
+            <View style={styles.permRow}>
+              <View style={styles.permInfoCol}>
+                <View style={styles.permTitleRow}>
+                  <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                    <Path
+                      d="M5 12.55a11 11 0 0 1 14.08 0M1.42 9a16 16 0 0 1 21.16 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"
+                      stroke="#818CF8"
+                      strokeWidth={2}
+                      strokeLinecap="round"
+                    />
+                  </Svg>
+                  <Text style={[styles.permTitle, { color: colors.txt }]}>
+                    Wi-Fi Network Access
+                  </Text>
+                </View>
+                <Text style={[styles.permDesc, { color: colors.muted }]}>
+                  Verifies room BSSID network fingerprint
+                </Text>
+              </View>
+              <Switch
+                value={permissions.wifi}
+                onValueChange={val => handleTogglePermission('wifi', val)}
+                trackColor={{ false: colors.border, true: 'rgba(51,209,172,0.4)' }}
+                thumbColor={permissions.wifi ? palette.mintPresence : colors.sub}
+              />
+            </View>
+          </View>
+        )}
       </View>
 
       {/* System & Application Card */}
@@ -466,9 +673,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  userEmailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 2,
+  },
   userEmail: {
     fontSize: 12,
-    marginTop: 2,
+    maxWidth: '70%',
   },
   roleTag: {
     backgroundColor: 'rgba(51,209,172,0.12)',
@@ -574,5 +787,62 @@ const styles = StyleSheet.create({
   signOutText: {
     fontSize: 14,
     fontWeight: '700',
+  },
+  accordionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 2,
+  },
+  accordionTitleGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flex: 1,
+  },
+  accordionIconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  accordionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  accordionSubtitle: {
+    fontSize: 11,
+    marginTop: 1,
+  },
+  chevronWrap: {
+    padding: 6,
+  },
+  accordionContent: {
+    marginTop: 10,
+  },
+  permRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 10,
+  },
+  permInfoCol: {
+    flex: 1,
+    paddingRight: 12,
+  },
+  permTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 2,
+  },
+  permTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  permDesc: {
+    fontSize: 11,
+    marginLeft: 24,
   },
 });
