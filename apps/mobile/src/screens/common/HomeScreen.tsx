@@ -735,16 +735,15 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   miniLogoBadge: {
-    width: 32,
-    height: 32,
-    borderRadius: 10,
-    backgroundColor: '#070E18',
+    width: 28,
+    height: 28,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: 'transparent',
   },
   miniLogoImage: {
-    width: 26,
-    height: 26,
+    width: 28,
+    height: 28,
   },
   brandTitle: {
     fontSize: 18,

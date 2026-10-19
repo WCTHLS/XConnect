@@ -252,15 +252,14 @@ const styles = StyleSheet.create({
   logoBadge: {
     width: 64,
     height: 64,
-    borderRadius: 20,
-    backgroundColor: '#070E18',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 16,
+    backgroundColor: 'transparent',
   },
   logoImage: {
-    width: 52,
-    height: 52,
+    width: 64,
+    height: 64,
   },
   title: {
     fontSize: 22,
