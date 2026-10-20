@@ -1052,7 +1052,96 @@ checks in `src/test_persistence.ts` use a fake database; 10 of them fail against
 
 ---
 
-## Open items
+## 15. The company deployment (October 19-20, 2026)
+
+The first load tests against the real company stack, not a scratch copy. The target was the Container
+App `xconnect` in resource group `xconnnect` (South India, 1 vCPU, reserved cores 1), with Postgres
+`xconnect-pg-b1ms` (Burstable B1ms, **West US 2**, so the database is far from the API, as in section 14)
+and the Redis container app in the same environment. The load generator was a separate VM,
+`company-test-vm` (Ubuntu 24.04, Standard D2alds_v6, South India), run from the same region as the API
+as section 9 recommends. Harness: `loadtest-realistic.ts`, defaults otherwise (3 s poll, 10 s batch,
+10 s ramp-up).
+
+**Sign-in was off for the tests.** The harness sends unsigned requests, so `FIREBASE_PROJECT_ID`,
+`AUTH_AUTHORITY` and `AUTH_AUDIENCE` were removed from the container app for the duration and had to be
+restored afterwards. Because of that, **none of these numbers include the cost of verifying sign-in
+tokens**. The tests also wrote fake devices, rooms and stays into the company database, which must be
+wiped before launch.
+
+### The four runs
+
+| Run | Devices | Rooms | Duration | Churn per room per minute | Requests | Errors |
+|---|---|---|---|---|---|---|
+| 1 | 100 | 5 | 150 s | 6 | 6,235 | 0 |
+| 2 | 500 | 1 | 150 s | 6 | 33,518 | 0 |
+| 3 | 700 | 1 | 30 min | 50 | 531,478 | 0 |
+| 4 | 700 | 5 | 30 min | 50 | 494,407 | 0 |
+
+Run 1 was a smoke test: every endpoint had a median of 2 to 3 ms and a p99 of 24 ms or less, except the
+admin overview (p99 77 ms). Run 2 (500 devices in one room): median 1 to 2 ms, p95 about 65 ms on polls
+and batches, p99 about 160 ms, worst request 277 ms.
+
+### The two 30-minute runs at 700 devices (latencies in ms)
+
+| Endpoint | 1 room: p50 / p90 / p95 / p99 / max | 5 rooms: p50 / p90 / p95 / p99 / max |
+|---|---|---|
+| `poll_device` | 1 / 124 / 177 / 214 / 361 | 1 / 5 / 68 / 126 / 277 |
+| `batch` | 2 / 126 / 180 / 219 / 361 | 2 / 5 / 68 / 127 / 284 |
+| `join` | 2 / 41 / 157 / 209 / 270 | 2 / 4 / 62 / 123 / 277 |
+| `leave` | 2 / 28 / 153 / 200 / 240 | 2 / 4 / 62 / 125 / 225 |
+| `poll_room` | 7 / 175 / 275 / 367 / 438 | 5 / 17 / 94 / 184 / 295 |
+| `admin_overview` | 6 / 118 / 203 / 326 / 359 | 12 / 40 / 100 / 213 / 297 |
+
+Churn in run 3 was 869 attendees replaced, 265 returned after going quiet and 284 after leaving. In run 4
+it was 4,069 replaced, 1,344 returned after going quiet and 1,336 after leaving, with 5 presenter
+rejoins: five times the churn of run 3 in total, so about 7,450 joins and 6,100 leaves in 30 minutes.
+
+### Resources (Azure Monitor, the two 30-minute runs)
+
+| Metric | 1 room, 700 | 5 rooms, 700 |
+|---|---|---|
+| Container CPU (max) | about 0.32 to 0.34 cores, flat | about 0.25 to 0.29 cores, flat |
+| Container memory | about 210 to 220 MB, flat, back to about 130 MB afterwards | about 200 MB, flat, back to about 130 MB afterwards |
+| Network Out | about 0.8 GB | about 0.3 GB (the two runs together were 1.1 GB; Network In together 1.4 GB) |
+| Postgres CPU credits remaining | 316, flat | 316, flat |
+| Postgres CPU credits consumed | 0 | 0 |
+| Postgres CPU percent (max) | 19.7% | 20.7% |
+| Postgres memory percent | 57.8% | 58.7% |
+| Postgres active connections (max) | 29 | 31 |
+| Postgres storage percent | 13.15% | 13.24% |
+
+The sharp CPU spike to 0.67 cores before the first run lines up with the server booting on the new
+revision after the sign-in settings were removed (a boot burst), not with load. That is a reading from
+the timing, not something measured.
+
+### What it shows
+
+- **Zero errors across about 1.07 million requests**, in both shapes, at 700 devices.
+- **Flat CPU and memory over 30 minutes.** The container used about a third of one core and about
+  220 MB. There was no climb of the kind section 12 found before the payload fix.
+- **Five rooms are easier than one.** The per-room work grows with the room's size, so five rooms of 140
+  have a much shorter tail (p90 about 5 ms against about 125 ms) than one room of 700, even with five
+  times the churn.
+- **The far database did not show up in request latency.** Joins, leaves and batches (which lead to
+  database writes) had the same medians as polls. This is the effect of the device-write change
+  (section 14) and of writing stays off the request path.
+- **The database is at its baseline, not over it.** B1ms earns CPU credits at about 20% of a core. With
+  five times the churn, CPU percent touched 20.7% and consumed no measurable credits. A longer or much
+  busier event could start spending them, which is the signal to move to a larger size.
+- **Compared with section 12** (scratch stack, 700 in one room for an hour, after the payload fix): p50 2,
+  p90 196, p95 245, p99 288 and worst 2,184 ms, against p50 1 to 2, p90 about 125, p95 about 180, p99
+  about 215 and worst 361 ms here. The runs differ (30 minutes against an hour, different hardware), so
+  this is encouraging, not a precise comparison.
+- **Connections:** peak 31, with one API replica and a pool of 20 (section 4). Each extra replica would
+  add up to 20, so check the server's `max_connections` before scaling out.
+
+### Not tested here
+
+- **Sign-in on.** Token verification and the profile cache add work to every request; not measured.
+- **Runs longer than 30 minutes** on this stack, and more than 700 devices in one room.
+- **A restart under load** (Redis, then the API), which was tested on the scratch stack in section 13 but
+  not on this one.
+- **Real phones** at this scale, and the admin screens on a phone during the run (section 10).
 
 - **The 300 ms p90 at 1000 devices** (section 14). Present with both databases (286 ms near, 322 ms far) and
   with p50 at 3 ms, so about one request in ten waits about 300 ms. It looks like the process stalling
@@ -1119,3 +1208,8 @@ checks in `src/test_persistence.ts` use a fake database; 10 of them fail against
 - **The Container Apps deployment is on a personal trial account** with sign-in off and a public
   address. It needs recreating from `infra/main.bicep` in the company resource group, with a
   Key Vault or other secret store for `databaseUrl` instead of a local parameters file.
+- **Update (October 20): the company deployment exists and has been load tested** (section 15). The
+  personal-trial item above is resolved: the stack runs in the company resource group, with the database
+  password in a local parameters file (Key Vault still not done). The single-room question is now
+  answered for 700 devices for 30 minutes. Still open from section 15: repeat with sign-in on, an hour or
+  more at 700, and a Redis and API restart under load on this stack.
