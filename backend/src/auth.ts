@@ -221,6 +221,35 @@ export function forgetCachedUser(id: string) {
   redis?.del(`${USER_CACHE_PREFIX}${id}`).catch((err) => console.error("[redis] failed to drop cached user:", err));
 }
 
+/**
+ * A deleted account's token stays valid for up to an hour, and resolveUser would write the person's
+ * row straight back on the next request that carried it. So deleting an account leaves a marker: any
+ * token issued before that moment is refused. A new sign-in produces a token issued after it, which
+ * passes (Microsoft accounts can come back; a Firebase account is gone, so a new one has a new id).
+ * The marker outlives a token's lifetime, then drops away by itself.
+ */
+const DELETED_PREFIX = "auth:deleted:";
+const DELETED_TTL_MS = 2 * 60 * 60 * 1000;
+const deletedUsers = new Map<string, number>();
+
+export function markUserDeleted(id: string) {
+  const now = Date.now();
+  for (const [key, at] of deletedUsers) if (now - at > DELETED_TTL_MS) deletedUsers.delete(key);
+  deletedUsers.set(id, now);
+  redis
+    ?.set(`${DELETED_PREFIX}${id}`, String(now), "PX", DELETED_TTL_MS)
+    .catch((err) => console.error("[redis] failed to mark a deleted user:", err));
+}
+
+async function deletedAt(id: string): Promise<number | undefined> {
+  const local = deletedUsers.get(id);
+  if (local && Date.now() - local < DELETED_TTL_MS) return local;
+  if (!redis) return undefined;
+  const raw = await redis.get(`${DELETED_PREFIX}${id}`);
+  const at = raw ? Number(raw) : NaN;
+  return Number.isFinite(at) ? at : undefined;
+}
+
 export async function authenticate(request: Request, response: Response, next: NextFunction) {
   if (!authEnabled) return next();
   if (request.path === "/health" || request.path === "/api/health") return next();
@@ -231,6 +260,11 @@ export async function authenticate(request: Request, response: Response, next: N
 
   try {
     const { payload, provider } = await verifyToken(token);
+    const subject = claimString(payload, "oid", "sub");
+    const removedAt = subject ? await deletedAt(subject) : undefined;
+    if (removedAt !== undefined && (typeof payload.iat === "number" ? payload.iat * 1000 : 0) < removedAt) {
+      return response.status(401).json({ error: "account_deleted" });
+    }
     // The app sends this on the sign-in screens' admin check, before it decides to let the person in.
     const probe = request.headers["x-auth-probe"] === "1";
     request.user = await resolveUser(payload, provider, !probe);

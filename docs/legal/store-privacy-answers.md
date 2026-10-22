@@ -21,6 +21,7 @@ Items marked **DECIDE** need a person to choose. Items marked **CONFIRM** are fa
 - Data in transit is encrypted (HTTPS). Processed by Google (Firebase), Microsoft (Azure, Entra) and the
   Apple and Google push services, all acting on our behalf.
 - Users can delete the account in the app and on a web page (`xconnect-delete-account.html`, to be hosted).
+- On deletion the email, sign-in, push registrations and invitations go at once. The name stays on attendance records for 30 days (a retention job clears it), after which the records are anonymous. The email is not kept (`RETAIN_EMAIL_ON_DELETE` off).
 
 ## Google Play: Data safety form
 

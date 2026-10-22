@@ -13,7 +13,7 @@ import type { ParticipantRole, RoomMemberInfo, LiveRoomState, MyInvite } from '@
 import { getAcousticTokenForRoom } from '@confpresence/shared';
 import { PresenceService, RoomRejectedError, type PresenceStatus } from './src/services/presenceService';
 import { getOrCreateDeviceId } from './src/services/deviceIdentity';
-import { authConfigured, authFetch, discardNewAccount, signOut, useAuthSession } from './src/services/auth';
+import { authConfigured, authFetch, deleteAccount, discardNewAccount, signOut, useAuthSession } from './src/services/auth';
 import { registerForPushNotifications } from './src/services/pushNotifications';
 import type { HistoryDetail, SessionOccurrence } from './src/services/sessionHistory';
 import { ThemeProvider, useTheme } from './src/theme/useTheme';
@@ -51,7 +51,13 @@ import { EdgeStateScreen } from './src/screens/admin/EdgeStateScreen';
 const DEFAULT_SESSION = 'poc-session';
 const DEFAULT_ROOMS = ['Hall A', 'Workshop 1', 'Auditorium', 'Room B'];
 const CLOUD_API_URL = 'https://xconnect.wittyground-955b506b.southindia.azurecontainerapps.io';
-const LOCAL_API_URL = 'http://localhost:3000';
+// For local testing: the address of a backend on this machine, set as EXPO_PUBLIC_LOCAL_API_URL in
+// apps/mobile/.env (ignored by git). It only changes what the "Local" choice points at, and "Cloud"
+// always means the real server, so a build can never show a local address under the Cloud label.
+// A debug build with it set starts on Local; a release build always starts on Cloud.
+const LOCAL_API_FROM_ENV = (process.env.EXPO_PUBLIC_LOCAL_API_URL ?? '').trim().replace(/\/+$/, '');
+const LOCAL_API_URL = LOCAL_API_FROM_ENV || 'http://localhost:3000';
+const START_ON_LOCAL = __DEV__ && LOCAL_API_FROM_ENV !== '';
 const SESSION_ID_KEY = 'xconnect.sessionId_v1';
 const ROLE_KEY = 'xconnect.role_v1';
 
@@ -170,8 +176,8 @@ function MainApp() {
 
   // Backend & Session State
   const [sessionId, setSessionId] = useState(DEFAULT_SESSION);
-  const [serverEnv, setServerEnv] = useState<'cloud' | 'local' | 'custom'>('cloud');
-  const [serverUrl, setServerUrl] = useState(CLOUD_API_URL);
+  const [serverEnv, setServerEnv] = useState<'cloud' | 'local' | 'custom'>(START_ON_LOCAL ? 'local' : 'cloud');
+  const [serverUrl, setServerUrl] = useState(START_ON_LOCAL ? LOCAL_API_URL : CLOUD_API_URL);
   const [serverHealth, setServerHealth] = useState<'checking' | 'online' | 'offline'>('checking');
   const [serverConnected, setServerConnected] = useState<boolean | null>(null);
   const [displayName, setDisplayName] = useState('');
@@ -250,7 +256,7 @@ function MainApp() {
 
   useEffect(() => {
     getOrCreateDeviceId().then(setDeviceId);
-    checkHealth(CLOUD_API_URL);
+    checkHealth(START_ON_LOCAL ? LOCAL_API_URL : CLOUD_API_URL);
     return () => {
       runningRef.current = false;
       void service.stop();
@@ -1011,6 +1017,43 @@ function MainApp() {
   };
 
   /**
+   * Deleting the account tears the live session down the same way signing out does (presence is
+   * stopped first so the leave request still has a valid token), then asks the server to delete the
+   * data and Firebase to delete the sign-in. If Firebase wants a more recent sign-in, the person is
+   * signed out with an explanation and deletes again right after signing back in.
+   */
+  const handleDeleteAccount = async () => {
+    manualSignOutRef.current = true;
+    if (runningRef.current) await togglePresence(false);
+    const result = await deleteAccount(serverUrl);
+
+    if (!result.ok && !result.needsRecentSignIn && !result.signedOut) {
+      // Still signed in, so a later real session loss must still get its alert.
+      manualSignOutRef.current = false;
+      AppAlert.alert('Could not delete your account', result.error ?? 'Try again in a moment.');
+      return;
+    }
+
+    if (!result.ok && result.needsRecentSignIn) await signOut();
+    setRole('attendee');
+    setMyActiveRooms([]);
+    setSessionEndMembers([]);
+    setSessionDurationMs(0);
+    setSessionStartTime(Date.now());
+    setScreen('login');
+    if (result.ok) {
+      AppAlert.alert('Account deleted', 'Your account has been deleted.');
+    } else if (result.signedOut) {
+      AppAlert.alert('Signed out', result.error ?? 'Your session has ended. Sign in again, then try again.');
+    } else {
+      AppAlert.alert(
+        'Sign in again to continue',
+        'For your security, deleting an account needs a recent sign-in. Sign in again, then open Profile and tap Delete account right away.'
+      );
+    }
+  };
+
+  /**
    * Role picked on the sign-in screens, called once sign-in has succeeded. Attendee and presenter
    * are open to everyone and apply at once. Admin is checked with the server first: an account that
    * is not an admin is signed straight back out and the returned message is shown on the sign-in
@@ -1327,6 +1370,7 @@ function MainApp() {
             serverUrl={serverUrl}
             onSelectServerEnv={handleSelectServerEnv}
             onSignOut={handleSignOut}
+            onDeleteAccount={authConfigured ? handleDeleteAccount : undefined}
           />
         );
       case 'presenterSetup':

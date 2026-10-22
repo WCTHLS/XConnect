@@ -1,0 +1,1 @@
+ALTER TABLE "room_membership" ADD COLUMN "attendee_saved_at" timestamp with time zone;

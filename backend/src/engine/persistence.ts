@@ -173,10 +173,25 @@ export class EnginePersistenceManager {
     );
   }
 
+  /** Stay writes that have been started but have not reached Postgres yet. See settle(). */
+  private readonly inFlightMemberships = new Set<Promise<void>>();
+
   persistClosedMembership(key: string, membership: RoomMembershipRecord) {
     if (!this.db) return;
-    this.persistClosedMembershipInternal(key, membership).catch((err) =>
-      console.error("[db] failed to persist closed room_membership:", err)
-    );
+    const write: Promise<void> = this.persistClosedMembershipInternal(key, membership)
+      .catch((err) => console.error("[db] failed to persist closed room_membership:", err))
+      .finally(() => this.inFlightMemberships.delete(write));
+    this.inFlightMemberships.add(write);
+  }
+
+  /**
+   * Resolves once every stay write started so far has finished (or failed and been logged).
+   * Deleting an account needs this: a stay that was just closed is written in the background with a
+   * foreign key to the user's row, so the row must not be deleted until that insert has landed.
+   */
+  async settle(): Promise<void> {
+    while (this.inFlightMemberships.size > 0) {
+      await Promise.all([...this.inFlightMemberships]);
+    }
   }
 }

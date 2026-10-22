@@ -70,6 +70,26 @@ export async function registerInstallation(
 }
 
 /**
+ * Removes devices from the hub, for account deletion. Does nothing when push is not configured, and
+ * a device the hub no longer knows is not an error. Returns how many removals failed so the caller
+ * can log it; the account is deleted either way.
+ */
+export async function unregisterInstallations(installationIds: string[]): Promise<number> {
+  if (!client || installationIds.length === 0) return 0;
+  let failed = 0;
+  for (const id of new Set(installationIds)) {
+    try {
+      await client.deleteInstallation(id);
+    } catch (err: any) {
+      if (err?.statusCode === 404) continue;
+      failed++;
+      console.error(`[push] could not remove installation ${id}:`, err?.message ?? err);
+    }
+  }
+  return failed;
+}
+
+/**
  * Sends one plain notification to every device tagged with any of the given emails.
  * Dispatches to both Android (FCM v1) and iOS (APNs) in parallel so all registered devices receive it.
  */

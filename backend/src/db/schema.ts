@@ -156,6 +156,16 @@ export const roomMembership = pgTable(
       .references(() => devices.deviceId),
     // Nullable: rows from before accounts existed have no user.
     userId: text("user_id").references(() => users.id),
+    // A copy of the person's name (and optionally email) taken when they delete their account, so
+    // attendance reports for past events stay complete after the users row is gone. Null for every
+    // stay of an account that still exists: the name comes from users then. A later retention job
+    // clears these after the retention period.
+    attendeeName: text("attendee_name"),
+    attendeeEmail: text("attendee_email"),
+    // When the account was deleted and those two were saved. The retention job clears them once this is
+    // older than the retention period, and keeps this timestamp so a stay that was anonymized can be
+    // told apart from one that never had an account.
+    attendeeSavedAt: timestamp("attendee_saved_at", { withTimezone: true }),
     role: text("role").notNull(),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
     endedAt: timestamp("ended_at", { withTimezone: true }),

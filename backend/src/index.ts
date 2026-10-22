@@ -3,11 +3,13 @@ import cors from "cors";
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, notInArray, or, sql } from "drizzle-orm";
 import express from "express";
 import { z } from "zod";
-import { authEnabled, authenticate, forgetCachedUser, requireAdmin } from "./auth.js";
+import { deleteAccountData } from "./accountDeletion.js";
+import { authEnabled, authenticate, forgetCachedUser, markUserDeleted, requireAdmin } from "./auth.js";
 import { db, schema, type Db } from "./db/index.js";
 import { PocInferenceEngine } from "./inference.js";
-import { pushEnabled, registerInstallation, sendToEmails } from "./notifications.js";
+import { pushEnabled, registerInstallation, sendToEmails, unregisterInstallations } from "./notifications.js";
 import { redis } from "./redis/index.js";
+import { startRetentionJob } from "./retention.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? process.env.API_PORT ?? 3000);
@@ -15,6 +17,14 @@ const port = Number(process.env.PORT ?? process.env.API_PORT ?? 3000);
 // second backend process (a leftover local test server, say) can never silently stomp on this one's
 // checkpoint by sharing the same keys — exactly what happened once during this feature's own testing.
 const engine = new PocInferenceEngine({ db, redis, instanceId: String(port) });
+
+// When an account is deleted its attendance stays are kept (reports for past events stay complete),
+// with the person's name copied onto them. The email is copied too only when this is set to "true".
+const RETAIN_EMAIL_ON_DELETE = process.env.RETAIN_EMAIL_ON_DELETE === "true";
+// What reports show for a stay of a deleted account once its saved name has been cleared.
+const FORMER_ATTENDEE = "Former attendee";
+// ...and cleared again by this job after DELETED_NAME_RETENTION_DAYS (30 by default). See retention.ts.
+if (db) startRetentionJob(db);
 
 console.log(db ? "🗄️  Postgres persistence enabled" : "⚠️  No DATABASE_URL set — running in-memory only (POC mode)");
 console.log(redis ? "🧷 Redis checkpointing enabled — engine state survives a restart" : "⚠️  No REDIS_URL set — engine state won't survive a restart (POC mode)");
@@ -122,6 +132,44 @@ app.patch("/api/me", async (request, response) => {
 
   console.log(`\u{270F}\u{FE0F}  [NAME] ${request.user.email || request.user.id} is now '${preferredName ?? request.user.accountName}'`);
   return response.json({ authEnabled, ...request.user, name: preferredName ?? request.user.accountName });
+});
+
+// Deletes the signed-in person's data: see deleteAccountData for exactly what goes and what is kept.
+// The app calls this first and then deletes the sign-in at the identity provider, in that order so
+// that a failure leaves the person able to sign in and try again. Safe to call twice. A retry made
+// with the same token gets 401 account_deleted, which the app treats as "already done".
+app.delete("/api/me", async (request, response) => {
+  if (!request.user) return response.status(401).json({ error: "unauthenticated" });
+  const userId = request.user.id;
+  const onDeleted = (id: string) => {
+    forgetCachedUser(id);
+    markUserDeleted(id);
+  };
+
+  try {
+    if (!db) {
+      // No database: only the live engine holds anything about this person.
+      engine.leaveAllDevicesOf(userId);
+      onDeleted(userId);
+      return response.json({ ok: true });
+    }
+    const result = await deleteAccountData({
+      db,
+      engine,
+      userId,
+      retainEmail: RETAIN_EMAIL_ON_DELETE,
+      unregister: unregisterInstallations,
+      onDeleted
+    });
+    console.log(
+      `\u{1F5D1}\u{FE0F}  [ACCOUNT] deleted ${userId}: ${result.stays} stays kept, ${result.invitations} invitations and ` +
+        `${result.pushRegistrations} push registrations removed${result.hubFailures ? `, ${result.hubFailures} hub removals failed` : ""}`
+    );
+    return response.json({ ok: true, ...result });
+  } catch (err) {
+    console.error("[account] deletion failed:", err);
+    return response.status(500).json({ error: "deletion_failed" });
+  }
 });
 
 // Called once after sign-in (and again whenever the push token changes) so this device can
@@ -1133,6 +1181,8 @@ app.get("/api/admin/sessions", async (request, response) => {
           role: schema.roomMembership.role,
           displayName: schema.devices.displayName,
           userName: schema.users.displayName,
+          attendeeName: schema.roomMembership.attendeeName,
+          attendeeSavedAt: schema.roomMembership.attendeeSavedAt,
           preferredName: schema.users.preferredName,
           startedAt: schema.roomMembership.startedAt,
           endedAt: schema.roomMembership.endedAt
@@ -1154,7 +1204,7 @@ app.get("/api/admin/sessions", async (request, response) => {
   for (const m of membershipRows) {
     if (m.role === "presenter") {
       const set = hostsByRoom.get(m.roomId) ?? new Set<string>();
-      set.add(m.preferredName || m.userName || m.displayName || m.deviceId);
+      set.add(m.preferredName || m.userName || m.attendeeName || m.displayName || (m.attendeeSavedAt ? FORMER_ATTENDEE : m.deviceId));
       hostsByRoom.set(m.roomId, set);
     } else {
       const set = attendeesByRoom.get(m.roomId) ?? new Set<string>();
@@ -1248,6 +1298,9 @@ async function buildRoomHistory(db: Db, roomOccurrenceId: string) {
       deviceId: schema.roomMembership.deviceId,
       userId: schema.roomMembership.userId,
       userName: schema.users.displayName,
+      attendeeName: schema.roomMembership.attendeeName,
+      attendeeEmail: schema.roomMembership.attendeeEmail,
+      attendeeSavedAt: schema.roomMembership.attendeeSavedAt,
       preferredName: schema.users.preferredName,
       email: schema.users.email,
       displayName: schema.devices.displayName,
@@ -1313,8 +1366,9 @@ async function buildRoomHistory(db: Db, roomOccurrenceId: string) {
     // Group by person when there's an account, so several leaves and joins (or a new phone)
     // total up as one attendee; older rows without a user fall back to the device.
     deviceId: m.userId ?? m.deviceId,
-    email: m.email ?? undefined,
-    displayName: m.preferredName || m.userName || m.displayName || m.deviceId,
+    // A deleted account's stays carry a saved copy of the name (and email, if the server keeps it).
+    email: m.email ?? m.attendeeEmail ?? undefined,
+    displayName: m.preferredName || m.userName || m.attendeeName || m.displayName || (m.attendeeSavedAt ? FORMER_ATTENDEE : m.deviceId),
     role: m.role,
     startedAt: m.startedAt,
     endedAt: m.endedAt,

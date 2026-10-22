@@ -54,6 +54,8 @@ interface ProfileScreenProps {
   serverUrl: string;
   onSelectServerEnv: (env: 'cloud' | 'local' | 'custom', customUrl?: string) => void;
   onSignOut: () => Promise<void>;
+  /** Deletes the account. Only offered when it is passed, and the teardown is App.tsx's, like sign-out. */
+  onDeleteAccount?: () => Promise<void>;
 }
 
 export const ProfileScreen: React.FC<ProfileScreenProps> = ({
@@ -67,6 +69,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
   serverUrl,
   onSelectServerEnv,
   onSignOut,
+  onDeleteAccount,
 }) => {
   const { colors, theme } = useTheme();
   const isDark = theme === 'dark';
@@ -203,6 +206,22 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
       [
         { text: 'Cancel', style: 'cancel' },
         { text: 'Sign Out', style: 'destructive', onPress: () => void onSignOut() },
+      ]
+    );
+  };
+
+  // Keep this wording in line with the server's retention setting and the privacy policy: the name
+  // stays on attendance reports for DELETED_NAME_RETENTION_DAYS (30); the email stays too only if
+  // RETAIN_EMAIL_ON_DELETE is on (off by default, which is what the text below says).
+  const handleDeleteAccount = () => {
+    if (!onDeleteAccount) return;
+    AppAlert.alert(
+      'Delete your account?',
+      'This permanently deletes your account, your email address and your sign-in. It cannot be undone.\n\n' +
+        'Your email address is deleted right away. Your name stays on the attendance reports of events you took part in for 30 days, so organizers can finish them, and is then removed.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete account', style: 'destructive', onPress: () => void onDeleteAccount() },
       ]
     );
   };
@@ -594,6 +613,19 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
           Sign Out
         </Text>
       </TouchableOpacity>
+
+      {/* Delete Account: a quiet text button, apart from Sign Out so it is not tapped by mistake */}
+      {onDeleteAccount && session ? (
+        <TouchableOpacity
+          activeOpacity={0.7}
+          onPress={handleDeleteAccount}
+          accessibilityRole="button"
+          accessibilityLabel="Delete account"
+          style={styles.deleteAccountButton}
+        >
+          <Text style={[styles.deleteAccountText, { color: colors.muted }]}>Delete account</Text>
+        </TouchableOpacity>
+      ) : null}
     </ScrollView>
   );
 };
@@ -787,6 +819,16 @@ const styles = StyleSheet.create({
   signOutText: {
     fontSize: 14,
     fontWeight: '700',
+  },
+  deleteAccountButton: {
+    alignItems: 'center',
+    paddingVertical: 16,
+    marginTop: 10,
+  },
+  deleteAccountText: {
+    fontSize: 13,
+    fontWeight: '600',
+    textDecorationLine: 'underline',
   },
   accordionHeaderRow: {
     flexDirection: 'row',

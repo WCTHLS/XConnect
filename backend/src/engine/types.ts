@@ -96,6 +96,8 @@ export type RoomMembershipRecord = {
  */
 export type RecentlyLeftRecord = {
   deviceId: string;
+  /** The account the stay belonged to, so deleting that account can remove this entry. */
+  userId?: string;
   displayName?: string;
   email?: string;
   startedAt: number;

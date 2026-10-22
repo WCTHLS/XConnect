@@ -473,6 +473,38 @@ export class PocInferenceEngine {
     this.batchesByDevice.delete(deviceId);
   }
 
+  /**
+   * Lets the live engine forget a person, for account deletion. Every phone they were using leaves
+   * (a host's leave ends their room, an attendee's closes their stay), any stay still open under
+   * their id is closed, and they are removed from the in-memory "Left" lists, which hold a name and
+   * an email. The closed stays are written to Postgres in the background, so the caller waits for
+   * persistence.settle() before touching the database. Returns the device ids that were released.
+   */
+  leaveAllDevicesOf(userId: string): string[] {
+    const deviceIds = [...this.devices.values()].filter((d) => d.userId === userId).map((d) => d.deviceId);
+    for (const deviceId of deviceIds) this.leave(deviceId);
+
+    const now = Date.now();
+    for (const [key, membership] of [...this.roomMembership.entries()]) {
+      if (membership.userId !== userId) continue;
+      const deviceId = key.slice(membership.roomId.length + 2);
+      if (!deviceIds.includes(deviceId)) deviceIds.push(deviceId);
+      this.closeMembershipAsLeft(key, membership, now);
+    }
+
+    for (const left of this.recentlyLeftByRoom.values()) {
+      for (const [deviceId, entry] of [...left.entries()]) {
+        if (entry.userId === userId || deviceIds.includes(deviceId)) left.delete(deviceId);
+      }
+    }
+    return deviceIds;
+  }
+
+  /** Resolves once the stays closed so far have reached Postgres. See leaveAllDevicesOf. */
+  settlePersistence(): Promise<void> {
+    return this.persistence.settle();
+  }
+
   setUwbToken(deviceId: string, discoveryTokenBase64: string) {
     const current = this.devices.get(deviceId);
     this.devices.set(deviceId, {
@@ -924,6 +956,7 @@ export class PocInferenceEngine {
     }
     left.set(deviceId, {
       deviceId,
+      userId: membership.userId,
       displayName: device?.displayName,
       email: device?.email,
       startedAt: membership.startedAt,

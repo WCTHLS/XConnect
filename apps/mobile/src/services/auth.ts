@@ -58,7 +58,7 @@ function getDiscovery() {
   return discoveryPromise;
 }
 
-function decodeClaims(idToken: string): { name?: string; email?: string; emailVerified?: boolean } {
+function parseClaims(idToken: string): Record<string, any> | undefined {
   try {
     let payload = idToken.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
     // JWT segments are unpadded base64url; atob requires a length that's a multiple of 4.
@@ -69,7 +69,22 @@ function decodeClaims(idToken: string): { name?: string; email?: string; emailVe
         .map((c) => "%" + c.charCodeAt(0).toString(16).padStart(2, "0"))
         .join("")
     );
-    const claims = JSON.parse(json);
+    return JSON.parse(json);
+  } catch {
+    return undefined;
+  }
+}
+
+/** When the person last typed their credentials (Firebase's auth_time claim, which survives token refreshes), in ms. */
+function authTimeMs(idToken: string): number | undefined {
+  const value = parseClaims(idToken)?.auth_time;
+  return typeof value === "number" ? value * 1000 : undefined;
+}
+
+function decodeClaims(idToken: string): { name?: string; email?: string; emailVerified?: boolean } {
+  try {
+    const claims = parseClaims(idToken);
+    if (!claims) return {};
     const email = [claims.email, claims.emails, claims.preferred_username].flat().find((v) => typeof v === "string");
     return {
       name: typeof claims.name === "string" ? claims.name : undefined,
@@ -129,7 +144,9 @@ async function firebasePost(path: string, body: Record<string, unknown>) {
   if (!res.ok) {
     const code = String(data?.error?.message ?? "");
     if (code.startsWith("WEAK_PASSWORD")) throw new Error("Password must be at least 6 characters.");
-    throw new Error(FIREBASE_ERRORS[code.split(" ")[0]] ?? "Something went wrong. Try again.");
+    const failure: Error & { code?: string } = new Error(FIREBASE_ERRORS[code.split(" ")[0]] ?? "Something went wrong. Try again.");
+    failure.code = code.split(" ")[0];
+    throw failure;
   }
   return data;
 }
@@ -359,6 +376,68 @@ export async function discardNewAccount() {
 export async function signOut() {
   await persist(null);
   publish(null);
+}
+
+// Firebase only deletes a sign-in shortly after the person signed in. Asking before anything is
+// deleted spares them a half-finished deletion.
+const RECENT_SIGN_IN_MS = 4 * 60_000;
+
+export type DeleteAccountResult =
+  | { ok: true }
+  | { ok: false; needsRecentSignIn?: boolean; /** The session was no good and the person has been signed out. */ signedOut?: boolean; error?: string };
+
+/**
+ * Deletes the person's account: first their data on our server, then their sign-in at Firebase, then
+ * the session on this phone. In that order, so that if the sign-in cannot be deleted they can still
+ * sign in and try again (the other way round would leave data with nobody able to reach it).
+ * A Microsoft account has no Firebase sign-in to delete: the data and this phone's session go, and
+ * their Microsoft account itself is untouched.
+ *
+ * `needsRecentSignIn` means the person must sign in again and retry straight away.
+ */
+export async function deleteAccount(serverUrl: string): Promise<DeleteAccountResult> {
+  if (!session) return { ok: false, error: "You are not signed in." };
+  const provider = session.provider;
+
+  if (provider === "firebase") {
+    const signedInAt = authTimeMs(session.idToken);
+    if (signedInAt !== undefined && Date.now() - signedInAt > RECENT_SIGN_IN_MS) return { ok: false, needsRecentSignIn: true };
+  }
+
+  const token = await getIdToken();
+  if (!token) return { ok: false, signedOut: true, error: "Your session has ended. Sign in again, then try again." };
+
+  try {
+    // Not authFetch: a 401 there signs the person out, and here "account_deleted" means a retry of
+    // a deletion that already went through, which should carry on to the next step.
+    const res = await fetch(`${serverUrl}/api/me`, { method: "DELETE", headers: { authorization: `Bearer ${token}` } });
+    if (res.status === 401) {
+      const body = await res.json().catch(() => ({}));
+      if (body?.error !== "account_deleted") {
+        await signOut();
+        return { ok: false, signedOut: true, error: "Your session has ended. Sign in again, then try again." };
+      }
+    } else if (!res.ok) {
+      return { ok: false, error: "We could not delete your account right now. Try again in a moment." };
+    }
+  } catch {
+    return { ok: false, error: "Could not reach the server. Check your connection and try again." };
+  }
+
+  if (provider === "firebase") {
+    try {
+      await firebasePost("accounts:delete", { idToken: token });
+    } catch (err: any) {
+      // Already gone counts as done.
+      if (err?.code !== "USER_NOT_FOUND") {
+        if (err?.code === "CREDENTIAL_TOO_OLD_LOGIN_REQUIRED") return { ok: false, needsRecentSignIn: true };
+        return { ok: false, error: "Your data was deleted, but we could not remove your sign-in. Try again." };
+      }
+    }
+  }
+
+  await signOut();
+  return { ok: true };
 }
 
 /** A valid ID token, refreshed first if it is about to expire. Returns undefined when signed out. */

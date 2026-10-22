@@ -92,6 +92,20 @@
       "when": 1790906357043,
       "tag": "0012_tough_thunderball",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1792627852486,
+      "tag": "0013_attendee_snapshot",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1792651455684,
+      "tag": "0014_attendee_saved_at",
+      "breakpoints": true
     }
   ]
 }
